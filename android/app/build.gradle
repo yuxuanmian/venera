@@ -5,7 +5,7 @@ plugins {
     id "dev.flutter.flutter-gradle-plugin"
 }
 
-ext.abiCodes = ["armeabi-v7a": 1, "arm64-v8a": 2, "x86_64": 3]
+ext.abiCodes = ["arm64-v8a": 2]
 
 def localProperties = new Properties()
 def localPropertiesFile = rootProject.file("local.properties")
@@ -40,12 +40,12 @@ android {
         }
     }
 
-    splits{
+    splits {
         abi {
             reset()
-            include 'armeabi-v7a', 'arm64-v8a', 'x86_64'
+            include 'arm64-v8a'
             enable true
-            universalApk true
+            universalApk false
         }
     }
 
@@ -87,13 +87,13 @@ android {
             minifyEnabled true
             shrinkResources true
             ndk {
-                abiFilters "armeabi-v7a", "arm64-v8a", "x86_64"
+                abiFilters "arm64-v8a"
             }
             signingConfig signingConfigs.release
         }
         debug {
             ndk {
-                abiFilters "armeabi-v7a", "arm64-v8a", "x86_64"
+                abiFilters "arm64-v8a"
             }
             signingConfig signingConfigs.debug
         }

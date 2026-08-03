@@ -829,7 +829,7 @@ class ComicSourceParser {
         try {
           await JsEngine().runCode("""
             ComicSource.sources.$_key.favorites.addOrDelFavorite(
-              ${jsonEncode(comicId)}, ${jsonEncode(folderId)}, ${jsonEncode(isAdding)})
+              ${jsonEncode(comicId)}, ${jsonEncode(folderId)}, ${jsonEncode(isAdding)}, ${jsonEncode(favId)})
           """);
           return const Res(true);
         } catch (e, s) {

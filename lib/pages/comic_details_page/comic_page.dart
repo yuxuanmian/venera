@@ -19,8 +19,6 @@ import 'package:venera/foundation/image_provider/cached_image.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/network/download.dart';
-import 'package:venera/network/cache.dart';
-import 'package:venera/pages/favorites/favorites_page.dart';
 import 'package:venera/pages/reader/reader.dart';
 import 'package:venera/utils/file_type.dart';
 import 'package:venera/utils/io.dart';
@@ -245,10 +243,6 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     if (comicSource == null) {
       return const Res.error('Comic source not found');
     }
-    isAddToLocalFav = LocalFavoritesManager().isExist(
-      widget.id,
-      ComicType(widget.sourceKey.hashCode),
-    );
     history = HistoryManager().find(
       widget.id,
       ComicType(widget.sourceKey.hashCode),
@@ -259,14 +253,28 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   @override
   Future<void> onDataLoaded() async {
     isLiked = comic.isLiked ?? false;
-    isFavorite = comic.isFavorite ?? false;
+    isFavorite =
+        comic.isFavorite ??
+        NetworkFavoriteCacheManager().isFavoriteKnown(
+          comic.sourceKey,
+          comic.id,
+        );
     // For sources with multi-folder favorites, prefer querying folders to get accurate favorite status
     // Some sources may not set isFavorite reliably when multi-folder is enabled
     if (comicSource.favoriteData?.loadFolders != null && comicSource.isLogged) {
       var res = await comicSource.favoriteData!.loadFolders!(comic.id);
       if (!res.error) {
+        NetworkFavoriteCacheManager().cacheFolderSnapshot(
+          comic.sourceKey,
+          res.data,
+        );
         if (res.subData is List) {
           var list = List<String>.from(res.subData);
+          NetworkFavoriteCacheManager().replaceComicMembership(
+            comic.sourceKey,
+            comic.id,
+            list,
+          );
           isFavorite = list.isNotEmpty;
           update();
         }
@@ -399,15 +407,15 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
                   onPressed: likeOrUnlike,
                   iconColor: context.useTextColor(Colors.red),
                 ),
-              _ActionButton(
-                icon: const Icon(Icons.bookmark_outline_outlined),
-                activeIcon: const Icon(Icons.bookmark),
-                isActive: isFavorite || isAddToLocalFav,
-                text: 'Favorite'.tl,
-                onPressed: openFavPanel,
-                onLongPressed: quickFavorite,
-                iconColor: context.useTextColor(Colors.purple),
-              ),
+              if (comicSource.favoriteData != null)
+                _ActionButton(
+                  icon: const Icon(Icons.bookmark_outline_outlined),
+                  activeIcon: const Icon(Icons.bookmark),
+                  isActive: isFavorite,
+                  text: 'Favorite'.tl,
+                  onPressed: openFavPanel,
+                  iconColor: context.useTextColor(Colors.purple),
+                ),
               if (comicSource.commentsLoader != null)
                 _ActionButton(
                   icon: const Icon(Icons.comment),
@@ -785,7 +793,6 @@ class _ActionButton extends StatelessWidget {
     required this.icon,
     required this.text,
     required this.onPressed,
-    this.onLongPressed,
     this.activeIcon,
     this.isActive,
     this.isLoading,
@@ -806,8 +813,6 @@ class _ActionButton extends StatelessWidget {
 
   final Color? iconColor;
 
-  final void Function()? onLongPressed;
-
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -825,7 +830,6 @@ class _ActionButton extends StatelessWidget {
             onPressed();
           }
         },
-        onLongPress: onLongPressed,
         borderRadius: BorderRadius.circular(18),
         child: IconTheme.merge(
           data: IconThemeData(size: 20, color: iconColor),

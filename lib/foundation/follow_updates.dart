@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/utils/channel.dart';
@@ -11,8 +12,21 @@ class ComicUpdateResult {
   ComicUpdateResult(this.updated, this.errorMessage);
 }
 
+/// A date alone misses multiple releases on the same day. A chapter count
+/// gives sources without a date a stable signal as well.
+String? comicUpdateMarker(ComicDetails info) {
+  final values = <String>[];
+  final updateTime = info.findUpdateTime();
+  if (updateTime != null) values.add('time:$updateTime');
+  final chapterCount = info.chapters?.length;
+  if (chapterCount != null) values.add('chapters:$chapterCount');
+  return values.isEmpty ? null : values.join('|');
+}
+
 Future<ComicUpdateResult> updateComic(
-    FavoriteItemWithUpdateInfo c, String folder) async {
+  FavoriteItemWithUpdateInfo c,
+  NetworkFavoriteFolderRef folder,
+) async {
   int retries = 3;
   while (true) {
     try {
@@ -20,46 +34,26 @@ Future<ComicUpdateResult> updateComic(
       if (comicSource == null) {
         return ComicUpdateResult(false, "Comic source not found");
       }
+      if (comicSource.loadComicInfo == null) {
+        return ComicUpdateResult(false, 'Comic source does not load details');
+      }
       var newInfo = (await comicSource.loadComicInfo!(c.id)).data;
 
-      var newTags = <String>[];
-      for (var entry in newInfo.tags.entries) {
-        const shouldIgnore = ['author', 'artist', 'time'];
-        var namespace = entry.key;
-        if (shouldIgnore.contains(namespace.toLowerCase())) {
-          continue;
-        }
-        for (var tag in entry.value) {
-          newTags.add("$namespace:$tag");
-        }
-      }
-
-      var item = FavoriteItem(
-        id: c.id,
-        name: newInfo.title,
-        coverPath: newInfo.cover,
-        author: newInfo.subTitle ??
-            newInfo.tags['author']?.firstOrNull ??
-            c.author,
-        type: c.type,
-        tags: newTags,
+      final author = newInfo.subTitle?.trim();
+      NetworkFavoriteCacheManager().updateBasicInfo(
+        folder,
+        c.id,
+        title: newInfo.title,
+        author: author?.isNotEmpty == true ? author : newInfo.findAuthor(),
+        chapterCount: newInfo.chapters?.length,
       );
 
-      LocalFavoritesManager().updateInfo(folder, item, false);
-
-      var updated = false;
-      var updateTime = newInfo.findUpdateTime();
-      if (updateTime != null && updateTime != c.updateTime) {
-        LocalFavoritesManager().updateUpdateTime(
-          folder,
-          c.id,
-          c.type,
-          updateTime,
-        );
-        updated = true;
-      } else {
-        LocalFavoritesManager().updateCheckTime(folder, c.id, c.type);
-      }
+      final updated = NetworkFavoriteCacheManager().recordComicCheck(
+        folder,
+        c.id,
+        updateTime: newInfo.findUpdateTime(),
+        updateMarker: comicUpdateMarker(newInfo),
+      );
       return ComicUpdateResult(updated, null);
     } catch (e, s) {
       Log.error("Check Updates", e, s);
@@ -80,20 +74,27 @@ class UpdateProgress {
   final FavoriteItemWithUpdateInfo? comic;
   final String? errorMessage;
 
-  UpdateProgress(this.total, this.current, this.errors, this.updated,
-      [this.comic, this.errorMessage]);
+  UpdateProgress(
+    this.total,
+    this.current,
+    this.errors,
+    this.updated, [
+    this.comic,
+    this.errorMessage,
+  ]);
 }
 
 void updateFolderBase(
-  String folder,
+  NetworkFavoriteFolderRef folder,
   StreamController<UpdateProgress> stream,
   bool ignoreCheckTime,
 ) async {
-  var comics = LocalFavoritesManager().getComicsWithUpdatesInfo(folder);
+  var comics = NetworkFavoriteCacheManager().getComicsWithUpdatesInfo(folder);
   int total = comics.length;
   int current = 0;
   int errors = 0;
   int updated = 0;
+  int checked = 0;
 
   stream.add(UpdateProgress(total, current, errors, updated));
 
@@ -152,8 +153,19 @@ void updateFolderBase(
         }
         if (result.errorMessage != null) {
           errors++;
+        } else {
+          checked++;
         }
-        stream.add(UpdateProgress(total, current, errors, updated, comic, result.errorMessage));
+        stream.add(
+          UpdateProgress(
+            total,
+            current,
+            errors,
+            updated,
+            comic,
+            result.errorMessage,
+          ),
+        );
       }
     }();
     updateFutures.add(f);
@@ -161,31 +173,38 @@ void updateFolderBase(
 
   await Future.wait(updateFutures);
 
-  if (updated > 0) {
-    LocalFavoritesManager().notifyChanges();
+  if (checked > 0) {
+    NetworkFavoriteCacheManager().notifyCacheChanged();
   }
 
   stream.close();
 }
 
-
-Stream<UpdateProgress> updateFolder(String folder, bool ignoreCheckTime) {
+Stream<UpdateProgress> updateFolder(
+  NetworkFavoriteFolderRef folder,
+  bool ignoreCheckTime,
+) {
   var stream = StreamController<UpdateProgress>();
   updateFolderBase(folder, stream, ignoreCheckTime);
   return stream.stream;
 }
 
-Future<String> getUpdatedComicsAsJson(String folder) async {
-  var comics = LocalFavoritesManager().getComicsWithUpdatesInfo(folder);
+Future<String> getUpdatedComicsAsJson(NetworkFavoriteFolderRef folder) async {
+  var comics = NetworkFavoriteCacheManager().getComicsWithUpdatesInfo(folder);
   var updatedComics = comics.where((c) => c.hasNewUpdate).toList();
-  var jsonList = updatedComics.map((c) => {
-    'id': c.id,
-    'name': c.name,
-    'coverUrl': c.coverPath,
-    'author': c.author,
-    'type': c.type.sourceKey,
-    'updateTime': c.updateTime,
-    'tags': c.tags,
-  }).toList();
+  var jsonList = updatedComics
+      .map(
+        (c) => {
+          'id': c.id,
+          'name': c.name,
+          'coverUrl': c.coverPath,
+          'author': c.author,
+          'chapterCount': c.chapterCount,
+          'type': c.sourceKey,
+          'updateTime': c.updateTime,
+          'tags': c.tags,
+        },
+      )
+      .toList();
   return jsonEncode(jsonList);
 }

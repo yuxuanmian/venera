@@ -63,7 +63,7 @@ class _App {
 
   final HistoryManager history = HistoryManager();
 
-  final LocalFavoritesManager favorites = LocalFavoritesManager();
+  final NetworkFavoriteCacheManager favorites = NetworkFavoriteCacheManager();
 
   final LocalManager local = LocalManager();
 

@@ -176,14 +176,11 @@ class Settings with ChangeNotifier {
     'comicTileScale': 1.00, // 0.75-1.25
     'color': 'system', // red, pink, purple, green, orange, blue
     'theme_mode': 'system', // light, dark, system
-    'newFavoriteAddTo': 'end', // start, end
-    'moveFavoriteAfterRead': 'none', // none, end, start
     'proxy': 'system', // direct, system, proxy string
     'explore_pages': [],
     'categories': [],
     'favorites': [],
     'searchSources': null,
-    'showFavoriteStatusOnTile': true,
     'showHistoryStatusOnTile': false,
     'blockedWords': [],
     'blockedCommentWords': [],
@@ -205,12 +202,10 @@ class Settings with ChangeNotifier {
     'webdav': [], // empty means not configured
     "disableSyncFields": "", // "field1, field2, ..."
     'dataVersion': 0,
-    'quickFavorite': null,
     'enableTurnPageByVolumeKey': true,
     'enableClockAndBatteryInfoInReader': true,
     'quickCollectImage': 'No', // No, DoubleTap, Swipe
     'authorizationRequired': false,
-    'onClickFavorite': 'viewDetail', // viewDetail, read
     'enableDnsOverrides': false,
     'dnsOverrides': {},
     'enableCustomImageProcessing': false,
@@ -232,7 +227,6 @@ class Settings with ChangeNotifier {
     'deviceId': '',
     'ignoreBadCertificate': false,
     'readerScrollSpeed': 1.0, // 0.5 - 3.0
-    'localFavoritesFirst': true,
     'autoCloseFavoritePanel': false,
     'showChapterComments': true, // show chapter comments in reader
     'showChapterCommentsAtEnd':

@@ -9,7 +9,6 @@ import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
-import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/js_engine.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/log.dart';
@@ -50,11 +49,11 @@ class _SettingsPageState extends State<SettingsPage> {
     "Explore",
     "Reading",
     "Appearance",
-    "Local Favorites",
+    "Favorites",
     "APP",
     "Network",
     "About",
-    "Debug"
+    "Debug",
   ];
 
   final icons = <IconData>[
@@ -76,20 +75,14 @@ class _SettingsPageState extends State<SettingsPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      child: buildBody(),
-    );
+    return Material(child: buildBody());
   }
 
   Widget buildBody() {
     if (enableTwoViews) {
       return Row(
         children: [
-          SizedBox(
-            width: 280,
-            height: double.infinity,
-            child: buildLeft(),
-          ),
+          SizedBox(width: 280, height: double.infinity, child: buildLeft()),
           Container(
             height: double.infinity,
             decoration: BoxDecoration(
@@ -133,7 +126,7 @@ class _SettingsPageState extends State<SettingsPage> {
               },
               child: buildRight(),
             ),
-          )
+          ),
         ],
       );
     } else {
@@ -145,37 +138,26 @@ class _SettingsPageState extends State<SettingsPage> {
     return Material(
       child: Column(
         children: [
-          SizedBox(
-            height: MediaQuery.of(context).padding.top,
-          ),
+          SizedBox(height: MediaQuery.of(context).padding.top),
           SizedBox(
             height: 56,
-            child: Row(children: [
-              const SizedBox(
-                width: 8,
-              ),
-              Tooltip(
-                message: "Back",
-                child: IconButton(
-                  icon: const Icon(Icons.arrow_back),
-                  onPressed: context.pop,
+            child: Row(
+              children: [
+                const SizedBox(width: 8),
+                Tooltip(
+                  message: "Back",
+                  child: IconButton(
+                    icon: const Icon(Icons.arrow_back),
+                    onPressed: context.pop,
+                  ),
                 ),
-              ),
-              const SizedBox(
-                width: 24,
-              ),
-              Text(
-                "Settings".tl,
-                style: ts.s20,
-              )
-            ]),
+                const SizedBox(width: 24),
+                Text("Settings".tl, style: ts.s20),
+              ],
+            ),
           ),
-          const SizedBox(
-            height: 4,
-          ),
-          Expanded(
-            child: buildCategories(),
-          )
+          const SizedBox(height: 4),
+          Expanded(child: buildCategories()),
         ],
       ),
     );
@@ -200,16 +182,15 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
           ),
         ),
-        child: Row(children: [
-          Icon(icons[id]),
-          const SizedBox(width: 16),
-          Text(
-            name,
-            style: ts.s16,
-          ),
-          const Spacer(),
-          if (selected) const Icon(Icons.arrow_right)
-        ]),
+        child: Row(
+          children: [
+            Icon(icons[id]),
+            const SizedBox(width: 16),
+            Text(name, style: ts.s16),
+            const Spacer(),
+            if (selected) const Icon(Icons.arrow_right),
+          ],
+        ),
       );
 
       return Padding(
@@ -257,15 +238,14 @@ class _SettingsPageState extends State<SettingsPage> {
       0 => const ExploreSettings(),
       1 => const ReaderSettings(),
       2 => const AppearanceSettings(),
-      3 => const LocalFavoritesSettings(),
+      3 => const FavoriteSettings(),
       4 => const AppSettings(),
       5 => const NetworkSettings(),
       6 => const AboutSettings(),
       7 => const DebugPage(),
-      _ => throw UnimplementedError()
+      _ => throw UnimplementedError(),
     };
   }
-
 }
 
 class _SettingsDetailPage extends StatelessWidget {
@@ -275,9 +255,7 @@ class _SettingsDetailPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      child: _buildPage(),
-    );
+    return Material(child: _buildPage());
   }
 
   Widget _buildPage() {
@@ -285,12 +263,12 @@ class _SettingsDetailPage extends StatelessWidget {
       0 => const ExploreSettings(),
       1 => const ReaderSettings(),
       2 => const AppearanceSettings(),
-      3 => const LocalFavoritesSettings(),
+      3 => const FavoriteSettings(),
       4 => const AppSettings(),
       5 => const NetworkSettings(),
       6 => const AboutSettings(),
       7 => const DebugPage(),
-      _ => throw UnimplementedError()
+      _ => throw UnimplementedError(),
     };
   }
 }

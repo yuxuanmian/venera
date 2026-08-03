@@ -1,0 +1,456 @@
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:sqlite3/sqlite3.dart';
+import 'package:venera/foundation/comic_source/comic_source.dart';
+import 'package:venera/foundation/favorites.dart';
+import 'package:venera/foundation/follow_updates.dart';
+import 'package:venera/foundation/res.dart';
+
+FavoriteItem _comic(
+  String id, {
+  String name = 'Comic',
+  String author = 'Author',
+  String? coverPath,
+}) => FavoriteItem(
+  id: id,
+  name: name,
+  coverPath: coverPath ?? 'https://example.invalid/$id.jpg',
+  author: author,
+  sourceKeyValue: 'test-source',
+  tags: const ['tag'],
+);
+
+FavoriteData _numericData(
+  Future<Res<List<Comic>>> Function(int page, [String? folder]) loader,
+) => FavoriteData(
+  key: 'test-source',
+  title: 'Test source',
+  multiFolder: true,
+  loadComic: loader,
+  loadNext: null,
+  loadFolders: ([String? _]) async =>
+      const Res(<String, String>{'remote': 'Remote'}),
+);
+
+void main() {
+  late Directory tempDir;
+  late NetworkFavoriteCacheManager cache;
+  const folder = NetworkFavoriteFolderRef(
+    sourceKey: 'test-source',
+    folderId: 'remote',
+    title: 'Remote',
+  );
+
+  setUp(() async {
+    tempDir = await Directory.systemTemp.createTemp('venera-favorite-cache-');
+    cache = NetworkFavoriteCacheManager.forTesting();
+    await cache.init(
+      databasePath: '${tempDir.path}${Platform.pathSeparator}cache.db',
+      migrateLegacy: false,
+    );
+  });
+
+  tearDown(() async {
+    cache.close();
+    await tempDir.delete(recursive: true);
+  });
+
+  test(
+    'numeric pages persist, overwrite on success, and survive failure',
+    () async {
+      final initial = _numericData(
+        (page, [folder]) async => Res(<Comic>[_comic('one')], subData: 2),
+      );
+      await cache.refreshFolders(initial);
+      final first = await cache.refreshPage(initial, folder, 1);
+      expect(first.success, isTrue);
+      expect(cache.getCachedPage(folder, 1)!.comics.single.id, 'one');
+
+      final replacement = _numericData(
+        (page, [folder]) async => Res(<Comic>[_comic('two')], subData: 2),
+      );
+      await cache.refreshPage(replacement, folder, 1);
+      expect(cache.getCachedPage(folder, 1)!.comics.single.id, 'two');
+
+      final failed = _numericData(
+        (page, [folder]) async => const Res.error('offline'),
+      );
+      final result = await cache.refreshPage(failed, folder, 1);
+      expect(result.error, isTrue);
+      expect(cache.getCachedPage(folder, 1)!.comics.single.id, 'two');
+    },
+  );
+
+  test('cursor changes invalidate later cached pages', () async {
+    var firstNext = 'next-a';
+    final cursorData = FavoriteData(
+      key: 'test-source',
+      title: 'Test source',
+      multiFolder: true,
+      loadComic: null,
+      loadNext: (token, [folder]) async {
+        if (token == null) {
+          return Res(<Comic>[_comic('first')], subData: firstNext);
+        }
+        return Res(<Comic>[_comic('second')], subData: null);
+      },
+      loadFolders: ([String? _]) async =>
+          const Res(<String, String>{'remote': 'Remote'}),
+    );
+
+    await cache.refreshNextPage(cursorData, folder, null);
+    await cache.refreshNextPage(cursorData, folder, 'next-a');
+    expect(cache.getCachedNextPage(folder, 'next-a'), isNotNull);
+
+    firstNext = 'next-b';
+    await cache.refreshNextPage(cursorData, folder, null);
+    expect(cache.getCachedNextPage(folder, 'next-a'), isNull);
+    expect(cache.getCachedNextPage(folder, null)!.nextToken, 'next-b');
+  });
+
+  test(
+    'remote folder removal clears its cache and offline mutation is inert',
+    () async {
+      final data = _numericData(
+        (page, [folder]) async => Res(<Comic>[_comic('one')], subData: 1),
+      );
+      await cache.refreshFolders(data);
+      await cache.refreshPage(data, folder, 1);
+      expect(cache.getCachedPage(folder, 1), isNotNull);
+
+      final noFolders = FavoriteData(
+        key: 'test-source',
+        title: 'Test source',
+        multiFolder: true,
+        loadComic: data.loadComic,
+        loadNext: null,
+        loadFolders: ([String? _]) async => const Res(<String, String>{}),
+      );
+      await cache.refreshFolders(noFolders);
+      expect(cache.getCachedPage(folder, 1), isNull);
+
+      final offline = await cache.changeFavorite(
+        data: data,
+        folder: folder,
+        comicId: 'one',
+        isAdding: true,
+      );
+      expect(offline.error, isTrue);
+      expect(cache.isFavoriteKnown('test-source', 'one'), isFalse);
+    },
+  );
+
+  test(
+    'background summary refresh keeps covers while replacing list metadata',
+    () async {
+      var remoteComic = _comic(
+        'one',
+        name: 'Old name',
+        author: 'Old author',
+        coverPath: 'https://example.invalid/old.jpg',
+      );
+      final data = _numericData(
+        (page, [folder]) async => Res(<Comic>[remoteComic], subData: 1),
+      );
+      await cache.refreshFolders(data);
+      await cache.refreshPage(data, folder, 1);
+
+      remoteComic = _comic(
+        'one',
+        name: 'New name',
+        author: 'New author',
+        coverPath: 'https://example.invalid/new.jpg',
+      );
+      await cache.refreshCachedSummaries(data, minimumAge: Duration.zero);
+
+      final cached = cache.getCachedPage(folder, 1)!.comics.single;
+      expect(cached.name, 'New name');
+      expect(cached.author, 'New author');
+      expect(cached.coverPath, 'https://example.invalid/old.jpg');
+    },
+  );
+
+  test(
+    'manual numeric full cache stores every page and preserves covers',
+    () async {
+      var useNewCover = false;
+      final data = _numericData((page, [folder]) async {
+        final cover = useNewCover
+            ? 'https://example.invalid/new-$page.jpg'
+            : 'https://example.invalid/old-$page.jpg';
+        return Res(<Comic>[
+          _comic('comic-$page', name: 'Comic $page', coverPath: cover),
+        ], subData: 3);
+      });
+      await cache.refreshFolders(data);
+      await cache.refreshPage(data, folder, 1);
+      useNewCover = true;
+
+      final progress = await cache
+          .cacheAllPages(data, folder, isCanceled: () => false)
+          .toList();
+
+      expect(progress.last.isComplete, isTrue);
+      expect(progress.last.totalPages, 3);
+      expect(progress.last.comicsCached, 3);
+      expect(cache.getCachedPage(folder, 3)!.comics.single.id, 'comic-3');
+      expect(
+        cache.getCachedPage(folder, 1)!.comics.single.coverPath,
+        'https://example.invalid/old-1.jpg',
+      );
+      final status = cache.getFullCacheStatus(folder);
+      expect(status.isComplete, isTrue);
+      expect(status.pageCount, 3);
+      expect(status.comicCount, 3);
+    },
+  );
+
+  test(
+    'manual cursor full cache follows cursors and reports indeterminate',
+    () async {
+      final data = FavoriteData(
+        key: 'test-source',
+        title: 'Test source',
+        multiFolder: true,
+        loadComic: null,
+        loadNext: (token, [folder]) async {
+          if (token == null) {
+            return Res(<Comic>[_comic('first')], subData: 'cursor-1');
+          }
+          return Res(<Comic>[_comic('second')], subData: null);
+        },
+        loadFolders: ([String? _]) async =>
+            const Res(<String, String>{'remote': 'Remote'}),
+      );
+
+      final progress = await cache
+          .cacheAllPages(data, folder, isCanceled: () => false)
+          .toList();
+
+      expect(progress.last.isComplete, isTrue);
+      expect(progress.where((item) => item.totalPages != null), isEmpty);
+      expect(cache.getCachedNextPage(folder, 'cursor-1'), isNotNull);
+      final status = cache.getFullCacheStatus(folder);
+      expect(status.pageCount, 2);
+      expect(status.comicCount, 2);
+    },
+  );
+
+  test(
+    'full cache cancellation and failure keep committed pages incomplete',
+    () async {
+      var calls = 0;
+      final data = _numericData((page, [folder]) async {
+        calls++;
+        if (page == 2) return const Res.error('offline');
+        return Res(<Comic>[_comic('comic-$page')], subData: 3);
+      });
+      await cache.refreshFolders(data);
+      final failed = await cache
+          .cacheAllPages(data, folder, isCanceled: () => false)
+          .toList();
+      expect(failed.last.errorMessage, 'offline');
+      expect(cache.getCachedPage(folder, 1), isNotNull);
+      expect(cache.getFullCacheStatus(folder).isComplete, isFalse);
+
+      calls = 0;
+      final canceled = await cache
+          .cacheAllPages(data, folder, isCanceled: () => calls >= 1)
+          .toList();
+      expect(canceled.last.isCanceled, isTrue);
+      expect(cache.getCachedPage(folder, 1), isNotNull);
+      expect(cache.getFullCacheStatus(folder).isComplete, isFalse);
+    },
+  );
+
+  test('cached search covers all pages and all summary fields', () async {
+    final data = _numericData((page, [folder]) async {
+      if (page == 1) {
+        return Res(<Comic>[
+          FavoriteItem(
+            id: 'first-id',
+            name: 'Alpha Hero',
+            coverPath: 'https://example.invalid/first.jpg',
+            author: 'Jane Writer',
+            sourceKeyValue: 'test-source',
+            tags: const ['Action', 'Space'],
+          ),
+        ], subData: 2);
+      }
+      return Res(<Comic>[
+        FavoriteItem(
+          id: 'second-id',
+          name: 'Beta Story',
+          coverPath: 'https://example.invalid/second.jpg',
+          author: 'Alice Artist',
+          sourceKeyValue: 'test-source',
+          tags: const ['Mystery', 'School'],
+        ),
+        FavoriteItem(
+          id: 'first-id',
+          name: 'Alpha Hero',
+          coverPath: 'https://example.invalid/duplicate.jpg',
+          author: 'Jane Writer',
+          sourceKeyValue: 'test-source',
+          tags: const ['Action'],
+        ),
+      ], subData: 2);
+    });
+    await cache.refreshFolders(data);
+    await cache.refreshPage(data, folder, 1);
+    await cache.refreshPage(data, folder, 2);
+    const otherFolder = NetworkFavoriteFolderRef(
+      sourceKey: 'test-source',
+      folderId: 'other',
+      title: 'Other',
+    );
+    await cache.refreshPage(data, otherFolder, 1);
+
+    expect(cache.searchCachedComics(folder, 'alpha').single.id, 'first-id');
+    expect(cache.searchCachedComics(folder, 'writer').single.id, 'first-id');
+    expect(cache.searchCachedComics(folder, 'mystery').single.id, 'second-id');
+    expect(
+      cache.searchCachedComics(folder, 'second-id').single.id,
+      'second-id',
+    );
+    expect(
+      cache.searchCachedComics(folder, 'beta artist').single.id,
+      'second-id',
+    );
+    expect(cache.searchCachedComics(folder, 'hero').length, 1);
+    expect(cache.searchCachedComics(folder, 'alpha').length, 1);
+    expect(cache.searchCachedComics(otherFolder, 'beta'), isEmpty);
+  });
+
+  test('initialization backfills old cached search text', () async {
+    cache.close();
+    final databasePath = '${tempDir.path}${Platform.pathSeparator}cache.db';
+    File(databasePath).deleteSync();
+    final database = sqlite3.open(databasePath);
+    database.execute('''
+      CREATE TABLE favorite_items (
+        source_key TEXT NOT NULL,
+        folder_id TEXT NOT NULL,
+        page_index INTEGER NOT NULL,
+        comic_id TEXT NOT NULL,
+        display_order INTEGER NOT NULL,
+        comic_json TEXT NOT NULL,
+        favorite_id TEXT,
+        favorite_time TEXT NOT NULL,
+        last_update_time TEXT,
+        last_check_time INTEGER,
+        has_new_update INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (source_key, folder_id, page_index, comic_id)
+      );
+    ''');
+    database.execute(
+      'INSERT INTO favorite_items VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [
+        'test-source',
+        'remote',
+        1,
+        'old-id',
+        0,
+        '{"title":"Old cached title","subTitle":"Old author","tags":["OldTag"]}',
+        null,
+        '2026-08-04 00:00:00',
+        null,
+        null,
+        0,
+      ],
+    );
+    database.dispose();
+
+    cache = NetworkFavoriteCacheManager.forTesting();
+    await cache.init(databasePath: databasePath, migrateLegacy: false);
+
+    expect(cache.searchCachedComics(folder, 'oldtag').single.id, 'old-id');
+    expect(cache.searchCachedComics(folder, 'old author').single.id, 'old-id');
+  });
+
+  test('detail checks establish a baseline and store basic metadata', () async {
+    final data = _numericData(
+      (page, [folder]) async => Res(<Comic>[_comic('one')], subData: 1),
+    );
+    await cache.refreshFolders(data);
+    await cache.refreshPage(data, folder, 1);
+
+    cache.updateBasicInfo(
+      folder,
+      'one',
+      title: 'Renamed',
+      author: 'Updated author',
+      chapterCount: 12,
+    );
+    expect(
+      cache.recordComicCheck(
+        folder,
+        'one',
+        updateTime: '2026-8-3',
+        updateMarker: 'time:2026-8-3|chapters:12',
+      ),
+      isFalse,
+    );
+    var checked = cache.getComicsWithUpdatesInfo(folder).single;
+    expect(checked.name, 'Renamed');
+    expect(checked.author, 'Updated author');
+    expect(checked.chapterCount, 12);
+    expect(checked.coverPath, 'https://example.invalid/one.jpg');
+    expect(checked.hasNewUpdate, isFalse);
+
+    expect(
+      cache.recordComicCheck(
+        folder,
+        'one',
+        updateTime: '2026-8-3',
+        updateMarker: 'time:2026-8-3|chapters:13',
+      ),
+      isTrue,
+    );
+    checked = cache.getComicsWithUpdatesInfo(folder).single;
+    expect(checked.hasNewUpdate, isTrue);
+    expect(checked.updateMarker, 'time:2026-8-3|chapters:13');
+  });
+
+  test('update marker includes the date and chapter count', () {
+    final info = ComicDetails.fromJson({
+      'title': 'Comic',
+      'subtitle': 'Author',
+      'cover': '',
+      'tags': <String, List<String>>{},
+      'chapters': <String, String>{'1': 'Chapter 1', '2': 'Chapter 2'},
+      'sourceKey': 'test-source',
+      'comicId': 'one',
+      'updateTime': '2026-08-03 10:00:00',
+    });
+    expect(comicUpdateMarker(info), 'time:2026-8-3|chapters:2');
+  });
+
+  test('only a legacy folder_sync relation migrates follow updates', () {
+    final database = File('${tempDir.path}${Platform.pathSeparator}legacy.db');
+    final db = sqlite3.open(database.path);
+    db.execute('''
+      CREATE TABLE folder_sync (
+        folder_name TEXT PRIMARY KEY,
+        source_key TEXT,
+        source_folder TEXT
+      );
+    ''');
+    db.execute('INSERT INTO folder_sync VALUES (?, ?, ?)', [
+      'old-local-folder',
+      'remote-source',
+      'remote-folder',
+    ]);
+    db.dispose();
+
+    expect(
+      readLegacyFollowUpdatesFolder(database, 'old-local-folder'),
+      const NetworkFavoriteFolderRef(
+        sourceKey: 'remote-source',
+        folderId: 'remote-folder',
+      ),
+    );
+    expect(readLegacyFollowUpdatesFolder(database, 'unlinked'), isNull);
+  });
+}
