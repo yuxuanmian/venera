@@ -127,6 +127,31 @@ class _FavoritePanelState extends State<_FavoritePanel> {
         ),
       );
     }
+    final singleFolderAdded =
+        _data.singleFolderForSingleComic &&
+        (widget.isFavorite || _added.isNotEmpty);
+    if (singleFolderAdded) {
+      final folderId = _added.isNotEmpty
+          ? _added.first
+          : (_folders == null || _folders!.isEmpty ? '' : _folders!.keys.first);
+      return Scaffold(
+        appBar: Appbar(title: Text('Favorite'.tl)),
+        body: ListView(
+          children: [
+            ListTile(
+              title: Text('Network Favorites'.tl),
+              subtitle: !canChange ? Text('Not login'.tl) : null,
+              trailing: canChange
+                  ? Button.filled(
+                      onPressed: () => _change(folderId, false),
+                      child: Text('Remove'.tl),
+                    )
+                  : Text('Not login'.tl),
+            ),
+          ],
+        ),
+      );
+    }
     return Scaffold(
       appBar: Appbar(title: Text('Favorite'.tl)),
       body: ListView(

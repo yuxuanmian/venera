@@ -385,6 +385,8 @@ If `load` function is implemented, `loadNext` function will be ignored.
     favorites = {
         // whether support multi folders
         multiFolder: false,
+        // optional: show a simple remove action when a comic is in one folder
+        singleFolderForSingleComic: false,
         /**
          * add or delete favorite.
          * throw `Login expired` to indicate login expired, App will automatically re-login and re-add/delete favorite

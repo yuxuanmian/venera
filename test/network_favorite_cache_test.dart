@@ -82,6 +82,129 @@ void main() {
     },
   );
 
+  test('duplicate comics on the same page are deduplicated', () async {
+    final data = _numericData(
+      (page, [folder]) async =>
+          Res(<Comic>[_comic('dup'), _comic('dup')], subData: 1),
+    );
+    await cache.refreshFolders(data);
+
+    final result = await cache.refreshPage(data, folder, 1);
+
+    expect(result.success, isTrue);
+    expect(cache.getCachedPage(folder, 1)!.comics.length, 1);
+    expect(cache.getCachedPage(folder, 1)!.comics.single.id, 'dup');
+  });
+
+  test('tryFromJson tolerates malformed persisted folder data', () {
+    expect(
+      NetworkFavoriteFolderRef.tryFromJson({
+        'sourceKey': 'test-source',
+        'folderId': 'remote',
+        'title': 123,
+      }),
+      isNull,
+    );
+  });
+
+  test('clearAllCache removes folders, pages, items and memberships', () async {
+    final data = _numericData(
+      (page, [folder]) async => Res(<Comic>[_comic('one')], subData: 1),
+    );
+    await cache.refreshFolders(data);
+    await cache.refreshPage(data, folder, 1);
+    expect(cache.getCachedPage(folder, 1), isNotNull);
+
+    cache.clearAllCache();
+
+    expect(cache.getCachedFolders('test-source'), isEmpty);
+    expect(cache.getCachedPage(folder, 1), isNull);
+    expect(cache.countCachedComics(folder), 0);
+    expect(cache.isFavoriteKnown('test-source', 'one'), isFalse);
+    expect(cache.getFullCacheStatus(folder).isComplete, isFalse);
+  });
+
+  test('removing a favorite falls back to the cached favorite id', () async {
+    final data = _numericData(
+      (page, [folder]) async => Res(<Comic>[
+        FavoriteItem(
+          id: 'one',
+          name: 'One',
+          coverPath: 'https://example.invalid/one.jpg',
+          author: 'Author',
+          sourceKeyValue: 'test-source',
+          tags: const ['tag'],
+          remoteFavoriteId: 'fav-1',
+        ),
+      ], subData: 1),
+    );
+    await cache.refreshFolders(data);
+    await cache.refreshPage(data, folder, 1);
+
+    String? receivedFavoriteId;
+    final mutationData = FavoriteData(
+      key: 'test-source',
+      title: 'Test source',
+      multiFolder: true,
+      loadComic: data.loadComic,
+      loadNext: null,
+      loadFolders: data.loadFolders,
+      addOrDelFavorite: (comicId, folderId, isAdding, favoriteId) async {
+        receivedFavoriteId = favoriteId;
+        return const Res(true);
+      },
+    );
+    final source = ComicSource(
+      'Test source',
+      'test-source',
+      null,
+      null,
+      null,
+      mutationData,
+      const [],
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      '',
+      '',
+      '1.0.0',
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
+    );
+    source.data['account'] = ['user'];
+    ComicSourceManager().add(source);
+    addTearDown(() => ComicSourceManager().remove('test-source'));
+
+    final result = await cache.changeFavorite(
+      data: mutationData,
+      folder: folder,
+      comicId: 'one',
+      isAdding: false,
+    );
+
+    expect(result.success, isTrue);
+    expect(receivedFavoriteId, 'fav-1');
+    expect(cache.getCachedPage(folder, 1)!.updatedAt.millisecondsSinceEpoch, 0);
+  });
+
   test('cursor changes invalidate later cached pages', () async {
     var firstNext = 'next-a';
     final cursorData = FavoriteData(

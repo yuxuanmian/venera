@@ -6,6 +6,7 @@ import 'package:sqlite3/sqlite3.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_type.dart';
+import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/utils/io.dart';
 
@@ -191,7 +192,7 @@ class NetworkFavoriteFolderRef {
   static NetworkFavoriteFolderRef? tryFromJson(Object? json) {
     try {
       return NetworkFavoriteFolderRef.fromJson(json);
-    } on FormatException {
+    } catch (_) {
       return null;
     }
   }
@@ -452,22 +453,69 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     appdata.settings['showFavoriteStatusOnTile'] = null;
     appdata.settings['onClickFavorite'] = null;
 
-    if (oldFile.existsSync()) {
-      oldFile.deleteSync();
+    try {
+      await appdata.saveData();
+    } catch (e, s) {
+      Log.error(
+        'Favorite migration',
+        'Failed to save appdata after removing local favorite settings: $e',
+        s,
+      );
+      return;
     }
-    final oldCovers = Directory(FilePath.join(App.dataPath, 'favorite_cover'));
-    if (oldCovers.existsSync()) {
-      oldCovers.deleteSync(recursive: true);
+    try {
+      if (oldFile.existsSync()) {
+        oldFile.deleteSync();
+      }
+      final oldCovers = Directory(
+        FilePath.join(App.dataPath, 'favorite_cover'),
+      );
+      if (oldCovers.existsSync()) {
+        oldCovers.deleteSync(recursive: true);
+      }
+    } catch (e, s) {
+      Log.error(
+        'Favorite migration',
+        'Failed to clean legacy local favorite files: $e',
+        s,
+      );
     }
-    _db.execute(
-      'INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)',
-      const ['legacy_local_favorites_removed', '1'],
-    );
-    await appdata.saveData();
+    try {
+      _db.execute(
+        'INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)',
+        const ['legacy_local_favorites_removed', '1'],
+      );
+    } catch (e, s) {
+      Log.error(
+        'Favorite migration',
+        'Failed to record legacy local favorite migration: $e',
+        s,
+      );
+    }
   }
 
   void close() {
     _db.dispose();
+  }
+
+  /// Clears every device-local favorite cache entry.
+  ///
+  /// Remote favorites and source accounts are not touched.
+  void clearAllCache() {
+    _db.execute('BEGIN');
+    try {
+      _db.execute('DELETE FROM favorite_items');
+      _db.execute('DELETE FROM favorite_pages');
+      _db.execute('DELETE FROM favorite_folders');
+      _db.execute('DELETE FROM favorite_membership');
+      _db.execute('COMMIT');
+    } catch (_) {
+      _db.execute('ROLLBACK');
+      rethrow;
+    }
+    _refreshing.clear();
+    _fullCaching.clear();
+    notifyListeners();
   }
 
   void _rebuildMissingSearchText() {
@@ -796,18 +844,23 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     final result = await data.loadComic!(page, folder.folderId);
     if (result.error) return Res.error(result.errorMessage!);
     final maxPage = result.subData is int ? result.subData as int : null;
-    return Res(
-      _storePage(
-        folder,
-        pageIndex: page,
-        requestToken: 'page:$page',
-        comics: result.data,
-        maxPage: maxPage,
-        nextToken: null,
-        clearFollowingCursorPages: false,
-        preserveExistingCover: preserveExistingCover,
-      ),
-    );
+    try {
+      return Res(
+        _storePage(
+          folder,
+          pageIndex: page,
+          requestToken: 'page:$page',
+          comics: result.data,
+          maxPage: maxPage,
+          nextToken: null,
+          clearFollowingCursorPages: false,
+          preserveExistingCover: preserveExistingCover,
+        ),
+      );
+    } catch (e, s) {
+      Log.error('Favorite page refresh', e.toString(), s);
+      return Res.error(e.toString());
+    }
   }
 
   Future<Res<CachedFavoritePage>> refreshNextPage(
@@ -824,19 +877,24 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     final tokenKey = 'next:${requestToken ?? ''}';
     final existing = _getCachedPage(folder, tokenKey);
     final pageIndex = existing?.pageIndex ?? _nextPageIndex(folder);
-    return Res(
-      _storePage(
-        folder,
-        pageIndex: pageIndex,
-        requestToken: tokenKey,
-        comics: result.data,
-        maxPage: null,
-        nextToken: result.subData as String?,
-        clearFollowingCursorPages:
-            existing != null && existing.nextToken != result.subData,
-        preserveExistingCover: preserveExistingCover,
-      ),
-    );
+    try {
+      return Res(
+        _storePage(
+          folder,
+          pageIndex: pageIndex,
+          requestToken: tokenKey,
+          comics: result.data,
+          maxPage: null,
+          nextToken: result.subData as String?,
+          clearFollowingCursorPages:
+              existing != null && existing.nextToken != result.subData,
+          preserveExistingCover: preserveExistingCover,
+        ),
+      );
+    } catch (e, s) {
+      Log.error('Favorite next page refresh', e.toString(), s);
+      return Res.error(e.toString());
+    }
   }
 
   int _nextPageIndex(NetworkFavoriteFolderRef folder) {
@@ -922,8 +980,10 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
           now.millisecondsSinceEpoch,
         ],
       );
+      final seenIds = <String>{};
       for (var index = 0; index < comics.length; index++) {
         final remoteItem = FavoriteItem.fromComic(comics[index]);
+        if (!seenIds.add(remoteItem.id)) continue;
         final previous = updateState[remoteItem.id];
         final previousItem = previous?['item'] as FavoriteItem?;
         final previousFavoriteTime = previousItem == null
@@ -1054,6 +1114,9 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     refresh()
         .then((result) {
           if (result.success) onRefreshed?.call(result.data);
+        })
+        .catchError((Object e, StackTrace s) {
+          Log.error('Favorite background refresh', e.toString(), s);
         })
         .whenComplete(() => _refreshing.remove(key));
   }
@@ -1358,6 +1421,15 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     return rows.isNotEmpty;
   }
 
+  String? _cachedFavoriteId(String sourceKey, String folderId, String comicId) {
+    final rows = _db.select(
+      '''SELECT favorite_id FROM favorite_items
+         WHERE source_key = ? AND folder_id = ? AND comic_id = ? LIMIT 1''',
+      [sourceKey, folderId, comicId],
+    );
+    return rows.isEmpty ? null : rows.first['favorite_id'] as String?;
+  }
+
   Future<Res<bool>> changeFavorite({
     required FavoriteData data,
     required NetworkFavoriteFolderRef folder,
@@ -1371,11 +1443,15 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     if (data.addOrDelFavorite == null) {
       return const Res.error('Favorites are not supported');
     }
+    final effectiveFavoriteId = isAdding
+        ? favoriteId
+        : favoriteId ??
+              _cachedFavoriteId(folder.sourceKey, folder.folderId, comicId);
     final result = await data.addOrDelFavorite!(
       comicId,
       folder.folderId,
       isAdding,
-      favoriteId,
+      effectiveFavoriteId,
     );
     if (result.error) return result;
 

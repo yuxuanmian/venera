@@ -798,7 +798,6 @@ class ComicSourceParser {
     if (!_checkExists("favorites")) return null;
 
     final bool multiFolder = _getValue("favorites.multiFolder");
-    final bool? isOldToNewSort = _getValue("favorites.isOldToNewSort");
     final bool? singleFolderForSingleComic = _getValue(
       "favorites.singleFolderForSingleComic",
     );
@@ -959,7 +958,6 @@ class ComicSourceParser {
       addFolder: addFolder,
       deleteFolder: deleteFolder,
       addOrDelFavorite: addOrDelFavFunc,
-      isOldToNewSort: isOldToNewSort,
       singleFolderForSingleComic: singleFolderForSingleComic ?? false,
     );
   }

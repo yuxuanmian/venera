@@ -1199,7 +1199,7 @@ class ComicListState extends State<ComicList> {
       } else {
         try {
           while (_data[page] == null) {
-            await _fetchNext();
+            await _fetchNext(page);
           }
           if (mounted) {
             setState(() {});
@@ -1218,9 +1218,11 @@ class ComicListState extends State<ComicList> {
     }
   }
 
-  Future<void> _fetchNext() async {
+  Future<void> _fetchNext(int target) async {
     var res = await widget.loadNext!(_nextUrl);
-    _data[_data.length + 1] = res.data;
+    if (_data[target] == null) {
+      _data[target] = res.data;
+    }
     if (res.subData == null) {
       _maxPage = _data.length;
     } else {

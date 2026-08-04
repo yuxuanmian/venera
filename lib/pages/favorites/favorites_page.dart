@@ -141,6 +141,7 @@ class NetworkFavoritePage extends StatelessWidget {
   Widget build(BuildContext context) {
     if (!data.multiFolder) {
       return _CachedFavoriteFolderPage(
+        key: ValueKey(data.key),
         data: data,
         folder: NetworkFavoriteFolderRef(
           sourceKey: data.key,
@@ -149,12 +150,12 @@ class NetworkFavoritePage extends StatelessWidget {
         ),
       );
     }
-    return _RemoteFolderList(data: data);
+    return _RemoteFolderList(key: ValueKey(data.key), data: data);
   }
 }
 
 class _RemoteFolderList extends StatefulWidget {
-  const _RemoteFolderList({required this.data});
+  const _RemoteFolderList({required this.data, super.key});
 
   final FavoriteData data;
 
@@ -290,7 +291,11 @@ class _RemoteFolderListState extends State<_RemoteFolderList> {
 }
 
 class _CachedFavoriteFolderPage extends StatefulWidget {
-  const _CachedFavoriteFolderPage({required this.data, required this.folder});
+  const _CachedFavoriteFolderPage({
+    required this.data,
+    required this.folder,
+    super.key,
+  });
 
   final FavoriteData data;
   final NetworkFavoriteFolderRef folder;
@@ -303,9 +308,11 @@ class _CachedFavoriteFolderPage extends StatefulWidget {
 class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
   final _comicListKey = GlobalKey<ComicListState>();
   final _searchController = TextEditingController();
+  final _searchFocusNode = FocusNode();
   String _readFilter = 'all';
   List<FavoriteItem>? _searchResults;
   bool _fullCacheRunning = false;
+  bool _searchExpanded = false;
 
   bool get _usesPage => widget.data.loadComic != null;
 
@@ -325,6 +332,7 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
     _searchController
       ..removeListener(_onFilterChanged)
       ..dispose();
+    _searchFocusNode.dispose();
     _cache.removeListener(_onCacheChanged);
     super.dispose();
   }
@@ -334,9 +342,33 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
     _comicListKey.currentState?.refreshFilter();
   }
 
+  void _toggleSearch() {
+    if (_searchExpanded) {
+      _searchFocusNode.unfocus();
+      _searchController.clear();
+      setState(() => _searchExpanded = false);
+    } else {
+      setState(() => _searchExpanded = true);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _searchFocusNode.requestFocus();
+      });
+    }
+  }
+
   void _onCacheChanged() {
     if (!mounted) return;
     _updateSearchResults();
+    final first = _usesPage
+        ? _cache.getCachedPage(widget.folder, 1)
+        : _cache.getCachedNextPage(widget.folder, null);
+    if (first != null && first.updatedAt.millisecondsSinceEpoch == 0) {
+      _refresh();
+    } else if (first == null) {
+      final data = _comicListKey.currentState?.state['data'];
+      if (data is Map && data.isNotEmpty) {
+        _comicListKey.currentState?.refresh();
+      }
+    }
   }
 
   void _updateSearchResults() {
@@ -481,33 +513,6 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
     }
   }
 
-  String _buildCacheStatus({
-    required CachedFavoritePage? cached,
-    required bool stale,
-    required FavoriteFullCacheStatus fullCacheStatus,
-    required int cachedComicCount,
-    required int? searchResultCount,
-  }) {
-    final cacheStatus = fullCacheStatus.isComplete
-        ? 'Full cache: @count comics · @time (@pages pages)'.tlParams({
-            'count': fullCacheStatus.comicCount,
-            'time': fullCacheStatus.completedAt!.toLocal().toString().substring(
-              0,
-              16,
-            ),
-            'pages': fullCacheStatus.pageCount,
-          })
-        : 'Partial cache: @count comics'.tlParams({'count': cachedComicCount});
-    final lines = <String>[
-      if (cached != null)
-        (stale ? 'Showing cached data (may be outdated)' : 'Cached data').tl,
-      cacheStatus,
-      if (searchResultCount != null)
-        '@count cached favorites found'.tlParams({'count': searchResultCount}),
-    ];
-    return lines.join('\n');
-  }
-
   @override
   Widget build(BuildContext context) {
     final title = widget.folder.title ?? widget.data.title;
@@ -521,15 +526,7 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
         ? (_searchResults ??
               _cache.searchCachedComics(widget.folder, _searchController.text))
         : null;
-    final cached = _usesPage
-        ? _cache.getCachedPage(widget.folder, 1)
-        : _cache.getCachedNextPage(widget.folder, null);
-    final fullCacheStatus = _cache.getFullCacheStatus(widget.folder);
     final cachedComicCount = _cache.countCachedComics(widget.folder);
-    final stale =
-        cached != null &&
-        DateTime.now().difference(cached.updatedAt) >
-            const Duration(seconds: 30);
     return ComicList(
       key: _comicListKey,
       leadingSliver: SliverMainAxisGroup(
@@ -558,33 +555,52 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
                   ),
                 ],
               ),
+              IconButton(
+                tooltip: _searchExpanded ? 'Close'.tl : 'Search'.tl,
+                onPressed: _toggleSearch,
+                icon: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 180),
+                  child: Icon(
+                    _searchExpanded ? Icons.close : Icons.search,
+                    key: ValueKey(_searchExpanded),
+                  ),
+                ),
+              ),
             ],
           ),
           SliverToBoxAdapter(
             child: Column(
               children: [
-                TextField(
-                  controller: _searchController,
-                  decoration: InputDecoration(
-                    prefixIcon: const Icon(Icons.search),
-                    hintText: 'Search cached favorites'.tl,
-                  ),
-                ).paddingHorizontal(16).paddingTop(8),
+                AnimatedSize(
+                  duration: const Duration(milliseconds: 220),
+                  curve: Curves.easeOutCubic,
+                  alignment: Alignment.topCenter,
+                  child: _searchExpanded
+                      ? TextField(
+                          controller: _searchController,
+                          focusNode: _searchFocusNode,
+                          textInputAction: TextInputAction.search,
+                          decoration: InputDecoration(
+                            prefixIcon: const Icon(Icons.search),
+                            hintText: 'Search cached favorites (@count)'
+                                .tlParams({'count': cachedComicCount}),
+                          ),
+                        ).paddingHorizontal(16).paddingTop(8)
+                      : const SizedBox(width: double.infinity),
+                ),
                 Row(
                   children: [
                     Expanded(
-                      child: Text(
-                        _buildCacheStatus(
-                          cached: cached,
-                          stale: stale,
-                          fullCacheStatus: fullCacheStatus,
-                          cachedComicCount: cachedComicCount,
-                          searchResultCount: searchResults?.length,
-                        ),
-                        style: ts.s12,
-                        maxLines: 3,
-                        overflow: TextOverflow.ellipsis,
-                      ),
+                      child: searchResults != null
+                          ? Text(
+                              '@count cached favorites found'.tlParams({
+                                'count': searchResults.length,
+                              }),
+                              style: ts.s12,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            )
+                          : const SizedBox.shrink(),
                     ),
                     PopupMenuButton<String>(
                       tooltip: 'Read filter'.tl,
@@ -610,7 +626,9 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
                       ],
                     ),
                   ],
-                ).paddingHorizontal(16),
+                ).padding(
+                  EdgeInsets.fromLTRB(16, _searchExpanded ? 8 : 0, 16, 0),
+                ),
               ],
             ),
           ),

@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
+import 'package:venera/utils/translations.dart';
 import 'package:window_manager/window_manager.dart';
 
 const _kTitleBarHeight = 36.0;
@@ -54,6 +55,8 @@ class WindowFrame extends StatefulWidget {
 typedef WindowCloseListener = bool Function();
 
 class _WindowFrameState extends State<WindowFrame> {
+  final _debugButtonKey = GlobalKey();
+
   bool isWindowFrameHidden = false;
   bool useDarkTheme = false;
   var closeListeners = <WindowCloseListener>[];
@@ -62,6 +65,60 @@ class _WindowFrameState extends State<WindowFrame> {
   void setWindowFrame(bool show) {
     setState(() {
       isWindowFrameHidden = !show;
+    });
+  }
+
+  void _onDebugMenuSelected(String value) {
+    switch (value) {
+      case 'reloadSources':
+        debug();
+        break;
+      case 'clearFavorites':
+        App.favorites.clearAllCache();
+        App.rootContext.showMessage(message: 'Favorites cache cleared'.tl);
+        break;
+    }
+  }
+
+  void _showDebugMenu() {
+    final navigator = App.rootNavigatorKey.currentState;
+    final overlay = navigator?.overlay;
+    final buttonContext = _debugButtonKey.currentContext;
+    if (navigator == null || overlay == null || buttonContext == null) {
+      return;
+    }
+    final overlayBox = overlay.context.findRenderObject();
+    final buttonBox = buttonContext.findRenderObject();
+    if (overlayBox is! RenderBox || buttonBox is! RenderBox) {
+      return;
+    }
+    final buttonOrigin = overlayBox.globalToLocal(
+      buttonBox.localToGlobal(Offset.zero),
+    );
+    final buttonRect = buttonOrigin & buttonBox.size;
+    showMenu<String>(
+      context: App.rootContext,
+      useRootNavigator: true,
+      position: RelativeRect.fromRect(
+        Rect.fromLTRB(
+          buttonRect.left,
+          buttonRect.bottom,
+          buttonRect.right,
+          buttonRect.bottom,
+        ),
+        Offset.zero & overlayBox.size,
+      ),
+      items: [
+        PopupMenuItem(value: 'reloadSources', child: Text('Reload Sources'.tl)),
+        PopupMenuItem(
+          value: 'clearFavorites',
+          child: Text('Clear Favorites Cache'.tl),
+        ),
+      ],
+    ).then((value) {
+      if (value != null) {
+        _onDebugMenuSelected(value);
+      }
     });
   }
 
@@ -130,6 +187,9 @@ class _WindowFrameState extends State<WindowFrame> {
                           child: DragToMoveArea(
                             child: Text(
                               'Venera',
+                              maxLines: 1,
+                              softWrap: false,
+                              overflow: TextOverflow.ellipsis,
                               style: TextStyle(
                                 fontSize: 13,
                                 color: (useDarkTheme ||
@@ -143,9 +203,10 @@ class _WindowFrameState extends State<WindowFrame> {
                           ),
                         ),
                         if (kDebugMode)
-                          const TextButton(
-                            onPressed: debug,
-                            child: Text('Debug'),
+                          TextButton(
+                            key: _debugButtonKey,
+                            onPressed: _showDebugMenu,
+                            child: const Text('Debug'),
                           ),
                         if (!App.isMacOS)
                           _WindowButtons(
