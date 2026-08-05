@@ -14,6 +14,7 @@ import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/consts.dart';
 import 'package:venera/foundation/favorites.dart';
+import 'package:venera/foundation/follow_updates.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/image_provider/cached_image.dart';
 import 'package:venera/foundation/local.dart';
@@ -103,24 +104,73 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       widget.id,
       ComicType.fromKey(widget.sourceKey),
     );
-    Widget? action;
-    if (isDownloaded) {
-      action = FilledButton.tonal(
-        child: Text("Read".tl),
-        onPressed: () {
-          final localComic = LocalManager().find(
-            widget.id,
-            ComicType.fromKey(widget.sourceKey),
-          );
-          if (localComic == null) {
-            context.showMessage(message: "Local comic not found".tl);
-            return;
-          }
-          localComic.read();
-        },
-      );
+    final cache = NetworkFavoriteCacheManager();
+    final notFound = isNotFoundError(error ?? '');
+    final isFavorite = cache.isFavoriteKnown(widget.sourceKey, widget.id);
+    final isSuspect = cache.isComicSuspectGone(widget.sourceKey, widget.id);
+    final buttons = <Widget>[
+      if (isDownloaded)
+        FilledButton.tonalIcon(
+          icon: const Icon(Icons.menu_book_outlined),
+          label: Text("Read".tl),
+          onPressed: () {
+            final localComic = LocalManager().find(
+              widget.id,
+              ComicType.fromKey(widget.sourceKey),
+            );
+            if (localComic == null) {
+              context.showMessage(message: "Local comic not found".tl);
+              return;
+            }
+            localComic.read();
+          },
+        ),
+      if (notFound && isFavorite)
+        FilledButton.tonalIcon(
+          icon: const Icon(Icons.delete_outline),
+          onPressed: removeFavorite,
+          label: Text('Remove Favorite'.tl),
+        ),
+      if (notFound && isFavorite && isSuspect)
+        OutlinedButton.icon(
+          icon: const Icon(Icons.restart_alt),
+          onPressed: clearSuspectAndRecheck,
+          label: Text('Clear Suspected Removed'.tl),
+        ),
+    ];
+    return NetworkError(
+      message: error!,
+      retry: retry,
+      action: buttons.isEmpty ? null : buttons,
+    );
+  }
+
+  Future<void> removeFavorite() async {
+    final result = await NetworkFavoriteCacheManager().removeFavoriteEverywhere(
+      widget.sourceKey,
+      widget.id,
+    );
+    if (!mounted) return;
+    if (result.error) {
+      context.showMessage(message: result.errorMessage!);
+      return;
     }
-    return NetworkError(message: error!, retry: retry, action: action);
+    context.pop();
+  }
+
+  Future<void> clearSuspectAndRecheck() async {
+    NetworkFavoriteCacheManager().clearComicSuspectGoneEverywhere(
+      widget.sourceKey,
+      widget.id,
+    );
+    context.showMessage(message: 'Rechecking'.tl);
+    final succeeded = await recheckFavoriteComic(widget.sourceKey, widget.id);
+    if (!mounted) return;
+    if (succeeded) {
+      retry();
+    } else {
+      context.showMessage(message: error ?? 'Failed'.tl);
+    }
   }
 
   @override
@@ -251,7 +301,20 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   }
 
   @override
+  void onLoadError(String message) {
+    if (!isNotFoundError(message)) return;
+    final cache = NetworkFavoriteCacheManager();
+    if (cache.isFavoriteKnown(widget.sourceKey, widget.id)) {
+      cache.recordComicNotFoundEverywhere(widget.sourceKey, widget.id);
+    }
+  }
+
+  @override
   Future<void> onDataLoaded() async {
+    final cache = NetworkFavoriteCacheManager();
+    if (cache.isComicSuspectGone(widget.sourceKey, widget.id)) {
+      cache.clearComicSuspectGoneEverywhere(widget.sourceKey, widget.id);
+    }
     isLiked = comic.isLiked ?? false;
     isFavorite =
         comic.isFavorite ??

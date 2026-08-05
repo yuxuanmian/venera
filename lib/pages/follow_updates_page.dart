@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:venera/components/components.dart';
@@ -11,16 +12,6 @@ import 'package:venera/foundation/global_state.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/utils/translations.dart';
 
-NetworkFavoriteFolderRef? get _followFolder =>
-    NetworkFavoriteFolderRef.tryFromJson(
-      appdata.settings['followUpdatesFolder'],
-    );
-
-String _folderLabel(NetworkFavoriteFolderRef folder) {
-  final source = ComicSource.find(folder.sourceKey);
-  return '${source?.name ?? folder.sourceKey} · ${folder.title ?? folder.folderId}';
-}
-
 class FollowUpdatesWidget extends StatefulWidget {
   const FollowUpdatesWidget({super.key});
 
@@ -32,11 +23,16 @@ class _FollowUpdatesWidgetState
     extends AutomaticGlobalState<FollowUpdatesWidget> {
   int _count = 0;
 
+  bool get _enabled => followUpdatesEnabled;
+
   void getCount() {
-    final folder = _followFolder;
-    _count = folder == null
-        ? 0
-        : NetworkFavoriteCacheManager().countUpdates(folder);
+    if (!_enabled) {
+      _count = 0;
+      return;
+    }
+    _count = NetworkFavoriteCacheManager().countUpdatesInFolders(
+      getFollowUpdateFolders(),
+    );
   }
 
   void updateCount() => setState(getCount);
@@ -76,7 +72,20 @@ class _FollowUpdatesWidgetState
                   ],
                 ),
               ).paddingHorizontal(16),
-              if (_count > 0)
+              if (!_enabled)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 2,
+                  ),
+                  margin: const EdgeInsets.only(bottom: 16, left: 16),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(8),
+                    color: Theme.of(context).colorScheme.surfaceContainerHigh,
+                  ),
+                  child: Text('Follow updates disabled'.tl, style: ts.s16),
+                ),
+              if (_enabled && _count > 0) ...[
                 Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 16,
@@ -87,11 +96,28 @@ class _FollowUpdatesWidgetState
                     borderRadius: BorderRadius.circular(8),
                     color: Theme.of(context).colorScheme.primaryContainer,
                   ),
-                  child: Text(
-                    '@c updates'.tlParams({'c': _count}),
-                    style: ts.s16,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.new_releases,
+                        size: 16,
+                        color: Theme.of(context).colorScheme.onPrimaryContainer,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        '@c updates'.tlParams({'c': _count}),
+                        style: ts.s16.copyWith(
+                          color: Theme.of(
+                            context,
+                          ).colorScheme.onPrimaryContainer,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
+              ],
             ],
           ),
         ),
@@ -113,8 +139,25 @@ class FollowUpdatesPage extends StatefulWidget {
 class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
   List<FavoriteItemWithUpdateInfo> updatedComics = [];
   List<FavoriteItemWithUpdateInfo> allComics = [];
+  int _allComicsPage = 0;
+  int _allComicsTotal = 0;
+  int _allComicsRequestId = 0;
+  bool _allComicsHasMore = false;
+  bool _allComicsLoading = false;
+  bool _allComicsExpanded = false;
+  bool _allComicsLoadedOnce = false;
+  List<FavoriteItemWithUpdateInfo> suspectComics = [];
+  bool _suspectComicsExpanded = true;
 
-  NetworkFavoriteFolderRef? get folder => _followFolder;
+  bool get _enabled => followUpdatesEnabled;
+
+  bool get _baselineIncomplete {
+    if (!_enabled) return false;
+    return NetworkFavoriteCacheManager().countUncheckedComicsInFolders(
+          getFollowUpdateFolders(),
+        ) >
+        0;
+  }
 
   @override
   void initState() {
@@ -122,63 +165,93 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
     updateComics();
   }
 
-  void sortComics() {
-    allComics.sort((a, b) {
-      final aTime = a.updateTime;
-      final bTime = b.updateTime;
-      if (aTime == null) return bTime == null ? 0 : 1;
-      if (bTime == null) return -1;
-      return bTime.compareTo(aTime);
-    });
+  @override
+  Widget build(BuildContext context) {
+    final baselineIncomplete = _baselineIncomplete;
+    return Scaffold(
+      body: SmoothCustomScrollView(
+        slivers: [
+          SliverAppbar(
+            title: Text('Follow Updates'.tl),
+            actions: [
+              if (_enabled && baselineIncomplete)
+                IconButton(
+                  tooltip: 'Baseline progress'.tl,
+                  onPressed: showBaselineProgress,
+                  icon: ValueListenableBuilder<BaselineStatus?>(
+                    valueListenable: FollowUpdatesService.baselineStatus,
+                    builder: (context, status, _) {
+                      final running = status?.isRunning == true;
+                      return running
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.sync_problem);
+                    },
+                  ),
+                ),
+              if (_enabled)
+                PopupMenuButton<String>(
+                  tooltip: 'more'.tl,
+                  icon: const Icon(Icons.more_vert),
+                  onSelected: (value) {
+                    if (value == 'disable') disable();
+                  },
+                  itemBuilder: (context) => [
+                    PopupMenuItem(
+                      value: 'disable',
+                      child: Text(
+                        'Disable'.tl,
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+            ],
+          ),
+          if (!_enabled)
+            buildDisabled(context)
+          else ...[
+            if (baselineIncomplete) buildBaselineInProgress(context),
+            const SliverPadding(padding: EdgeInsets.only(top: 8)),
+            buildUpdatedComics(),
+            buildSuspectComics(),
+            buildAllComics(),
+          ],
+        ],
+      ),
+    );
   }
 
-  @override
-  Widget build(BuildContext context) => Scaffold(
-    body: SmoothCustomScrollView(
-      slivers: [
-        SliverAppbar(title: Text('Follow Updates'.tl)),
-        folder == null ? buildNotConfigured(context) : buildConfigured(context),
-        const SliverPadding(padding: EdgeInsets.only(top: 8)),
-        buildUpdatedComics(),
-        buildAllComics(),
-      ],
-    ),
-  );
-
-  Widget buildNotConfigured(BuildContext context) => SliverToBoxAdapter(
-    child: Container(
-      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-      decoration: BoxDecoration(
-        border: Border.all(
-          color: Theme.of(context).colorScheme.outlineVariant,
-          width: 0.6,
-        ),
-        borderRadius: BorderRadius.circular(8),
-      ),
+  Widget buildDisabled(BuildContext context) => SliverFillRemaining(
+    hasScrollBody: false,
+    child: Center(
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          ListTile(
-            leading: const Icon(Icons.info_outline),
-            title: Text('Not Configured'.tl),
+          Icon(
+            Icons.power_settings_new,
+            size: 48,
+            color: Theme.of(context).colorScheme.outline,
           ),
-          Text(
-            'Choose a remote favorite folder to follow updates.'.tl,
-            style: ts.s16,
-          ).paddingHorizontal(16),
-          const SizedBox(height: 8),
-          FilledButton.tonal(
-            onPressed: showSelector,
-            child: Text('Choose Folder'.tl),
-          ).paddingHorizontal(16).toAlign(Alignment.centerRight),
           const SizedBox(height: 16),
+          Text('Follow updates disabled'.tl, style: ts.s18),
+          const SizedBox(height: 16),
+          FilledButton.icon(
+            onPressed: enable,
+            icon: const Icon(Icons.play_arrow),
+            label: Text('Enable Follow Updates'.tl),
+          ),
         ],
       ),
     ),
   );
 
-  Widget buildConfigured(BuildContext context) {
-    final selected = folder!;
+  Widget buildBaselineInProgress(BuildContext context) {
     return SliverToBoxAdapter(
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
@@ -193,33 +266,72 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             ListTile(
-              leading: const Icon(Icons.stars_outlined),
-              title: Text(_folderLabel(selected)),
+              leading: const Icon(Icons.sync),
+              title: Text('Baseline in progress'.tl),
             ),
-            Text(
-              'Automatic update checking enabled.'.tl,
-              style: ts.s14,
-            ).paddingHorizontal(16),
-            Text(
-              'The app will check cached favorites at most once a day.'.tl,
-              style: ts.s14,
-            ).paddingHorizontal(16),
-            const SizedBox(height: 8),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                TextButton(
-                  onPressed: showSelector,
-                  child: Text('Change Folder'.tl),
-                ),
-                FilledButton.tonal(
-                  onPressed: checkNow,
-                  child: Text('Check Now'.tl),
-                ),
-                const SizedBox(width: 16),
-              ],
+            ValueListenableBuilder<BaselineStatus?>(
+              valueListenable: FollowUpdatesService.baselineStatus,
+              builder: (context, status, _) {
+                final cache = NetworkFavoriteCacheManager();
+                final folders = getFollowUpdateFolders();
+                final total = cache.countCachedComicsInFolders(folders);
+                final completed =
+                    total - cache.countUncheckedComicsInFolders(folders);
+                final running = status?.isRunning == true;
+                final incomplete = !running && total > completed;
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: LinearProgressIndicator(
+                        value: total == 0 ? null : completed / total,
+                      ),
+                    ),
+                    Text(
+                      '@completed / @total checked'.tlParams({
+                        'completed': completed,
+                        'total': total,
+                      }),
+                      style: ts.s14,
+                    ).paddingHorizontal(16).paddingTop(8),
+                    if (status != null && status.currentComic != null)
+                      Text(
+                        'Checking: @title'.tlParams({
+                          'title': status.currentComic!,
+                        }),
+                        style: ts.s12,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ).paddingHorizontal(16).paddingTop(4),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            running
+                                ? 'Baseline runs in the background'.tl
+                                : status != null && status.errors > 0
+                                ? '@count failed, will retry later'.tlParams({
+                                    'count': status.errors,
+                                  })
+                                : 'Baseline incomplete, waiting for next check'
+                                      .tl,
+                            style: ts.s12,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (incomplete)
+                          FilledButton.tonal(
+                            onPressed: FollowUpdatesService.startBaseline,
+                            child: Text('Retry'.tl),
+                          ),
+                      ],
+                    ).paddingHorizontal(16).paddingVertical(8),
+                  ],
+                );
+              },
             ),
-            const SizedBox(height: 16),
           ],
         ),
       ),
@@ -246,26 +358,27 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
               const SizedBox(width: 8),
               Text('Updates'.tl, style: ts.s18),
               const Spacer(),
+              ValueListenableBuilder<bool>(
+                valueListenable: FollowUpdatesService.taskRunning,
+                builder: (context, running, _) {
+                  return IconButton(
+                    tooltip: 'Check Now'.tl,
+                    onPressed: running ? null : startRefresh,
+                    icon: running
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.refresh),
+                  );
+                },
+              ),
               if (updatedComics.isNotEmpty)
                 IconButton(
+                  tooltip: 'Mark all as read'.tl,
                   icon: const Icon(Icons.clear_all),
-                  onPressed: () => showConfirmDialog(
-                    context: App.rootContext,
-                    title: 'Mark all as read'.tl,
-                    content: 'Do you want to mark all as read?'.tl,
-                    onConfirm: () {
-                      final selected = folder;
-                      if (selected != null) {
-                        for (final comic in updatedComics) {
-                          NetworkFavoriteCacheManager().markAsRead(
-                            selected,
-                            comic.id,
-                          );
-                        }
-                      }
-                      updateFollowUpdatesUI();
-                    },
-                  ),
+                  onPressed: markAllAsRead,
                 ),
             ],
           ),
@@ -281,174 +394,344 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
         SliverGridComics(comics: updatedComics)
       else
         SliverToBoxAdapter(
-          child: Text(
-            'No updates found'.tl,
-          ).paddingHorizontal(16).paddingVertical(8),
+          child: SizedBox(
+            height: math.max(240, MediaQuery.sizeOf(context).height * 0.5),
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.notifications_none,
+                    size: 40,
+                    color: Theme.of(context).colorScheme.outline,
+                  ),
+                  const SizedBox(height: 8),
+                  Text('No updates found'.tl, style: ts.s16),
+                ],
+              ),
+            ),
+          ),
         ),
+    ],
+  );
+
+  void markAllAsRead() {
+    showConfirmDialog(
+      context: App.rootContext,
+      title: 'Mark all as read'.tl,
+      content: 'Do you want to mark all as read?'.tl,
+      onConfirm: () {
+        final cache = NetworkFavoriteCacheManager();
+        for (final comic in updatedComics) {
+          cache.markReadInAllFolders(comic.sourceKey, comic.id);
+        }
+        updateFollowUpdatesUI();
+      },
+    );
+  }
+
+  Widget buildSuspectComics() => SliverMainAxisGroup(
+    slivers: [
+      SliverToBoxAdapter(
+        child: InkWell(
+          onTap: () =>
+              setState(() => _suspectComicsExpanded = !_suspectComicsExpanded),
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(
+                  color: Theme.of(context).colorScheme.outlineVariant,
+                  width: 0.6,
+                ),
+              ),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.error_outline),
+                const SizedBox(width: 8),
+                Text('Suspected removed'.tl, style: ts.s18),
+                if (suspectComics.isNotEmpty) ...[
+                  const SizedBox(width: 8),
+                  Text('${suspectComics.length}', style: ts.s14),
+                ],
+                const Spacer(),
+                AnimatedRotation(
+                  turns: _suspectComicsExpanded ? 0.5 : 0,
+                  duration: const Duration(milliseconds: 200),
+                  child: const Icon(Icons.expand_more),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+      if (_suspectComicsExpanded) ...[
+        SliverGridComics(
+          comics: suspectComics,
+          badgeBuilder: (_) => 'Suspected removed'.tl,
+          dimmedBuilder: (_) => true,
+        ),
+      ],
     ],
   );
 
   Widget buildAllComics() => SliverMainAxisGroup(
     slivers: [
       SliverToBoxAdapter(
-        child: Container(
-          margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          padding: const EdgeInsets.symmetric(vertical: 4),
-          decoration: BoxDecoration(
-            border: Border(
-              bottom: BorderSide(
-                color: Theme.of(context).colorScheme.outlineVariant,
-                width: 0.6,
+        child: InkWell(
+          onTap: _toggleAllComics,
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(
+                  color: Theme.of(context).colorScheme.outlineVariant,
+                  width: 0.6,
+                ),
               ),
             ),
-          ),
-          child: Row(
-            children: [
-              const Icon(Icons.list),
-              const SizedBox(width: 8),
-              Text('All Comics'.tl, style: ts.s18),
-            ],
+            child: Row(
+              children: [
+                const Icon(Icons.list),
+                const SizedBox(width: 8),
+                Text('All Comics'.tl, style: ts.s18),
+                const Spacer(),
+                AnimatedRotation(
+                  turns: _allComicsExpanded ? 0.5 : 0,
+                  duration: const Duration(milliseconds: 200),
+                  child: const Icon(Icons.expand_more),
+                ),
+              ],
+            ),
           ),
         ),
       ),
-      SliverGridComics(comics: allComics),
+      if (_allComicsExpanded) ...[
+        SliverGridComics(
+          comics: allComics,
+          badgeBuilder: (comic) =>
+              comic is FavoriteItemWithUpdateInfo && comic.isSuspectGone
+              ? 'Suspected removed'.tl
+              : null,
+          dimmedBuilder: (comic) =>
+              comic is FavoriteItemWithUpdateInfo && comic.isSuspectGone,
+          onLastItemBuild: _loadMoreAllComics,
+        ),
+        if (_allComicsHasMore)
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              child: Center(
+                child: _allComicsLoading
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const SizedBox.shrink(),
+              ),
+            ),
+          ),
+        if (_allComicsLoadedOnce && allComics.isEmpty)
+          SliverToBoxAdapter(
+            child: Text(
+              'No cached favorites found'.tl,
+            ).paddingHorizontal(16).paddingVertical(8),
+          ),
+      ],
     ],
   );
 
-  Future<List<NetworkFavoriteFolder>> _loadAvailableFolders() async {
-    final enabled = List<String>.from(appdata.settings['favorites'] as List);
-    final data = enabled.map(getFavoriteDataOrNull).whereType<FavoriteData>();
-    for (final favoriteData in data) {
-      final source = ComicSource.find(favoriteData.key);
-      if (source?.isLogged == true) {
-        await NetworkFavoriteCacheManager().refreshFolders(favoriteData);
-      }
+  void _toggleAllComics() {
+    setState(() => _allComicsExpanded = !_allComicsExpanded);
+    if (_allComicsExpanded && !_allComicsLoadedOnce) {
+      _loadAllComics();
     }
-    return NetworkFavoriteCacheManager().getAllCachedFolders().where((folder) {
-      return enabled.contains(folder.sourceKey) &&
-          ComicSource.find(folder.sourceKey)?.isLogged == true;
-    }).toList();
   }
 
-  Future<void> showSelector() async {
-    final loading = showLoadingDialog(
-      App.rootContext,
-      message: 'Loading remote favorite folders...'.tl,
-    );
-    final folders = await _loadAvailableFolders();
-    loading.close();
-    if (!mounted) return;
-    if (folders.isEmpty) {
-      context.showMessage(message: 'No remote folders available'.tl);
-      return;
-    }
-    NetworkFavoriteFolderRef? selected = folder;
-    await showDialog(
-      context: App.rootContext,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) => ContentDialog(
-          title: 'Choose Folder'.tl,
-          content: SizedBox(
-            width: 480,
-            child: RadioGroup<NetworkFavoriteFolderRef>(
-              groupValue: selected,
-              onChanged: (value) => setDialogState(() => selected = value),
-              child: ListView(
-                shrinkWrap: true,
-                children: [
-                  for (final candidate in folders)
-                    RadioListTile<NetworkFavoriteFolderRef>(
-                      value: candidate,
-                      title: Text(_folderLabel(candidate)),
-                    ),
-                ],
-              ),
-            ),
-          ),
-          actions: [
-            if (folder != null)
-              TextButton(
-                onPressed: () {
-                  disable();
-                  context.pop();
-                },
-                child: Text('Disable'.tl),
-              ),
-            FilledButton(
-              onPressed: selected == null
-                  ? null
-                  : () {
-                      context.pop();
-                      setFolder(selected!);
-                    },
-              child: Text('Confirm'.tl),
-            ),
-          ],
-        ),
-      ),
-    );
+  void enable() {
+    appdata.settings['followUpdatesEnabled'] = true;
+    appdata.saveData();
+    updateFollowUpdatesUI();
+    FollowUpdatesService.startBaseline();
   }
 
   void disable() {
+    FollowUpdatesService.cancelChecking();
+    FollowUpdatesService.baselineStatus.value = null;
+    appdata.settings['followUpdatesEnabled'] = false;
     appdata.settings['followUpdatesFolder'] = null;
     appdata.saveData();
     updateFollowUpdatesUI();
   }
 
-  Future<void> setFolder(NetworkFavoriteFolderRef selected) async {
-    FollowUpdatesService.cancelChecking();
-    final comics = NetworkFavoriteCacheManager().getComicsWithUpdatesInfo(
-      selected,
+  void startRefresh() {
+    if (!_enabled || FollowUpdatesService.taskRunning.value) return;
+    context.showMessage(message: 'Refresh started'.tl);
+    unawaited(
+      FollowUpdatesService.runCheckNow().then((_) {
+        if (mounted) updateFollowUpdatesUI();
+      }),
     );
-    if (comics.isNotEmpty) {
-      final loading = showLoadingDialog(
-        App.rootContext,
-        withProgress: true,
-        cancelButtonText: 'Cancel'.tl,
-        message: 'Updating comics...'.tl,
-      );
-      await for (final progress in updateFolder(selected, true)) {
-        loading.setProgress(
-          progress.total == 0 ? 1 : progress.current / progress.total,
-        );
-      }
-      loading.close();
-    }
-    appdata.settings['followUpdatesFolder'] = selected.toJson();
-    await appdata.saveData();
-    updateFollowUpdatesUI();
   }
 
-  Future<void> checkNow() async {
-    final selected = folder;
-    if (selected == null) return;
-    FollowUpdatesService.cancelChecking();
-    final loading = showLoadingDialog(
-      App.rootContext,
-      withProgress: true,
-      cancelButtonText: 'Cancel'.tl,
-      message: 'Updating comics...'.tl,
+  Future<void> showBaselineProgress() async {
+    if (!_enabled) return;
+    await showDialog(
+      context: App.rootContext,
+      builder: (context) => ContentDialog(
+        title: 'Baseline progress'.tl,
+        content: ValueListenableBuilder<BaselineStatus?>(
+          valueListenable: FollowUpdatesService.baselineStatus,
+          builder: (context, status, _) {
+            final cache = NetworkFavoriteCacheManager();
+            final folders = getFollowUpdateFolders();
+            final total = cache.countCachedComicsInFolders(folders);
+            final completed =
+                total - cache.countUncheckedComicsInFolders(folders);
+            final running = status?.isRunning == true;
+            final incomplete = !running && total > completed;
+            return Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  LinearProgressIndicator(
+                    value: total == 0 ? null : completed / total,
+                  ),
+                  Text(
+                    '@completed / @total checked'.tlParams({
+                      'completed': completed,
+                      'total': total,
+                    }),
+                    style: ts.s16,
+                  ).paddingTop(12),
+                  if (status != null && status.currentComic != null)
+                    Text(
+                      'Checking: @title'.tlParams({
+                        'title': status.currentComic!,
+                      }),
+                      style: ts.s14,
+                    ).paddingTop(8),
+                  if (status != null && status.errors > 0)
+                    Text(
+                      '@count failed'.tlParams({'count': status.errors}),
+                      style: ts.s14,
+                    ).paddingTop(8),
+                  Text(
+                    running
+                        ? 'Baseline runs in the background'.tl
+                        : incomplete
+                        ? 'Baseline incomplete, waiting for next check'.tl
+                        : 'Baseline complete'.tl,
+                    style: ts.s14,
+                  ).paddingTop(12),
+                ],
+              ),
+            );
+          },
+        ),
+        actions: [
+          ValueListenableBuilder<BaselineStatus?>(
+            valueListenable: FollowUpdatesService.baselineStatus,
+            builder: (context, status, _) {
+              final cache = NetworkFavoriteCacheManager();
+              final folders = getFollowUpdateFolders();
+              final total = cache.countCachedComicsInFolders(folders);
+              final completed =
+                  total - cache.countUncheckedComicsInFolders(folders);
+              final running = status?.isRunning == true;
+              final incomplete = !running && total > completed;
+              return Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (incomplete)
+                    FilledButton.tonal(
+                      onPressed: FollowUpdatesService.startBaseline,
+                      child: Text('Retry'.tl),
+                    ),
+                  if (incomplete) const SizedBox(width: 8),
+                  FilledButton(onPressed: context.pop, child: Text('Close'.tl)),
+                ],
+              );
+            },
+          ),
+        ],
+      ),
     );
-    var updated = 0;
-    await for (final progress in updateFolder(selected, true)) {
-      loading.setProgress(
-        progress.total == 0 ? 1 : progress.current / progress.total,
-      );
-      updated = progress.updated;
-    }
-    loading.close();
-    if (updated > 0) updateFollowUpdatesUI();
   }
 
   void updateComics() {
-    final selected = folder;
     setState(() {
-      allComics = selected == null
-          ? []
-          : NetworkFavoriteCacheManager().getComicsWithUpdatesInfo(selected);
-      sortComics();
-      updatedComics = allComics.where((comic) => comic.hasNewUpdate).toList();
+      final cache = NetworkFavoriteCacheManager();
+      if (!_enabled) {
+        updatedComics = [];
+        allComics = [];
+        suspectComics = [];
+        _allComicsPage = 0;
+        _allComicsTotal = 0;
+        _allComicsHasMore = false;
+        _allComicsLoading = false;
+        _allComicsExpanded = false;
+        _allComicsLoadedOnce = false;
+        _allComicsRequestId++;
+        return;
+      }
+      updatedComics = cache.getUpdatedComicsInFolders(getFollowUpdateFolders());
+      suspectComics = cache.getSuspectGoneComicsInFolders(
+        getFollowUpdateFolders(),
+      );
+      allComics = [];
+      _allComicsPage = 0;
+      _allComicsTotal = 0;
+      _allComicsHasMore = false;
+      _allComicsLoading = false;
+      _allComicsLoadedOnce = false;
+      _allComicsRequestId++;
     });
+    if (_enabled && _allComicsExpanded) {
+      _loadAllComics();
+    }
+  }
+
+  Future<void> _loadAllComics() async {
+    if (!_enabled || !_allComicsExpanded || _allComicsLoading) return;
+    if (!_allComicsLoadedOnce) {
+      setState(() {
+        _allComicsTotal = NetworkFavoriteCacheManager()
+            .countComicsWithUpdatesInfoInFolders(getFollowUpdateFolders());
+        _allComicsHasMore = _allComicsTotal > 0;
+        _allComicsLoadedOnce = true;
+      });
+      if (!_allComicsHasMore) return;
+    } else if (!_allComicsHasMore) {
+      return;
+    }
+    final requestId = _allComicsRequestId;
+    setState(() => _allComicsLoading = true);
+    final page = NetworkFavoriteCacheManager()
+        .getComicsWithUpdatesInfoPageInFolders(
+          getFollowUpdateFolders(),
+          limit: 50,
+          offset: _allComicsPage * 50,
+        );
+    if (!mounted || requestId != _allComicsRequestId) return;
+    setState(() {
+      allComics.addAll(page);
+      _allComicsPage++;
+      _allComicsLoading = false;
+      _allComicsHasMore = allComics.length < _allComicsTotal;
+    });
+  }
+
+  void _loadMoreAllComics() {
+    if (!_allComicsLoading && _allComicsHasMore) {
+      _loadAllComics();
+    }
   }
 
   @override
@@ -457,23 +740,172 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
 
 /// Background service for checking cached remote favorites.
 abstract class FollowUpdatesService {
-  static bool _isChecking = false;
-  static void Function()? _cancelChecking;
   static bool _isInitialized = false;
+  static bool _taskRunning = false;
+  static Future<void>? _activeTask;
+  static void Function()? _cancelCurrent;
 
-  static void cancelChecking() => _cancelChecking?.call();
+  /// Latest progress of the background baseline run, or null when no baseline
+  /// task is active.
+  static final ValueNotifier<BaselineStatus?> baselineStatus =
+      ValueNotifier<BaselineStatus?>(null);
 
-  static void _check() async {
-    if (_isChecking) return;
-    _isChecking = true;
-    var isCanceled = false;
-    _cancelChecking = () => isCanceled = true;
+  static final ValueNotifier<bool> taskRunning = ValueNotifier<bool>(false);
+
+  static void cancelChecking() => _cancelCurrent?.call();
+
+  static Future<void> _startTask(
+    Future<void> Function(bool Function() isCanceled) task, {
+    required bool cancelExisting,
+  }) async {
+    if (_taskRunning) {
+      if (!cancelExisting) return;
+      _cancelCurrent?.call();
+      await _activeTask;
+    }
+    var cancelRequested = false;
+    _taskRunning = true;
+    taskRunning.value = true;
+    final current = task(() => cancelRequested);
+    _activeTask = current;
+    _cancelCurrent = () => cancelRequested = true;
+    try {
+      await current;
+    } catch (e, s) {
+      Log.error('Follow updates task', e, s);
+    } finally {
+      if (identical(_activeTask, current)) {
+        _activeTask = null;
+        _taskRunning = false;
+        taskRunning.value = false;
+        _cancelCurrent = null;
+      }
+    }
+  }
+
+  static void startBaseline() {
+    unawaited(
+      _startTask(
+        (isCanceled) => _runBaseline(isCanceled),
+        cancelExisting: true,
+      ),
+    );
+  }
+
+  static Future<void> runCheckNow() {
+    return _startTask((isCanceled) async {
+      for (final folder in getFollowUpdateFolders()) {
+        if (isCanceled()) return;
+        await for (final _ in updateFolder(
+          folder,
+          FollowUpdateMode.regular,
+          isCanceled: isCanceled,
+          ignoreRetryAfter: true,
+        )) {
+          if (isCanceled()) return;
+        }
+      }
+    }, cancelExisting: true);
+  }
+
+  static Future<void> _runBaseline(bool Function() isCanceled) async {
+    final folders = getFollowUpdateFolders();
+    final cache = NetworkFavoriteCacheManager();
+    var total = cache.countCachedComicsInFolders(folders);
+    var completed = total - cache.countUncheckedComicsInFolders(folders);
+    var errors = 0;
+    var updated = 0;
+    Log.info(
+      'Follow updates',
+      'Start baseline: ${folders.length} folders, '
+          '${total - completed} unchecked',
+    );
+    baselineStatus.value = BaselineStatus(
+      isRunning: true,
+      total: total,
+      completed: completed,
+      errors: 0,
+      updated: 0,
+    );
+    try {
+      var checkedBeforeFolder = completed;
+      for (final folder in folders) {
+        if (isCanceled()) break;
+        var folderErrors = 0;
+        var folderUpdated = 0;
+        await for (final progress in updateFolder(
+          folder,
+          FollowUpdateMode.missing,
+          isCanceled: isCanceled,
+          ignoreRetryAfter: true,
+        )) {
+          if (isCanceled()) break;
+          folderErrors = progress.errors;
+          folderUpdated = progress.updated;
+          baselineStatus.value = BaselineStatus(
+            isRunning: true,
+            total: total,
+            completed: checkedBeforeFolder + progress.current,
+            errors: errors + folderErrors,
+            updated: updated + folderUpdated,
+            currentComic: progress.comic?.title,
+          );
+        }
+        if (isCanceled()) break;
+        errors += folderErrors;
+        updated += folderUpdated;
+        checkedBeforeFolder =
+            total - cache.countUncheckedComicsInFolders(folders);
+      }
+      if (isCanceled()) {
+        Log.info('Follow updates', 'Baseline canceled');
+        baselineStatus.value = null;
+        return;
+      }
+      final remaining = cache.countUncheckedComicsInFolders(
+        getFollowUpdateFolders(),
+      );
+      if (remaining > 0) {
+        final last = baselineStatus.value;
+        baselineStatus.value = BaselineStatus(
+          isRunning: false,
+          total: last?.total ?? total,
+          completed: last?.completed ?? completed,
+          errors: last?.errors ?? errors,
+          updated: last?.updated ?? updated,
+        );
+        Log.warning(
+          'Follow updates',
+          'Baseline incomplete: $remaining unchecked, '
+              '${baselineStatus.value?.errors} errors',
+        );
+      } else {
+        baselineStatus.value = null;
+        Log.info('Follow updates', 'Baseline complete');
+      }
+    } catch (e, s) {
+      Log.error('Follow updates baseline', e, s);
+      final last = baselineStatus.value;
+      baselineStatus.value = BaselineStatus(
+        isRunning: false,
+        total: last?.total ?? total,
+        completed: last?.completed ?? completed,
+        errors: last?.errors ?? errors,
+        updated: last?.updated ?? updated,
+      );
+    } finally {
+      updateFollowUpdatesUI();
+    }
+  }
+
+  static Future<void> _check(bool Function() isCanceled) async {
+    if (!followUpdatesEnabled) return;
     var updated = 0;
     try {
       final enabled = appdata.settings['favorites'];
       if (enabled is List) {
         for (final key in enabled.whereType<String>()) {
-          if (isCanceled) return;
+          if (isCanceled()) return;
           final source = ComicSource.find(key);
           final data = source?.favoriteData;
           if (data == null || !source!.isLogged) continue;
@@ -485,24 +917,35 @@ abstract class FollowUpdatesService {
         }
       }
 
-      final cachedFolders = NetworkFavoriteCacheManager()
-          .getAllCachedFolders()
-          .where((folder) {
-            final source = ComicSource.find(folder.sourceKey);
-            return enabled is List &&
-                enabled.contains(folder.sourceKey) &&
-                source?.isLogged == true &&
-                source?.loadComicInfo != null;
-          });
-      for (final folder in cachedFolders) {
-        await for (final progress in updateFolder(folder, false)) {
-          if (isCanceled) return;
+      for (final folder in getFollowUpdateFolders()) {
+        if (isCanceled()) return;
+        final cache = NetworkFavoriteCacheManager();
+        final onlyMissing = cache.hasUncheckedComics(folder);
+        await for (final progress in updateFolder(
+          folder,
+          onlyMissing ? FollowUpdateMode.missing : FollowUpdateMode.regular,
+          isCanceled: isCanceled,
+        )) {
+          if (isCanceled()) return;
           updated += progress.updated;
+          if (onlyMissing && progress.total > 0) {
+            baselineStatus.value = BaselineStatus(
+              isRunning: !isCanceled(),
+              total: progress.total,
+              completed: progress.current,
+              errors: progress.errors,
+              updated: progress.updated,
+              currentComic: progress.comic?.title,
+            );
+          }
+        }
+        if (onlyMissing &&
+            cache.countUncheckedComicsInFolders(getFollowUpdateFolders()) ==
+                0) {
+          baselineStatus.value = null;
         }
       }
     } finally {
-      _cancelChecking = null;
-      _isChecking = false;
       if (updated > 0) updateFollowUpdatesUI();
     }
   }
@@ -510,9 +953,18 @@ abstract class FollowUpdatesService {
   static void initChecker() {
     if (_isInitialized) return;
     _isInitialized = true;
-    _check();
+    if (appdata.settings['followUpdatesFolder'] != null &&
+        appdata.settings['followUpdatesEnabled'] != true) {
+      appdata.settings['followUpdatesEnabled'] = true;
+      appdata.settings['followUpdatesFolder'] = null;
+      appdata.saveData();
+    }
+    unawaited(_startTask(_check, cancelExisting: false));
     NetworkFavoriteCacheManager().addListener(updateFollowUpdatesUI);
-    Timer.periodic(const Duration(minutes: 10), (_) => _check());
+    Timer.periodic(
+      const Duration(minutes: 10),
+      (_) => unawaited(_startTask(_check, cancelExisting: false)),
+    );
   }
 }
 

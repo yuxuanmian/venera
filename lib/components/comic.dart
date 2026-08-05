@@ -28,6 +28,7 @@ class ComicTile extends StatelessWidget {
     required this.comic,
     this.enableLongPressed = true,
     this.badge,
+    this.dimmed = false,
     this.menuOptions,
     this.onTap,
     this.onLongPressed,
@@ -39,6 +40,8 @@ class ComicTile extends StatelessWidget {
   final bool enableLongPressed;
 
   final String? badge;
+
+  final bool dimmed;
 
   final List<MenuEntry>? menuOptions;
 
@@ -174,11 +177,65 @@ class ComicTile extends StatelessWidget {
     if (image == null) {
       return const SizedBox();
     }
-    return AnimatedImage(
+    Widget result = AnimatedImage(
       image: image,
       fit: BoxFit.cover,
       width: double.infinity,
       height: double.infinity,
+    );
+    if (dimmed) {
+      result = ColorFiltered(
+        colorFilter: const ColorFilter.matrix(<double>[
+          0.2126,
+          0.7152,
+          0.0722,
+          0,
+          0,
+          0.2126,
+          0.7152,
+          0.0722,
+          0,
+          0,
+          0.2126,
+          0.7152,
+          0.0722,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+        ]),
+        child: result,
+      );
+    }
+    return result;
+  }
+
+  Widget _buildCoverRibbon(BuildContext context) {
+    return Positioned(
+      top: 5,
+      left: -16,
+      child: Transform.rotate(
+        angle: -0.5,
+        child: Container(
+          width: 84,
+          height: 20,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(color: Theme.of(context).colorScheme.error),
+          child: Text(
+            badge ?? 'Suspected removed'.tl,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: Theme.of(context).colorScheme.onError,
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -202,7 +259,12 @@ class ComicTile extends StatelessWidget {
             ],
           ),
           clipBehavior: Clip.antiAlias,
-          child: buildImage(context),
+          child: Stack(
+            children: [
+              Positioned.fill(child: buildImage(context)),
+              if (dimmed) _buildCoverRibbon(context),
+            ],
+          ),
         );
 
         if (heroID != null) {
@@ -262,7 +324,12 @@ class ComicTile extends StatelessWidget {
             ],
           ),
           clipBehavior: Clip.antiAlias,
-          child: buildImage(context),
+          child: Stack(
+            children: [
+              Positioned.fill(child: buildImage(context)),
+              if (dimmed) _buildCoverRibbon(context),
+            ],
+          ),
         );
 
         if (heroID != null) {
@@ -280,6 +347,7 @@ class ComicTile extends StatelessWidget {
                 child: Stack(
                   children: [
                     Positioned.fill(child: image),
+                    if (dimmed) _buildCoverRibbon(context),
                     Align(
                       alignment: Alignment.bottomRight,
                       child: (() {
@@ -706,6 +774,7 @@ class SliverGridComics extends StatefulWidget {
     required this.comics,
     this.onLastItemBuild,
     this.badgeBuilder,
+    this.dimmedBuilder,
     this.menuBuilder,
     this.onTap,
     this.onLongPressed,
@@ -719,6 +788,8 @@ class SliverGridComics extends StatefulWidget {
   final void Function()? onLastItemBuild;
 
   final String? Function(Comic)? badgeBuilder;
+
+  final bool Function(Comic comic)? dimmedBuilder;
 
   final List<MenuEntry> Function(Comic)? menuBuilder;
 
@@ -794,6 +865,7 @@ class _SliverGridComicsState extends State<SliverGridComics> {
       selection: widget.selections,
       onLastItemBuild: widget.onLastItemBuild,
       badgeBuilder: widget.badgeBuilder,
+      dimmedBuilder: widget.dimmedBuilder,
       menuBuilder: widget.menuBuilder,
       onTap: widget.onTap,
       onLongPressed: widget.onLongPressed,
@@ -807,6 +879,7 @@ class _SliverGridComics extends StatelessWidget {
     required this.heroIDs,
     this.onLastItemBuild,
     this.badgeBuilder,
+    this.dimmedBuilder,
     this.menuBuilder,
     this.onTap,
     this.onLongPressed,
@@ -823,6 +896,8 @@ class _SliverGridComics extends StatelessWidget {
 
   final String? Function(Comic)? badgeBuilder;
 
+  final bool Function(Comic comic)? dimmedBuilder;
+
   final List<MenuEntry> Function(Comic)? menuBuilder;
 
   final void Function(Comic, int heroID)? onTap;
@@ -837,12 +912,14 @@ class _SliverGridComics extends StatelessWidget {
           onLastItemBuild?.call();
         }
         var badge = badgeBuilder?.call(comics[index]);
+        var dimmed = dimmedBuilder?.call(comics[index]) ?? false;
         var isSelected = selection == null
             ? false
             : selection![comics[index]] ?? false;
         var comic = ComicTile(
           comic: comics[index],
           badge: badge,
+          dimmed: dimmed,
           menuOptions: menuBuilder?.call(comics[index]),
           onTap: onTap != null
               ? () => onTap!(comics[index], heroIDs[index])
@@ -911,6 +988,8 @@ class ComicList extends StatefulWidget {
     this.trailingSliver,
     this.errorLeading,
     this.menuBuilder,
+    this.badgeBuilder,
+    this.dimmedBuilder,
     this.controller,
     this.refreshHandlerCallback,
     this.comicFilter,
@@ -929,6 +1008,10 @@ class ComicList extends StatefulWidget {
   final Widget? errorLeading;
 
   final List<MenuEntry> Function(Comic)? menuBuilder;
+
+  final String? Function(Comic comic)? badgeBuilder;
+
+  final bool Function(Comic comic)? dimmedBuilder;
 
   final ScrollController? controller;
 
@@ -1249,7 +1332,12 @@ class ComicListState extends State<ComicList> {
             child: Center(child: Text('No cached favorites found'.tl)),
           )
         else
-          SliverGridComics(comics: comics, menuBuilder: widget.menuBuilder),
+          SliverGridComics(
+            comics: comics,
+            menuBuilder: widget.menuBuilder,
+            badgeBuilder: widget.badgeBuilder,
+            dimmedBuilder: widget.dimmedBuilder,
+          ),
         if (widget.trailingSliver != null) widget.trailingSliver!,
       ],
     );
@@ -1293,6 +1381,8 @@ class ComicListState extends State<ComicList> {
         SliverGridComics(
           comics: _filterComics(_data[_page] ?? const []),
           menuBuilder: widget.menuBuilder,
+          badgeBuilder: widget.badgeBuilder,
+          dimmedBuilder: widget.dimmedBuilder,
         ),
         if (_data[_page]!.length > 6 && _maxPage != 1)
           _buildSliverPageSelector(),
@@ -1338,6 +1428,8 @@ class ComicListState extends State<ComicList> {
         SliverGridComics(
           comics: _filterComics(_data.values.expand((element) => element)),
           menuBuilder: widget.menuBuilder,
+          badgeBuilder: widget.badgeBuilder,
+          dimmedBuilder: widget.dimmedBuilder,
           onLastItemBuild: () {
             if (_error == null &&
                 (_maxPage == null || _data.length < _maxPage!)) {

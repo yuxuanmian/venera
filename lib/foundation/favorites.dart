@@ -138,24 +138,35 @@ class FavoriteItemWithUpdateInfo extends FavoriteItem {
     this.updateMarker,
     this.hasNewUpdate,
     int? lastCheckTime,
-  ) : lastCheckTime = lastCheckTime == null
-          ? null
-          : DateTime.fromMillisecondsSinceEpoch(lastCheckTime),
-      super(
-        id: item.id,
-        name: item.name,
-        coverPath: item.coverPath,
-        author: item.author,
-        sourceKeyValue: item.sourceKey,
-        tags: item.tags,
-        chapterCount: item.chapterCount,
-        remoteFavoriteId: item.favoriteId,
-      );
+    int? retryAfter, {
+    this.checkFailures = 0,
+    this.checkNotFoundCount = 0,
+    this.isSuspectGone = false,
+  }) : lastCheckTime = lastCheckTime == null
+           ? null
+           : DateTime.fromMillisecondsSinceEpoch(lastCheckTime),
+       retryAfter = retryAfter == null
+           ? null
+           : DateTime.fromMillisecondsSinceEpoch(retryAfter),
+       super(
+         id: item.id,
+         name: item.name,
+         coverPath: item.coverPath,
+         author: item.author,
+         sourceKeyValue: item.sourceKey,
+         tags: item.tags,
+         chapterCount: item.chapterCount,
+         remoteFavoriteId: item.favoriteId,
+       );
 
   final String? updateTime;
   final String? updateMarker;
   final DateTime? lastCheckTime;
+  final DateTime? retryAfter;
   final bool hasNewUpdate;
+  final int checkFailures;
+  final int checkNotFoundCount;
+  final bool isSuspectGone;
 
   @override
   String get description => '${updateTime ?? 'Unknown'} | $sourceKey';
@@ -416,6 +427,24 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     if (!itemColumns.contains('search_text')) {
       _db.execute(
         "ALTER TABLE favorite_items ADD COLUMN search_text TEXT NOT NULL DEFAULT ''",
+      );
+    }
+    if (!itemColumns.contains('retry_after')) {
+      _db.execute('ALTER TABLE favorite_items ADD COLUMN retry_after INTEGER');
+    }
+    if (!itemColumns.contains('check_failures')) {
+      _db.execute(
+        'ALTER TABLE favorite_items ADD COLUMN check_failures INTEGER NOT NULL DEFAULT 0',
+      );
+    }
+    if (!itemColumns.contains('check_not_found_count')) {
+      _db.execute(
+        'ALTER TABLE favorite_items ADD COLUMN check_not_found_count INTEGER NOT NULL DEFAULT 0',
+      );
+    }
+    if (!itemColumns.contains('check_suspect_gone')) {
+      _db.execute(
+        'ALTER TABLE favorite_items ADD COLUMN check_suspect_gone INTEGER NOT NULL DEFAULT 0',
       );
     }
     _db.execute('''CREATE INDEX IF NOT EXISTS favorite_items_search
@@ -924,7 +953,8 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       final updateState = <String, Map<String, Object?>>{};
       for (final row in _db.select(
         '''SELECT source_key, comic_id, comic_json, favorite_id, favorite_time,
-                  last_update_time, update_marker, last_check_time, has_new_update
+                  last_update_time, update_marker, last_check_time, has_new_update,
+                  retry_after
            FROM favorite_items
            WHERE source_key = ? AND folder_id = ? AND page_index = ?''',
         [folder.sourceKey, folder.folderId, pageIndex],
@@ -934,6 +964,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
           'update_marker': row['update_marker'],
           'last_check_time': row['last_check_time'],
           'has_new_update': row['has_new_update'],
+          'retry_after': row['retry_after'],
           'item': FavoriteItem.fromRow(row),
         };
       }
@@ -1006,8 +1037,8 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
           '''INSERT INTO favorite_items
               (source_key, folder_id, page_index, comic_id, display_order, comic_json,
                favorite_id, favorite_time, search_text, last_update_time, update_marker,
-               last_check_time, has_new_update)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+               last_check_time, has_new_update, retry_after)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
           [
             folder.sourceKey,
             folder.folderId,
@@ -1022,6 +1053,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
             previous?['update_marker'],
             previous?['last_check_time'],
             previous?['has_new_update'] ?? 0,
+            previous?['retry_after'],
           ],
         );
       }
@@ -1547,15 +1579,48 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
          ORDER BY page_index, display_order''',
       [folder.sourceKey, folder.folderId],
     );
-    return rows.map((row) {
-      return FavoriteItemWithUpdateInfo(
-        FavoriteItem.fromRow(row),
-        row['last_update_time'] as String?,
-        row['update_marker'] as String?,
-        (row['has_new_update'] as int? ?? 0) != 0,
-        row['last_check_time'] as int?,
-      );
-    }).toList();
+    return rows.map(_toFavoriteItemWithUpdateInfo).toList();
+  }
+
+  int countComicsWithUpdatesInfo(NetworkFavoriteFolderRef folder) {
+    final row = _db
+        .select(
+          '''SELECT COUNT(DISTINCT comic_id) AS count FROM favorite_items
+             WHERE source_key = ? AND folder_id = ?''',
+          [folder.sourceKey, folder.folderId],
+        )
+        .first;
+    return row['count'] as int;
+  }
+
+  List<FavoriteItemWithUpdateInfo> getComicsWithUpdatesInfoPage(
+    NetworkFavoriteFolderRef folder, {
+    required int limit,
+    required int offset,
+  }) {
+    final rows = _db.select(
+      '''SELECT * FROM favorite_items
+         WHERE source_key = ? AND folder_id = ?
+         GROUP BY comic_id
+         ORDER BY page_index, display_order
+         LIMIT ? OFFSET ?''',
+      [folder.sourceKey, folder.folderId, limit, offset],
+    );
+    return rows.map(_toFavoriteItemWithUpdateInfo).toList();
+  }
+
+  FavoriteItemWithUpdateInfo _toFavoriteItemWithUpdateInfo(Row row) {
+    return FavoriteItemWithUpdateInfo(
+      FavoriteItem.fromRow(row),
+      row['last_update_time'] as String?,
+      row['update_marker'] as String?,
+      (row['has_new_update'] as int? ?? 0) != 0,
+      row['last_check_time'] as int?,
+      row['retry_after'] as int?,
+      checkFailures: row['check_failures'] as int? ?? 0,
+      checkNotFoundCount: row['check_not_found_count'] as int? ?? 0,
+      isSuspectGone: (row['check_suspect_gone'] as int? ?? 0) != 0,
+    );
   }
 
   /// Updates fields from a comic-detail JSON response without changing the
@@ -1620,6 +1685,10 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
           SET last_update_time = COALESCE(?, last_update_time),
               update_marker = COALESCE(?, update_marker),
               last_check_time = ?,
+              retry_after = NULL,
+              check_failures = 0,
+              check_not_found_count = 0,
+              check_suspect_gone = 0,
               has_new_update = CASE WHEN ? THEN 1 ELSE has_new_update END
           WHERE source_key = ? AND folder_id = ? AND comic_id = ?''',
       [
@@ -1633,6 +1702,167 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       ],
     );
     return changed;
+  }
+
+  /// Marks [comicId] as temporarily skipped by automatic scans after it
+  /// failed a check. The value is persisted so a restart does not retry the
+  /// failed comic immediately.
+  void markComicRetryLater(
+    NetworkFavoriteFolderRef folder,
+    String comicId, {
+    Duration delay = const Duration(hours: 1),
+    int failures = 0,
+  }) {
+    _db.execute(
+      '''UPDATE favorite_items
+          SET retry_after = ?, check_failures = ?, check_not_found_count = 0
+          WHERE source_key = ? AND folder_id = ? AND comic_id = ?''',
+      [
+        DateTime.now().add(delay).millisecondsSinceEpoch,
+        failures,
+        folder.sourceKey,
+        folder.folderId,
+        comicId,
+      ],
+    );
+  }
+
+  /// Records a not-found/removed detail response. The first hit becomes a
+  /// pending check; the second consecutive hit is confirmed as suspected
+  /// removal by [markComicSuspectGone].
+  void markComicNotFound(
+    NetworkFavoriteFolderRef folder,
+    String comicId, {
+    required int notFoundCount,
+  }) {
+    _db.execute(
+      '''UPDATE favorite_items
+          SET check_not_found_count = ?, check_failures = 0, retry_after = ?,
+              last_check_time = ?
+          WHERE source_key = ? AND folder_id = ? AND comic_id = ?''',
+      [
+        notFoundCount,
+        DateTime.now().add(const Duration(hours: 1)).millisecondsSinceEpoch,
+        DateTime.now().millisecondsSinceEpoch,
+        folder.sourceKey,
+        folder.folderId,
+        comicId,
+      ],
+    );
+  }
+
+  /// Marks [comicId] as suspected removed. Such comics are skipped by all
+  /// follow-up scans until the user clears the mark or removes the favorite.
+  void markComicSuspectGone(NetworkFavoriteFolderRef folder, String comicId) {
+    _db.execute(
+      '''UPDATE favorite_items
+          SET check_suspect_gone = 1, check_failures = 0,
+              check_not_found_count = 0, retry_after = NULL, last_check_time = ?
+          WHERE source_key = ? AND folder_id = ? AND comic_id = ?''',
+      [
+        DateTime.now().millisecondsSinceEpoch,
+        folder.sourceKey,
+        folder.folderId,
+        comicId,
+      ],
+    );
+  }
+
+  void clearComicSuspectGoneEverywhere(String sourceKey, String comicId) {
+    _db.execute(
+      '''UPDATE favorite_items
+          SET check_suspect_gone = 0, check_failures = 0,
+              check_not_found_count = 0, retry_after = NULL
+          WHERE source_key = ? AND comic_id = ?''',
+      [sourceKey, comicId],
+    );
+    notifyListeners();
+  }
+
+  bool isComicSuspectGone(String sourceKey, String comicId) {
+    final rows = _db.select(
+      '''SELECT 1 FROM favorite_items
+         WHERE source_key = ? AND comic_id = ? AND check_suspect_gone != 0
+         LIMIT 1''',
+      [sourceKey, comicId],
+    );
+    return rows.isNotEmpty;
+  }
+
+  void recordComicNotFoundEverywhere(String sourceKey, String comicId) {
+    final rows = _db.select(
+      '''SELECT check_not_found_count, check_suspect_gone FROM favorite_items
+         WHERE source_key = ? AND comic_id = ? LIMIT 1''',
+      [sourceKey, comicId],
+    );
+    if (rows.isEmpty) return;
+    if ((rows.first['check_suspect_gone'] as int? ?? 0) != 0) return;
+    final notFoundCount =
+        (rows.first['check_not_found_count'] as int? ?? 0) + 1;
+    for (final folderId in getKnownFolderIds(sourceKey, comicId)) {
+      final folder = NetworkFavoriteFolderRef(
+        sourceKey: sourceKey,
+        folderId: folderId,
+      );
+      if (notFoundCount >= 2) {
+        markComicSuspectGone(folder, comicId);
+      } else {
+        markComicNotFound(folder, comicId, notFoundCount: notFoundCount);
+      }
+    }
+    notifyListeners();
+  }
+
+  List<FavoriteItemWithUpdateInfo> getSuspectGoneComicsInFolders(
+    Iterable<NetworkFavoriteFolderRef> folders,
+  ) {
+    final list = folders.toList();
+    if (list.isEmpty) return const [];
+    final rows = _db.select(
+      '''SELECT * FROM favorite_items
+         WHERE ${_folderWhereClause(list)} AND check_suspect_gone != 0
+         GROUP BY source_key, comic_id
+         ORDER BY source_key, comic_id''',
+      list.expand((f) => [f.sourceKey, f.folderId]).toList(),
+    );
+    return rows.map(_toFavoriteItemWithUpdateInfo).toList();
+  }
+
+  Future<Res<bool>> removeFavoriteEverywhere(
+    String sourceKey,
+    String comicId,
+  ) async {
+    final source = ComicSource.find(sourceKey);
+    final data = source?.favoriteData;
+    if (source == null || data == null) {
+      return const Res.error('Comic source not found');
+    }
+    if (!source.isLogged) return const Res.error('Not login');
+    if (data.addOrDelFavorite == null) {
+      return const Res.error('Favorites are not supported');
+    }
+    final folderIds = getKnownFolderIds(sourceKey, comicId);
+    var anySuccess = false;
+    String? lastError;
+    for (final folderId in folderIds) {
+      final folder = NetworkFavoriteFolderRef(
+        sourceKey: sourceKey,
+        folderId: folderId,
+      );
+      final result = await changeFavorite(
+        data: data,
+        folder: folder,
+        comicId: comicId,
+        isAdding: false,
+      );
+      if (result.error) {
+        lastError = result.errorMessage;
+      } else {
+        anySuccess = true;
+      }
+    }
+    if (anySuccess) return const Res(true);
+    return Res.error(lastError ?? 'No cached favorite folder found');
   }
 
   void markAsRead(NetworkFavoriteFolderRef folder, String comicId) {
@@ -1657,6 +1887,37 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   /// notification for every comic in a follow-updates run.
   void notifyCacheChanged() => notifyListeners();
 
+  /// Number of cached comics in [folder] that have never completed a
+  /// follow-up check. A comic only counts as checked once its detail request
+  /// succeeded, regardless of whether the source exposed a usable marker.
+  int countUncheckedComics(NetworkFavoriteFolderRef folder) {
+    final row = _db
+        .select(
+          '''SELECT COUNT(DISTINCT comic_id) AS count FROM favorite_items
+             WHERE source_key = ? AND folder_id = ? AND last_check_time IS NULL''',
+          [folder.sourceKey, folder.folderId],
+        )
+        .first;
+    return row['count'] as int;
+  }
+
+  bool hasUncheckedComics(NetworkFavoriteFolderRef folder) =>
+      countUncheckedComics(folder) > 0;
+
+  /// Removes every follow-up baseline so the next check re-establishes it.
+  ///
+  /// Only update-check metadata is reset; cached comics and folders remain.
+  void clearAllBaselines() {
+    _db.execute('''
+      UPDATE favorite_items
+      SET last_check_time = NULL,
+          last_update_time = NULL,
+          update_marker = NULL,
+          has_new_update = 0
+    ''');
+    notifyListeners();
+  }
+
   int countUpdates(NetworkFavoriteFolderRef folder) {
     final row = _db
         .select(
@@ -1666,5 +1927,83 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         )
         .first;
     return row['count'] as int;
+  }
+
+  static String _folderWhereClause(List<NetworkFavoriteFolderRef> folders) {
+    if (folders.isEmpty) return '0';
+    return '(${folders.map((f) => '(source_key = ? AND folder_id = ?)').join(' OR ')})';
+  }
+
+  int _countDistinctComicsInFolders(
+    Iterable<NetworkFavoriteFolderRef> folders, {
+    String? extraCondition,
+  }) {
+    final list = folders.toList();
+    if (list.isEmpty) return 0;
+    final conditions = <String>[_folderWhereClause(list)];
+    if (extraCondition != null) conditions.add(extraCondition);
+    final row = _db.select('''SELECT COUNT(*) AS count FROM (
+             SELECT source_key, comic_id FROM favorite_items
+             WHERE ${conditions.join(' AND ')}
+             GROUP BY source_key, comic_id
+           )''', list.expand((f) => [f.sourceKey, f.folderId]).toList()).first;
+    return row['count'] as int;
+  }
+
+  int countCachedComicsInFolders(Iterable<NetworkFavoriteFolderRef> folders) =>
+      _countDistinctComicsInFolders(folders);
+
+  int countUncheckedComicsInFolders(
+    Iterable<NetworkFavoriteFolderRef> folders,
+  ) => _countDistinctComicsInFolders(
+    folders,
+    extraCondition: 'last_check_time IS NULL',
+  );
+
+  int countUpdatesInFolders(Iterable<NetworkFavoriteFolderRef> folders) =>
+      _countDistinctComicsInFolders(
+        folders,
+        extraCondition: 'has_new_update != 0',
+      );
+
+  int countComicsWithUpdatesInfoInFolders(
+    Iterable<NetworkFavoriteFolderRef> folders,
+  ) => countCachedComicsInFolders(folders);
+
+  List<FavoriteItemWithUpdateInfo> getComicsWithUpdatesInfoPageInFolders(
+    Iterable<NetworkFavoriteFolderRef> folders, {
+    required int limit,
+    required int offset,
+  }) {
+    final list = folders.toList();
+    if (list.isEmpty) return const [];
+    final rows = _db.select(
+      '''SELECT * FROM favorite_items
+         WHERE ${_folderWhereClause(list)}
+         GROUP BY source_key, comic_id
+         ORDER BY source_key, comic_id
+         LIMIT ? OFFSET ?''',
+      [
+        ...list.expand((f) => [f.sourceKey, f.folderId]),
+        limit,
+        offset,
+      ],
+    );
+    return rows.map(_toFavoriteItemWithUpdateInfo).toList();
+  }
+
+  List<FavoriteItemWithUpdateInfo> getUpdatedComicsInFolders(
+    Iterable<NetworkFavoriteFolderRef> folders,
+  ) {
+    final list = folders.toList();
+    if (list.isEmpty) return const [];
+    final rows = _db.select(
+      '''SELECT * FROM favorite_items
+         WHERE ${_folderWhereClause(list)} AND has_new_update != 0
+         GROUP BY source_key, comic_id
+         ORDER BY last_update_time DESC, source_key, comic_id''',
+      list.expand((f) => [f.sourceKey, f.folderId]).toList(),
+    );
+    return rows.map(_toFavoriteItemWithUpdateInfo).toList();
   }
 }

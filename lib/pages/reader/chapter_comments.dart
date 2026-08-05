@@ -397,18 +397,31 @@ class _ChapterCommentTileState extends State<_ChapterCommentTile> {
         onTap: () {
           // Get the parent page's widget to access comicTitle and chapterTitle
           var parentState = context.findAncestorStateOfType<_ChapterCommentsPageState>();
-          showSideBar(
-            context,
-            ChapterCommentsPage(
-              comicId: widget.comicId,
-              epId: widget.epId,
-              source: widget.source,
-              comicTitle: parentState?.widget.comicTitle ?? '',
-              chapterTitle: parentState?.widget.chapterTitle ?? '',
-              replyComment: widget.comment,
-            ),
-            showBarrier: false,
-          );
+          if (App.isAndroid) {
+            context.to(
+              () => ChapterCommentsPage(
+                comicId: widget.comicId,
+                epId: widget.epId,
+                source: widget.source,
+                comicTitle: parentState?.widget.comicTitle ?? '',
+                chapterTitle: parentState?.widget.chapterTitle ?? '',
+                replyComment: widget.comment,
+              ),
+            );
+          } else {
+            showSideBar(
+              context,
+              ChapterCommentsPage(
+                comicId: widget.comicId,
+                epId: widget.epId,
+                source: widget.source,
+                comicTitle: parentState?.widget.comicTitle ?? '',
+                chapterTitle: parentState?.widget.chapterTitle ?? '',
+                replyComment: widget.comment,
+              ),
+              showBarrier: false,
+            );
+          }
         },
         child: Row(
           mainAxisSize: MainAxisSize.min,

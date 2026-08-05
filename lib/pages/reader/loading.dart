@@ -60,12 +60,8 @@ class _ReaderWithLoadingState
           cid: widget.id,
           name: localComic.title,
           chapters: localComic.chapters,
-          history: history ??
-              History.fromModel(
-                model: localComic,
-                ep: 0,
-                page: 0,
-              ),
+          history:
+              history ?? History.fromModel(model: localComic, ep: 0, page: 0),
           author: localComic.subtitle,
           tags: localComic.tags,
         ),
@@ -81,16 +77,29 @@ class _ReaderWithLoadingState
           cid: widget.id,
           name: comic.data.title,
           chapters: comic.data.chapters,
-          history: history ??
-              History.fromModel(
-                model: comic.data,
-                ep: 0,
-                page: 0,
-              ),
+          history:
+              history ?? History.fromModel(model: comic.data, ep: 0, page: 0),
           author: comic.data.findAuthor() ?? "",
           tags: comic.data.plainTags,
         ),
       );
+    }
+  }
+
+  @override
+  FutureOr<void> onDataLoaded() {
+    final cache = NetworkFavoriteCacheManager();
+    if (cache.isComicSuspectGone(widget.sourceKey, widget.id)) {
+      cache.clearComicSuspectGoneEverywhere(widget.sourceKey, widget.id);
+    }
+  }
+
+  @override
+  void onLoadError(String message) {
+    if (!isNotFoundError(message)) return;
+    final cache = NetworkFavoriteCacheManager();
+    if (cache.isFavoriteKnown(widget.sourceKey, widget.id)) {
+      cache.recordComicNotFoundEverywhere(widget.sourceKey, widget.id);
     }
   }
 }

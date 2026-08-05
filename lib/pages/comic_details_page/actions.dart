@@ -302,10 +302,16 @@ abstract mixin class _ComicPageActions {
   }
 
   void showComments() {
-    showSideBar(
-      App.rootContext,
-      CommentsPage(data: comic, source: comicSource),
-    );
+    if (App.isAndroid) {
+      App.rootContext.to(
+        () => CommentsPage(data: comic, source: comicSource),
+      );
+    } else {
+      showSideBar(
+        App.rootContext,
+        CommentsPage(data: comic, source: comicSource),
+      );
+    }
   }
 
   void starRating() {

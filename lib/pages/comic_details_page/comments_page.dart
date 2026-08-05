@@ -387,15 +387,25 @@ class _CommentTileState extends State<_CommentTile> {
       child: InkWell(
         borderRadius: BorderRadius.circular(16),
         onTap: () {
-          showSideBar(
-            context,
-            CommentsPage(
-              data: widget.comic,
-              source: widget.source,
-              replyComment: widget.comment,
-            ),
-            showBarrier: false,
-          );
+          if (App.isAndroid) {
+            context.to(
+              () => CommentsPage(
+                data: widget.comic,
+                source: widget.source,
+                replyComment: widget.comment,
+              ),
+            );
+          } else {
+            showSideBar(
+              context,
+              CommentsPage(
+                data: widget.comic,
+                source: widget.source,
+                replyComment: widget.comment,
+              ),
+              showBarrier: false,
+            );
+          }
         },
         child: Row(
           mainAxisSize: MainAxisSize.min,

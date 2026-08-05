@@ -16,6 +16,20 @@ class _FavoriteSettingsState extends State<FavoriteSettings> {
           title: "Auto close favorite panel after operation".tl,
           settingKey: "autoCloseFavoritePanel",
         ).toSliver(),
+        _SliderSetting(
+          title: "Follow Update Threads".tl,
+          settingsIndex: 'followUpdateThreads',
+          interval: 1,
+          min: 1,
+          max: 16,
+        ).toSliver(),
+        _SliderSetting(
+          title: "Follow Update Batch Delay (seconds)".tl,
+          settingsIndex: 'followUpdateBatchDelay',
+          interval: 0.5,
+          min: 0,
+          max: 5,
+        ).toSliver(),
       ],
     );
   }

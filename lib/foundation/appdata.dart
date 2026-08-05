@@ -195,6 +195,8 @@ class Settings with ChangeNotifier {
     'language': 'system', // system, zh-CN, zh-TW, en-US
     'cacheSize': 2048, // in MB
     'downloadThreads': 5,
+    'followUpdateThreads': 5,
+    'followUpdateBatchDelay': 5, // in seconds
     'enableLongPressToZoom': true,
     'longPressZoomPosition': "press", // press, center
     'checkUpdateOnStart': false,
@@ -214,6 +216,7 @@ class Settings with ChangeNotifier {
     'autoAddLanguageFilter': 'none', // none, chinese, english, japanese
     'comicSourceListUrl': _defaultSourceListUrl,
     'preloadImageCount': 4,
+    'followUpdatesEnabled': false,
     'followUpdatesFolder': null,
     'initialPage': '0',
     'comicListDisplayMode': 'paging', // paging, continuous

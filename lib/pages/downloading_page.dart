@@ -44,8 +44,14 @@ class _DownloadingPageState extends State<DownloadingPage> {
       firstTask = currentFirstTask;
       firstTask?.addListener(update);
     }
-    if(mounted) {
+    if (mounted) {
       setState(() {});
+    }
+  }
+
+  void _cancelAll() {
+    for (final task in LocalManager().downloadingTasks.toList()) {
+      task.cancel();
     }
   }
 
@@ -89,21 +95,26 @@ class _DownloadingPageState extends State<DownloadingPage> {
       child: Row(
         children: [
           if (first?.isPaused == true)
-            Text(
-              "Paused".tl,
-              style: ts.s18.bold,
-            )
+            Text("Paused".tl, style: ts.s18.bold)
           else if (first?.isError == true)
-            Text(
-              "Error".tl,
-              style: ts.s18.bold,
-            )
+            Text("Error".tl, style: ts.s18.bold)
           else
-            Text(
-              "${bytesToReadableString(speed)}/s",
-              style: ts.s18.bold,
-            ),
+            Text("${bytesToReadableString(speed)}/s", style: ts.s18.bold),
           const Spacer(),
+          if (LocalManager().downloadingTasks.isNotEmpty) ...[
+            OutlinedButton(
+              onPressed: _cancelAll,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.close, size: 18),
+                  const SizedBox(width: 4),
+                  Text("Cancel All".tl),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+          ],
           if (first?.isPaused == true || first?.isError == true)
             OutlinedButton(
               child: Row(
@@ -234,15 +245,9 @@ class _DownloadTaskTileState extends State<_DownloadTaskTile> {
                 ),
                 const Spacer(),
                 if (!widget.task.isPaused || widget.task.isError)
-                  Text(
-                    widget.task.message,
-                    style: ts.s12,
-                    maxLines: 3,
-                  ),
+                  Text(widget.task.message, style: ts.s12, maxLines: 3),
                 const SizedBox(height: 4),
-                LinearProgressIndicator(
-                  value: widget.task.progress,
-                ),
+                LinearProgressIndicator(value: widget.task.progress),
                 const SizedBox(height: 8),
               ],
             ),

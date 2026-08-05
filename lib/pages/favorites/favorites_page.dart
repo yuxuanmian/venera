@@ -3,12 +3,9 @@ import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
-import 'package:venera/foundation/comic_type.dart';
+import 'package:venera/foundation/consts.dart';
 import 'package:venera/foundation/favorites.dart';
-import 'package:venera/foundation/history.dart';
-import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/res.dart';
-import 'package:venera/network/download.dart';
 import 'package:venera/utils/translations.dart';
 
 const _favoriteSidebarWidth = 256.0;
@@ -56,6 +53,21 @@ class _FavoritesPageState extends State<FavoritesPage> {
     final selected = _selectedSource == null
         ? null
         : getFavoriteDataOrNull(_selectedSource!);
+    final content = selected == null
+        ? const _NoFavoriteSource()
+        : NetworkFavoritePage(data: selected);
+    if (context.width < changePoint) {
+      return Column(
+        children: [
+          _FavoriteSourcePicker(
+            sources: sources,
+            selected: _selectedSource,
+            onSelect: _select,
+          ),
+          Expanded(child: content),
+        ],
+      );
+    }
     return Row(
       children: [
         SizedBox(
@@ -66,12 +78,50 @@ class _FavoritesPageState extends State<FavoritesPage> {
             onSelect: _select,
           ),
         ),
-        Expanded(
-          child: selected == null
-              ? const _NoFavoriteSource()
-              : NetworkFavoritePage(data: selected),
-        ),
+        Expanded(child: content),
       ],
+    );
+  }
+}
+
+class _FavoriteSourcePicker extends StatelessWidget {
+  const _FavoriteSourcePicker({
+    required this.sources,
+    required this.selected,
+    required this.onSelect,
+  });
+
+  final List<FavoriteData> sources;
+  final String? selected;
+  final ValueChanged<String> onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Theme.of(context).colorScheme.surface,
+      child: SizedBox(
+        height: 56,
+        width: double.infinity,
+        child: sources.isEmpty
+            ? Center(child: Text('Unselected'.tl))
+            : ListView.separated(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 10,
+                ),
+                scrollDirection: Axis.horizontal,
+                itemCount: sources.length,
+                separatorBuilder: (context, index) => const SizedBox(width: 8),
+                itemBuilder: (context, index) {
+                  final data = sources[index];
+                  return ChoiceChip(
+                    label: Text(data.title),
+                    selected: data.key == selected,
+                    onSelected: (_) => onSelect(data.key),
+                  );
+                },
+              ),
+      ),
     );
   }
 }
@@ -309,7 +359,6 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
   final _comicListKey = GlobalKey<ComicListState>();
   final _searchController = TextEditingController();
   final _searchFocusNode = FocusNode();
-  String _readFilter = 'all';
   List<FavoriteItem>? _searchResults;
   bool _fullCacheRunning = false;
   bool _searchExpanded = false;
@@ -474,45 +523,6 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
     }
   }
 
-  Future<void> _downloadCached() async {
-    final comics = <FavoriteItem>[];
-    String? token;
-    for (var page = 1; ; page++) {
-      final cached = _usesPage
-          ? _cache.getCachedPage(widget.folder, page)
-          : _cache.getCachedNextPage(widget.folder, token);
-      if (cached == null) break;
-      comics.addAll(cached.comics);
-      if (_usesPage) {
-        if (cached.maxPage != null && page >= cached.maxPage!) break;
-      } else {
-        if (cached.nextToken == null) break;
-        token = cached.nextToken;
-      }
-    }
-    final source = ComicSource.find(widget.data.key);
-    if (source == null || comics.isEmpty) return;
-    var count = 0;
-    for (final comic in comics) {
-      if (!LocalManager().isDownloading(comic.id, comic.type) &&
-          !LocalManager().isDownloaded(comic.id, comic.type)) {
-        LocalManager().addTask(
-          ImagesDownloadTask(
-            source: source,
-            comicId: comic.id,
-            comicTitle: comic.title,
-          ),
-        );
-        count++;
-      }
-    }
-    if (mounted && count > 0) {
-      context.showMessage(
-        message: 'Added @c comics to download queue.'.tlParams({'c': count}),
-      );
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final title = widget.folder.title ?? widget.data.title;
@@ -545,15 +555,6 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
                       )
                     : const Icon(Icons.cloud_download_outlined),
                 onPressed: canCacheAll ? _cacheAllFavorites : null,
-              ),
-              MenuButton(
-                entries: [
-                  MenuEntry(
-                    icon: Icons.download,
-                    text: 'Download'.tl,
-                    onClick: _downloadCached,
-                  ),
-                ],
               ),
               IconButton(
                 tooltip: _searchExpanded ? 'Close'.tl : 'Search'.tl,
@@ -602,29 +603,6 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
                             )
                           : const SizedBox.shrink(),
                     ),
-                    PopupMenuButton<String>(
-                      tooltip: 'Read filter'.tl,
-                      icon: const Icon(Icons.filter_list),
-                      onSelected: (value) =>
-                          setState(() => _readFilter = value),
-                      itemBuilder: (context) => [
-                        CheckedPopupMenuItem(
-                          value: 'all',
-                          checked: _readFilter == 'all',
-                          child: Text('All'.tl),
-                        ),
-                        CheckedPopupMenuItem(
-                          value: 'read',
-                          checked: _readFilter == 'read',
-                          child: Text('Read'.tl),
-                        ),
-                        CheckedPopupMenuItem(
-                          value: 'unread',
-                          checked: _readFilter == 'unread',
-                          child: Text('Unread'.tl),
-                        ),
-                      ],
-                    ),
                   ],
                 ).padding(
                   EdgeInsets.fromLTRB(16, _searchExpanded ? 8 : 0, 16, 0),
@@ -668,16 +646,12 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
                     )
                   : Res.error(result.errorMessage!);
             },
-      comicFilter: (comic) {
-        if (_readFilter == 'all') return true;
-        final read =
-            HistoryManager().find(
-              comic.id,
-              ComicType.fromKey(comic.sourceKey),
-            ) !=
-            null;
-        return _readFilter == 'read' ? read : !read;
-      },
+      badgeBuilder: (comic) =>
+          _cache.isComicSuspectGone(widget.data.key, comic.id)
+          ? 'Suspected removed'.tl
+          : null,
+      dimmedBuilder: (comic) =>
+          _cache.isComicSuspectGone(widget.data.key, comic.id),
       menuBuilder: (comic) => [
         MenuEntry(
           icon: Icons.delete_outline,

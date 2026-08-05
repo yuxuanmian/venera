@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
+import 'package:venera/pages/follow_updates_page.dart';
 import 'package:venera/utils/translations.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -68,58 +69,8 @@ class _WindowFrameState extends State<WindowFrame> {
     });
   }
 
-  void _onDebugMenuSelected(String value) {
-    switch (value) {
-      case 'reloadSources':
-        debug();
-        break;
-      case 'clearFavorites':
-        App.favorites.clearAllCache();
-        App.rootContext.showMessage(message: 'Favorites cache cleared'.tl);
-        break;
-    }
-  }
-
   void _showDebugMenu() {
-    final navigator = App.rootNavigatorKey.currentState;
-    final overlay = navigator?.overlay;
-    final buttonContext = _debugButtonKey.currentContext;
-    if (navigator == null || overlay == null || buttonContext == null) {
-      return;
-    }
-    final overlayBox = overlay.context.findRenderObject();
-    final buttonBox = buttonContext.findRenderObject();
-    if (overlayBox is! RenderBox || buttonBox is! RenderBox) {
-      return;
-    }
-    final buttonOrigin = overlayBox.globalToLocal(
-      buttonBox.localToGlobal(Offset.zero),
-    );
-    final buttonRect = buttonOrigin & buttonBox.size;
-    showMenu<String>(
-      context: App.rootContext,
-      useRootNavigator: true,
-      position: RelativeRect.fromRect(
-        Rect.fromLTRB(
-          buttonRect.left,
-          buttonRect.bottom,
-          buttonRect.right,
-          buttonRect.bottom,
-        ),
-        Offset.zero & overlayBox.size,
-      ),
-      items: [
-        PopupMenuItem(value: 'reloadSources', child: Text('Reload Sources'.tl)),
-        PopupMenuItem(
-          value: 'clearFavorites',
-          child: Text('Clear Favorites Cache'.tl),
-        ),
-      ],
-    ).then((value) {
-      if (value != null) {
-        _onDebugMenuSelected(value);
-      }
-    });
+    showDebugMenu(_debugButtonKey);
   }
 
   /// Adds a listener that will be called when close button is clicked.
@@ -166,59 +117,61 @@ class _WindowFrameState extends State<WindowFrame> {
             child: Material(
               color: Colors.transparent,
               child: Theme(
-                data: Theme.of(context).copyWith(
-                  brightness: useDarkTheme ? Brightness.dark : null,
-                ),
-                child: Builder(builder: (context) {
-                  return SizedBox(
-                    height: _kTitleBarHeight,
-                    child: Row(
-                      children: [
-                        if (App.isMacOS)
-                          const DragToMoveArea(
-                            child: SizedBox(
-                              height: double.infinity,
-                              width: 16,
-                            ),
-                          ).paddingRight(52)
-                        else
-                          const SizedBox(width: 12),
-                        Expanded(
-                          child: DragToMoveArea(
-                            child: Text(
-                              'Venera',
-                              maxLines: 1,
-                              softWrap: false,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: (useDarkTheme ||
-                                        context.brightness == Brightness.dark)
-                                    ? Colors.white
-                                    : Colors.black,
+                data: Theme.of(
+                  context,
+                ).copyWith(brightness: useDarkTheme ? Brightness.dark : null),
+                child: Builder(
+                  builder: (context) {
+                    return SizedBox(
+                      height: _kTitleBarHeight,
+                      child: Row(
+                        children: [
+                          if (App.isMacOS)
+                            const DragToMoveArea(
+                              child: SizedBox(
+                                height: double.infinity,
+                                width: 16,
                               ),
-                            )
-                                .toAlign(Alignment.centerLeft)
-                                .paddingLeft(4 + (App.isMacOS ? 25 : 0)),
+                            ).paddingRight(52)
+                          else
+                            const SizedBox(width: 12),
+                          Expanded(
+                            child: DragToMoveArea(
+                              child:
+                                  Text(
+                                        'Venera',
+                                        maxLines: 1,
+                                        softWrap: false,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 13,
+                                          color:
+                                              (useDarkTheme ||
+                                                  context.brightness ==
+                                                      Brightness.dark)
+                                              ? Colors.white
+                                              : Colors.black,
+                                        ),
+                                      )
+                                      .toAlign(Alignment.centerLeft)
+                                      .paddingLeft(4 + (App.isMacOS ? 25 : 0)),
+                            ),
                           ),
-                        ),
-                        if (kDebugMode)
-                          TextButton(
-                            key: _debugButtonKey,
-                            onPressed: _showDebugMenu,
-                            child: const Text('Debug'),
-                          ),
-                        if (!App.isMacOS)
-                          _WindowButtons(
-                            onClose: _onClose,
-                          )
-                      ],
-                    ),
-                  );
-                }),
+                          if (kDebugMode)
+                            TextButton(
+                              key: _debugButtonKey,
+                              onPressed: _showDebugMenu,
+                              child: const Text('Debug'),
+                            ),
+                          if (!App.isMacOS) _WindowButtons(onClose: _onClose),
+                        ],
+                      ),
+                    );
+                  },
+                ),
               ),
             ),
-          )
+          ),
       ],
     );
 
@@ -233,6 +186,98 @@ class _WindowFrameState extends State<WindowFrame> {
       removeCloseListener: removeCloseListener,
       child: body,
     );
+  }
+}
+
+Future<void> showDebugMenu(GlobalKey buttonKey) async {
+  final navigator = App.rootNavigatorKey.currentState;
+  final overlay = navigator?.overlay;
+  final buttonContext = buttonKey.currentContext;
+  if (navigator == null || overlay == null || buttonContext == null) {
+    return;
+  }
+  final overlayBox = overlay.context.findRenderObject();
+  final buttonBox = buttonContext.findRenderObject();
+  if (overlayBox is! RenderBox || buttonBox is! RenderBox) {
+    return;
+  }
+  final buttonOrigin = overlayBox.globalToLocal(
+    buttonBox.localToGlobal(Offset.zero),
+  );
+  final buttonRect = buttonOrigin & buttonBox.size;
+  final value = await showMenu<String>(
+    context: App.rootContext,
+    useRootNavigator: true,
+    position: RelativeRect.fromRect(
+      Rect.fromLTRB(
+        buttonRect.left,
+        buttonRect.bottom,
+        buttonRect.right,
+        buttonRect.bottom,
+      ),
+      Offset.zero & overlayBox.size,
+    ),
+    items: [
+      PopupMenuItem(value: 'reloadSources', child: Text('Reload Sources'.tl)),
+      PopupMenuItem(
+        value: 'clearFavorites',
+        child: Text('Clear Favorites Cache'.tl),
+      ),
+      PopupMenuItem(value: 'clearBaselines', child: Text('Clear Baselines'.tl)),
+    ],
+  );
+  if (value != null) {
+    handleDebugMenuSelected(value);
+  }
+}
+
+Future<void> showDebugMenuSheet() async {
+  final value = await showModalBottomSheet<String>(
+    context: App.rootContext,
+    useRootNavigator: true,
+    builder: (context) => SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            leading: const Icon(Icons.refresh),
+            title: Text('Reload Sources'.tl),
+            onTap: () => context.pop('reloadSources'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.delete_sweep_outlined),
+            title: Text('Clear Favorites Cache'.tl),
+            onTap: () => context.pop('clearFavorites'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.delete_outline),
+            title: Text('Clear Baselines'.tl),
+            onTap: () => context.pop('clearBaselines'),
+          ),
+        ],
+      ),
+    ),
+  );
+  if (value != null) {
+    handleDebugMenuSelected(value);
+  }
+}
+
+void handleDebugMenuSelected(String value) {
+  switch (value) {
+    case 'reloadSources':
+      debug();
+      break;
+    case 'clearFavorites':
+      App.favorites.clearAllCache();
+      App.rootContext.showMessage(message: 'Favorites cache cleared'.tl);
+      break;
+    case 'clearBaselines':
+      FollowUpdatesService.cancelChecking();
+      FollowUpdatesService.baselineStatus.value = null;
+      App.favorites.clearAllBaselines();
+      App.rootContext.showMessage(message: 'Baselines cleared'.tl);
+      break;
   }
 }
 
@@ -308,9 +353,7 @@ class _WindowButtonsState extends State<_WindowButtons> with WindowListener {
           ),
           if (isMaximized)
             WindowButton(
-              icon: RestoreIcon(
-                color: color,
-              ),
+              icon: RestoreIcon(color: color),
               hoverColor: hoverColor,
               onPressed: () {
                 windowManager.unmaximize();
@@ -318,24 +361,18 @@ class _WindowButtonsState extends State<_WindowButtons> with WindowListener {
             )
           else
             WindowButton(
-              icon: MaximizeIcon(
-                color: color,
-              ),
+              icon: MaximizeIcon(color: color),
               hoverColor: hoverColor,
               onPressed: () {
                 windowManager.maximize();
               },
             ),
           WindowButton(
-            icon: CloseIcon(
-              color: color,
-            ),
-            hoverIcon: CloseIcon(
-              color: !dark ? Colors.white : Colors.black,
-            ),
+            icon: CloseIcon(color: color),
+            hoverIcon: CloseIcon(color: !dark ? Colors.white : Colors.black),
             hoverColor: Colors.red,
             onPressed: widget.onClose,
-          )
+          ),
         ],
       ),
     );
@@ -343,12 +380,13 @@ class _WindowButtonsState extends State<_WindowButtons> with WindowListener {
 }
 
 class WindowButton extends StatefulWidget {
-  const WindowButton(
-      {required this.icon,
-      required this.onPressed,
-      required this.hoverColor,
-      this.hoverIcon,
-      super.key});
+  const WindowButton({
+    required this.icon,
+    required this.onPressed,
+    required this.hoverColor,
+    this.hoverIcon,
+    super.key,
+  });
 
   final Widget icon;
 
@@ -379,8 +417,9 @@ class _WindowButtonState extends State<WindowButton> {
         child: Container(
           width: 46,
           height: double.infinity,
-          decoration:
-              BoxDecoration(color: isHovering ? widget.hoverColor : null),
+          decoration: BoxDecoration(
+            color: isHovering ? widget.hoverColor : null,
+          ),
           child: isHovering ? widget.hoverIcon ?? widget.icon : widget.icon,
         ),
       ),
@@ -433,10 +472,7 @@ class _MaximizePainter extends _IconPainter {
 class RestoreIcon extends StatelessWidget {
   final Color color;
 
-  const RestoreIcon({
-    super.key,
-    required this.color,
-  });
+  const RestoreIcon({super.key, required this.color});
 
   @override
   Widget build(BuildContext context) => _AlignedPaint(_RestorePainter(color));
@@ -452,9 +488,15 @@ class _RestorePainter extends _IconPainter {
     canvas.drawLine(const Offset(2, 2), const Offset(2, 0), p);
     canvas.drawLine(const Offset(2, 0), Offset(size.width, 0), p);
     canvas.drawLine(
-        Offset(size.width, 0), Offset(size.width, size.height - 2), p);
-    canvas.drawLine(Offset(size.width, size.height - 2),
-        Offset(size.width - 2, size.height - 2), p);
+      Offset(size.width, 0),
+      Offset(size.width, size.height - 2),
+      p,
+    );
+    canvas.drawLine(
+      Offset(size.width, size.height - 2),
+      Offset(size.width - 2, size.height - 2),
+      p,
+    );
   }
 }
 
@@ -475,7 +517,10 @@ class _MinimizePainter extends _IconPainter {
   void paint(Canvas canvas, Size size) {
     Paint p = getPaint(color);
     canvas.drawLine(
-        Offset(0, size.height / 2), Offset(size.width, size.height / 2), p);
+      Offset(0, size.height / 2),
+      Offset(size.width, size.height / 2),
+      p,
+    );
   }
 }
 
@@ -497,8 +542,9 @@ class _AlignedPaint extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Align(
-        alignment: Alignment.center,
-        child: CustomPaint(size: const Size(10, 10), painter: painter));
+      alignment: Alignment.center,
+      child: CustomPaint(size: const Size(10, 10), painter: painter),
+    );
   }
 }
 
@@ -529,13 +575,15 @@ class WindowPlacement {
 
   Future<void> writeToFile() async {
     var file = File("${App.dataPath}/window_placement");
-    await file.writeAsString(jsonEncode({
-      'width': rect.width,
-      'height': rect.height,
-      'x': rect.topLeft.dx,
-      'y': rect.topLeft.dy,
-      'isMaximized': isMaximized
-    }));
+    await file.writeAsString(
+      jsonEncode({
+        'width': rect.width,
+        'height': rect.height,
+        'x': rect.topLeft.dx,
+        'y': rect.topLeft.dy,
+        'isMaximized': isMaximized,
+      }),
+    );
   }
 
   static Future<WindowPlacement> loadFromFile() async {
@@ -545,8 +593,12 @@ class WindowPlacement {
         return defaultPlacement;
       }
       var json = jsonDecode(await file.readAsString());
-      var rect =
-          Rect.fromLTWH(json['x'], json['y'], json['width'], json['height']);
+      var rect = Rect.fromLTWH(
+        json['x'],
+        json['y'],
+        json['width'],
+        json['height'],
+      );
       return WindowPlacement(rect, json['isMaximized']);
     } catch (e) {
       return defaultPlacement;
@@ -566,8 +618,10 @@ class WindowPlacement {
     return WindowPlacement(rect, isMaximized);
   }
 
-  static const defaultPlacement =
-      WindowPlacement(Rect.fromLTWH(10, 10, 900, 600), false);
+  static const defaultPlacement = WindowPlacement(
+    Rect.fromLTWH(10, 10, 900, 600),
+    false,
+  );
 
   static WindowPlacement cache = defaultPlacement;
 
@@ -590,10 +644,7 @@ class WindowPlacement {
 }
 
 class VirtualWindowFrame extends StatefulWidget {
-  const VirtualWindowFrame({
-    super.key,
-    required this.child,
-  });
+  const VirtualWindowFrame({super.key, required this.child});
 
   /// The [child] contained by the VirtualWindowFrame.
   final Widget child;
@@ -629,7 +680,7 @@ class _VirtualWindowFrameState extends State<VirtualWindowFrame>
           BoxShadow(
             color: Colors.black.toOpacity(_isFocused ? 0.4 : 0.2),
             blurRadius: 4,
-          )
+          ),
         ],
       ),
       clipBehavior: Clip.antiAlias,
@@ -694,9 +745,7 @@ class _VirtualWindowFrameState extends State<VirtualWindowFrame>
 // ignore: non_constant_identifier_names
 TransitionBuilder VirtualWindowFrameInit() {
   return (_, Widget? child) {
-    return VirtualWindowFrame(
-      child: child!,
-    );
+    return VirtualWindowFrame(child: child!);
   };
 }
 

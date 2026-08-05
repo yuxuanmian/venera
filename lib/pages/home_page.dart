@@ -33,10 +33,10 @@ class HomePage extends StatelessWidget {
         const _SearchBar(),
         const _SyncDataWidget(),
         const _History(),
-        const _Local(),
         const FollowUpdatesWidget(),
         const _ComicSourceWidget(),
         const ImageFavorites(),
+        const _Local(),
         SliverPadding(padding: EdgeInsets.only(top: context.padding.bottom)),
       ],
     );

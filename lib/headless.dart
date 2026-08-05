@@ -7,7 +7,6 @@ import 'package:venera/foundation/log.dart';
 import 'package:venera/pages/comic_source_page.dart';
 import 'package:venera/init.dart';
 import 'package:venera/foundation/follow_updates.dart';
-import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/favorites.dart';
 
 void cliPrint(Map<String, dynamic> data) {
@@ -132,13 +131,10 @@ Future<void> runHeadlessMode(List<String> args) async {
         'status': 'running',
         'message': 'Updating subscribed comics...',
       });
-      var folder = NetworkFavoriteFolderRef.tryFromJson(
-        appdata.settings['followUpdatesFolder'],
-      );
-      if (folder == null) {
+      if (!followUpdatesEnabled) {
         cliPrint({
           'status': 'error',
-          'message': 'Follow updates folder is not configured.',
+          'message': 'Follow updates is not enabled.',
         });
         exit(1);
       }
@@ -154,20 +150,25 @@ Future<void> runHeadlessMode(List<String> args) async {
         }
         var id = args[updateIndex + 1];
         var type = args[updateIndex + 2];
-        var comics = NetworkFavoriteCacheManager().getComicsWithUpdatesInfo(
-          folder,
-        );
         FavoriteItemWithUpdateInfo? comic;
-        for (final candidate in comics) {
-          if (candidate.id == id && candidate.sourceKey == type) {
-            comic = candidate;
-            break;
+        NetworkFavoriteFolderRef? folder;
+        for (final candidate in getFollowUpdateFolders()) {
+          var comics = NetworkFavoriteCacheManager().getComicsWithUpdatesInfo(
+            candidate,
+          );
+          for (final candidateComic in comics) {
+            if (candidateComic.id == id && candidateComic.sourceKey == type) {
+              comic = candidateComic;
+              folder = candidate;
+              break;
+            }
           }
+          if (comic != null) break;
         }
-        if (comic == null) {
+        if (comic == null || folder == null) {
           cliPrint({
             'status': 'error',
-            'message': 'Comic is not in the cached follow folder.',
+            'message': 'Comic is not in the cached follow folders.',
           });
           exit(1);
         }
@@ -207,7 +208,9 @@ Future<void> runHeadlessMode(List<String> args) async {
         });
 
         await Future.delayed(const Duration(milliseconds: 500));
-        var json = await getUpdatedComicsAsJson(folder);
+        var json = await getUpdatedComicsAsJsonInFolders(
+          getFollowUpdateFolders(),
+        );
         cliPrint({
           'status': result.errorMessage != null ? 'error' : 'success',
           'message': 'Updated comics list.',
@@ -217,31 +220,43 @@ Future<void> runHeadlessMode(List<String> args) async {
         int total = 0;
         int updated = 0;
         int errors = 0;
-        await for (var progress in updateFolder(folder, true)) {
-          total = progress.total;
-          updated = progress.updated;
-          errors = progress.errors;
-          Map<String, dynamic> data = {
-            'current': progress.current,
-            'total': progress.total,
-          };
-          if (progress.comic != null) {
-            data['comic'] = {
-              'id': progress.comic!.id,
-              'name': progress.comic!.name,
-              'coverUrl': progress.comic!.coverPath,
-              'author': progress.comic!.author,
-              'type': progress.comic!.sourceKey,
-              'updateTime': progress.comic!.updateTime,
-              'tags': progress.comic!.tags,
+        for (final folder in getFollowUpdateFolders()) {
+          int folderTotal = 0;
+          int folderUpdated = 0;
+          int folderErrors = 0;
+          await for (var progress in updateFolder(
+            folder,
+            FollowUpdateMode.force,
+            ignoreRetryAfter: true,
+          )) {
+            folderTotal = progress.total;
+            folderUpdated = progress.updated;
+            folderErrors = progress.errors;
+            Map<String, dynamic> data = {
+              'current': progress.current,
+              'total': progress.total,
             };
+            if (progress.comic != null) {
+              data['comic'] = {
+                'id': progress.comic!.id,
+                'name': progress.comic!.name,
+                'coverUrl': progress.comic!.coverPath,
+                'author': progress.comic!.author,
+                'type': progress.comic!.sourceKey,
+                'updateTime': progress.comic!.updateTime,
+                'tags': progress.comic!.tags,
+              };
+            }
+            var message = 'Progress';
+            if (progress.errorMessage != null) {
+              message = 'ProgressError';
+              data['error'] = progress.errorMessage;
+            }
+            cliPrint({'status': 'running', 'message': message, 'data': data});
           }
-          var message = 'Progress';
-          if (progress.errorMessage != null) {
-            message = 'ProgressError';
-            data['error'] = progress.errorMessage;
-          }
-          cliPrint({'status': 'running', 'message': message, 'data': data});
+          total += folderTotal;
+          updated += folderUpdated;
+          errors += folderErrors;
         }
         cliPrint({
           'status': 'running',
@@ -249,7 +264,9 @@ Future<void> runHeadlessMode(List<String> args) async {
           'data': {'total': total, 'updated': updated, 'errors': errors},
         });
         await Future.delayed(const Duration(milliseconds: 500));
-        var json = await getUpdatedComicsAsJson(folder);
+        var json = await getUpdatedComicsAsJsonInFolders(
+          getFollowUpdateFolders(),
+        );
         cliPrint({
           'status': errors > 0 ? 'error' : 'success',
           'message': 'Updated comics list.',

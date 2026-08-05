@@ -18,7 +18,7 @@ class NetworkError extends StatelessWidget {
 
   final String? buttonText;
 
-  final Widget? action;
+  final List<Widget>? action;
 
   @override
   Widget build(BuildContext context) {
@@ -70,11 +70,13 @@ class NetworkError extends StatelessWidget {
                 child: Text('Verify'.tl),
               )
             else
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
+              Wrap(
+                alignment: WrapAlignment.center,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 8,
+                runSpacing: 8,
                 children: [
-                  if (action != null)
-                    action!.paddingRight(8),
+                  ...?action,
                   FilledButton(
                     onPressed: retry,
                     child: Text(buttonText ?? 'Retry'.tl),
@@ -176,6 +178,7 @@ abstract class LoadingState<T extends StatefulWidget, S extends Object>
           isLoading = false;
         });
       } else {
+        onLoadError(value.errorMessage!);
         setState(() {
           isLoading = false;
           error = value.errorMessage!;
@@ -187,6 +190,11 @@ abstract class LoadingState<T extends StatefulWidget, S extends Object>
   Widget buildError() {
     return NetworkError(message: error!, retry: retry);
   }
+
+  /// Called once after a load attempt fails. Subclasses can react to specific
+  /// error types without changing the shared retry behavior.
+  @protected
+  void onLoadError(String message) {}
 
   @override
   @mustCallSuper
@@ -202,6 +210,7 @@ abstract class LoadingState<T extends StatefulWidget, S extends Object>
             isLoading = false;
           });
         } else {
+          onLoadError(value.errorMessage!);
           setState(() {
             isLoading = false;
             error = value.errorMessage!;

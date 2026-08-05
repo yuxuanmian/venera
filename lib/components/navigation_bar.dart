@@ -212,10 +212,7 @@ class NaviPaneState extends State<NaviPane>
             ],
           );
           if (sideInsets != EdgeInsets.zero) {
-            content = Padding(
-              padding: sideInsets,
-              child: content,
-            );
+            content = Padding(padding: sideInsets, child: content);
           }
           return content;
         },

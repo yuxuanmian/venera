@@ -769,16 +769,28 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
     var epId = chapters.ids.elementAt(chapterIndex);
     var chapterTitle = chapters.titles.elementAt(chapterIndex);
 
-    showSideBar(
-      context,
-      ChapterCommentsPage(
-        comicId: context.reader.cid,
-        epId: epId,
-        source: source,
-        comicTitle: context.reader.widget.name,
-        chapterTitle: chapterTitle,
-      ),
-    );
+    if (App.isAndroid) {
+      context.to(
+        () => ChapterCommentsPage(
+          comicId: context.reader.cid,
+          epId: epId,
+          source: source,
+          comicTitle: context.reader.widget.name,
+          chapterTitle: chapterTitle,
+        ),
+      );
+    } else {
+      showSideBar(
+        context,
+        ChapterCommentsPage(
+          comicId: context.reader.cid,
+          epId: epId,
+          source: source,
+          comicTitle: context.reader.widget.name,
+          chapterTitle: chapterTitle,
+        ),
+      );
+    }
   }
 
   Widget buildEpChangeButton() {
