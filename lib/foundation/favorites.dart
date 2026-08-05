@@ -1960,6 +1960,14 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     extraCondition: 'last_check_time IS NULL',
   );
 
+  int countPendingUncheckedComicsInFolders(
+    Iterable<NetworkFavoriteFolderRef> folders,
+  ) => _countDistinctComicsInFolders(
+    folders,
+    extraCondition:
+        'last_check_time IS NULL AND (retry_after IS NULL OR retry_after <= ${DateTime.now().millisecondsSinceEpoch})',
+  );
+
   int countUpdatesInFolders(Iterable<NetworkFavoriteFolderRef> folders) =>
       _countDistinctComicsInFolders(
         folders,

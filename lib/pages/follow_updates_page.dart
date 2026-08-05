@@ -744,6 +744,7 @@ abstract class FollowUpdatesService {
   static bool _taskRunning = false;
   static Future<void>? _activeTask;
   static void Function()? _cancelCurrent;
+  static Timer? _autoScanTimer;
 
   /// Latest progress of the background baseline run, or null when no baseline
   /// task is active.
@@ -780,7 +781,34 @@ abstract class FollowUpdatesService {
         taskRunning.value = false;
         _cancelCurrent = null;
       }
+      // The cache may have changed while this task was running (for example a
+      // sync batch or folder refresh), so re-check for remaining gaps once the
+      // task has fully finished instead of waiting for a manual Retry.
+      _scheduleAutoScan();
     }
+  }
+
+  /// Debounces a background missing-only scan after cache changes.
+  ///
+  /// The scan only fills check gaps and never overrides the regular periodic
+  /// check or manual checks. It is skipped while another task is running or a
+  /// full-cache operation is in progress; in the latter case it retries after
+  /// a short delay so freshly cached folders get scanned right after.
+  static void _scheduleAutoScan() {
+    _autoScanTimer?.cancel();
+    _autoScanTimer = Timer(const Duration(seconds: 2), _tryStartAutoScan);
+  }
+
+  static void _tryStartAutoScan() {
+    if (!followUpdatesEnabled || _taskRunning) return;
+    final cache = NetworkFavoriteCacheManager();
+    final folders = getFollowUpdateFolders();
+    if (folders.any(cache.isFullCacheRunning)) {
+      _autoScanTimer = Timer(const Duration(seconds: 5), _tryStartAutoScan);
+      return;
+    }
+    if (cache.countPendingUncheckedComicsInFolders(folders) == 0) return;
+    unawaited(_startTask(_runMissingOnly, cancelExisting: false));
   }
 
   static void startBaseline() {
@@ -796,13 +824,15 @@ abstract class FollowUpdatesService {
     return _startTask((isCanceled) async {
       for (final folder in getFollowUpdateFolders()) {
         if (isCanceled()) return;
+        // Consume the stream to its end even when cancelled so the underlying
+        // scan fully shuts down before this task is considered finished.
         await for (final _ in updateFolder(
           folder,
           FollowUpdateMode.regular,
           isCanceled: isCanceled,
           ignoreRetryAfter: true,
         )) {
-          if (isCanceled()) return;
+          // Cancellation is handled inside updateFolder; keep draining.
         }
       }
     }, cancelExisting: true);
@@ -833,23 +863,27 @@ abstract class FollowUpdatesService {
         if (isCanceled()) break;
         var folderErrors = 0;
         var folderUpdated = 0;
+        // Consume the stream to its end even when cancelled; updateFolder's
+        // internal checks stop it from picking up new work, so this drains
+        // quickly and no background scan outlives this task.
         await for (final progress in updateFolder(
           folder,
           FollowUpdateMode.missing,
           isCanceled: isCanceled,
           ignoreRetryAfter: true,
         )) {
-          if (isCanceled()) break;
           folderErrors = progress.errors;
           folderUpdated = progress.updated;
-          baselineStatus.value = BaselineStatus(
-            isRunning: true,
-            total: total,
-            completed: checkedBeforeFolder + progress.current,
-            errors: errors + folderErrors,
-            updated: updated + folderUpdated,
-            currentComic: progress.comic?.title,
-          );
+          if (!isCanceled()) {
+            baselineStatus.value = BaselineStatus(
+              isRunning: true,
+              total: total,
+              completed: checkedBeforeFolder + progress.current,
+              errors: errors + folderErrors,
+              updated: updated + folderUpdated,
+              currentComic: progress.comic?.title,
+            );
+          }
         }
         if (isCanceled()) break;
         errors += folderErrors;
@@ -898,6 +932,80 @@ abstract class FollowUpdatesService {
     }
   }
 
+  /// Fills only the check gaps that are neither checked nor in cooldown.
+  ///
+  /// Runs after cache changes (new sync batches, folder refresh, full-cache
+  /// completion). Cooldowns are respected; manual Retry / Check Now keep their
+  /// force-check semantics.
+  static Future<void> _runMissingOnly(bool Function() isCanceled) async {
+    final folders = getFollowUpdateFolders();
+    final cache = NetworkFavoriteCacheManager();
+    var errors = 0;
+    var updated = 0;
+    try {
+      for (final folder in folders) {
+        if (isCanceled()) break;
+        if (cache.countPendingUncheckedComicsInFolders([folder]) == 0) {
+          continue;
+        }
+        final folderTotal = cache.countCachedComics(folder);
+        final folderChecked = folderTotal - cache.countUncheckedComics(folder);
+        baselineStatus.value = BaselineStatus(
+          isRunning: true,
+          total: folderTotal,
+          completed: folderChecked,
+          errors: errors,
+          updated: updated,
+        );
+        var folderErrors = 0;
+        var folderUpdated = 0;
+        // Consume the stream to its end even when cancelled so the underlying
+        // scan fully shuts down before this task is considered finished.
+        await for (final progress in updateFolder(
+          folder,
+          FollowUpdateMode.missing,
+          isCanceled: isCanceled,
+          ignoreRetryAfter: false,
+        )) {
+          folderErrors = progress.errors;
+          folderUpdated = progress.updated;
+          if (!isCanceled() && progress.total > 0) {
+            baselineStatus.value = BaselineStatus(
+              isRunning: true,
+              total: folderTotal,
+              completed: folderChecked + progress.current,
+              errors: errors + folderErrors,
+              updated: updated + folderUpdated,
+              currentComic: progress.comic?.title,
+            );
+          }
+        }
+        if (isCanceled()) break;
+        errors += folderErrors;
+        updated += folderUpdated;
+      }
+      if (isCanceled()) {
+        baselineStatus.value = null;
+        return;
+      }
+      if (cache.countPendingUncheckedComicsInFolders(folders) == 0) {
+        baselineStatus.value = null;
+      }
+    } catch (e, s) {
+      Log.error('Follow updates auto scan', e, s);
+      final last = baselineStatus.value;
+      baselineStatus.value = BaselineStatus(
+        isRunning: false,
+        total: last?.total ?? 0,
+        completed: last?.completed ?? 0,
+        errors: last?.errors ?? errors,
+        updated: last?.updated ?? updated,
+      );
+    } finally {
+      updateFollowUpdatesUI();
+    }
+  }
+
   static Future<void> _check(bool Function() isCanceled) async {
     if (!followUpdatesEnabled) return;
     var updated = 0;
@@ -921,12 +1029,13 @@ abstract class FollowUpdatesService {
         if (isCanceled()) return;
         final cache = NetworkFavoriteCacheManager();
         final onlyMissing = cache.hasUncheckedComics(folder);
+        // Consume the stream to its end even when cancelled so the scan fully
+        // shuts down before this task is considered finished.
         await for (final progress in updateFolder(
           folder,
           onlyMissing ? FollowUpdateMode.missing : FollowUpdateMode.regular,
           isCanceled: isCanceled,
         )) {
-          if (isCanceled()) return;
           updated += progress.updated;
           if (onlyMissing && progress.total > 0) {
             baselineStatus.value = BaselineStatus(
@@ -960,11 +1069,16 @@ abstract class FollowUpdatesService {
       appdata.saveData();
     }
     unawaited(_startTask(_check, cancelExisting: false));
-    NetworkFavoriteCacheManager().addListener(updateFollowUpdatesUI);
+    NetworkFavoriteCacheManager().addListener(_onCacheChanged);
     Timer.periodic(
       const Duration(minutes: 10),
       (_) => unawaited(_startTask(_check, cancelExisting: false)),
     );
+  }
+
+  static void _onCacheChanged() {
+    updateFollowUpdatesUI();
+    _scheduleAutoScan();
   }
 }
 

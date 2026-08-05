@@ -8,6 +8,7 @@
   `$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()`。
 - Java、Gradle、Flutter、Dart、Rust 等系统命令可使用默认编码；出现乱码时再针对实际命令调整。
 - 搜索文件和文本优先使用 `rg --files` 与 `rg`。
+- 本环境的沙箱会拦截/卡住 `dart`、`flutter` 命令（Flutter/Dart 需要访问其缓存与网络），运行 `flutter test`、`flutter analyze`、`dart format` 等指令时应使用提权（escalated）方式执行，不要先在沙箱内尝试等待超时。
 
 ## 项目事实
 

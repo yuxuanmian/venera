@@ -902,6 +902,91 @@ void main() {
     );
   });
 
+  test(
+    'countPendingUncheckedComicsInFolders respects checks and cooldowns',
+    () async {
+      final data = _numericData(
+        (page, [folder]) async => Res(<Comic>[
+          _comic('one'),
+          _comic('two'),
+          _comic('three'),
+        ], subData: 1),
+      );
+      await cache.refreshFolders(data);
+      await cache.refreshPage(data, folder, 1);
+      const otherFolder = NetworkFavoriteFolderRef(
+        sourceKey: 'test-source',
+        folderId: 'other',
+        title: 'Other',
+      );
+      await cache.refreshPage(data, otherFolder, 1);
+
+      // All three distinct comics are unchecked and not cooled.
+      expect(
+        cache.countPendingUncheckedComicsInFolders([folder, otherFolder]),
+        3,
+      );
+
+      // A future cooldown on every row excludes the comic from the
+      // pending count; cooling a single row does not while another copy
+      // of the comic is still pending.
+      cache.markComicRetryLater(folder, 'two');
+      expect(
+        cache.countPendingUncheckedComicsInFolders([folder, otherFolder]),
+        3,
+      );
+      cache.markComicRetryLater(otherFolder, 'two');
+      expect(
+        cache.countPendingUncheckedComicsInFolders([folder, otherFolder]),
+        2,
+      );
+
+      // An expired cooldown counts again.
+      cache.markComicRetryLater(
+        folder,
+        'two',
+        delay: const Duration(seconds: -1),
+      );
+      cache.markComicRetryLater(
+        otherFolder,
+        'two',
+        delay: const Duration(seconds: -1),
+      );
+      expect(
+        cache.countPendingUncheckedComicsInFolders([folder, otherFolder]),
+        3,
+      );
+
+      // A successful check in every folder no longer counts as pending.
+      cache.recordComicCheck(
+        folder,
+        'one',
+        updateTime: '2026-8-3',
+        updateMarker: 'time:2026-8-3|chapters:5',
+      );
+      cache.recordComicCheck(
+        otherFolder,
+        'one',
+        updateTime: '2026-8-3',
+        updateMarker: 'time:2026-8-3|chapters:5',
+      );
+      expect(
+        cache.countPendingUncheckedComicsInFolders([folder, otherFolder]),
+        2,
+      );
+
+      // Rows of the same comic across folders are counted once, so a
+      // comic with every row cooled is no longer pending.
+      cache.markComicRetryLater(folder, 'two');
+      cache.markComicRetryLater(otherFolder, 'two');
+      expect(
+        cache.countPendingUncheckedComicsInFolders([folder, otherFolder]),
+        1,
+      );
+      expect(cache.countUncheckedComicsInFolders([folder, otherFolder]), 2);
+    },
+  );
+
   test('aggregate folder queries dedupe and paginate', () async {
     const folderB = NetworkFavoriteFolderRef(
       sourceKey: 'test-source',

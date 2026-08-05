@@ -56,7 +56,10 @@ Future<ComicUpdateResult> updateComic(
         manager.markComicRetryLater(folder, c.id);
         return ComicUpdateResult(false, 'Comic source does not load details');
       }
-      var newInfo = (await comicSource.loadComicInfo!(c.id)).data;
+      final info = await comicSource.loadComicInfo!(c.id).timeout(
+        const Duration(seconds: 20),
+      );
+      var newInfo = info.data;
 
       final author = newInfo.subTitle?.trim();
       manager.updateBasicInfo(
