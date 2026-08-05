@@ -1060,6 +1060,30 @@ void main() {
     );
   });
 
+  test('caching a page registers an unlisted folder for follow-up', () async {
+    final data = _numericData(
+      (page, [folder]) async => Res(<Comic>[
+        _comic('one'),
+        _comic('two'),
+        _comic('three'),
+      ], subData: 1),
+    );
+    // Single-folder sources cache pages directly without refreshFolders.
+    await cache.refreshPage(data, folder, 1);
+
+    expect(cache.countCachedComics(folder), 3);
+    expect(
+      cache.getAllCachedFolders().any(
+        (f) => f.sourceKey == 'test-source' && f.folderId == 'remote',
+      ),
+      isTrue,
+    );
+    expect(
+      cache.countPendingUncheckedComicsInFolders(cache.getAllCachedFolders()),
+      3,
+    );
+  });
+
   test('single scan confirms suspect gone after a 404 retry', () async {
     final data = _numericData(
       (page, [folder]) async => Res(<Comic>[_comic('one')], subData: 1),

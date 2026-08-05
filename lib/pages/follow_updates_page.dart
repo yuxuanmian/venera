@@ -800,7 +800,14 @@ abstract class FollowUpdatesService {
   }
 
   static void _tryStartAutoScan() {
-    if (!followUpdatesEnabled || _taskRunning) return;
+    if (!followUpdatesEnabled) return;
+    if (_taskRunning) {
+      // A scan is still consuming. Re-check shortly after it ends so cache
+      // changes that arrived mid-run are picked up even if the task itself
+      // did not schedule the follow-up.
+      _autoScanTimer = Timer(const Duration(seconds: 5), _tryStartAutoScan);
+      return;
+    }
     final cache = NetworkFavoriteCacheManager();
     final folders = getFollowUpdateFolders();
     if (folders.any(cache.isFullCacheRunning)) {
@@ -1018,7 +1025,9 @@ abstract class FollowUpdatesService {
           final data = source?.favoriteData;
           if (data == null || !source!.isLogged) continue;
           try {
-            await NetworkFavoriteCacheManager().refreshCachedSummaries(data);
+            await NetworkFavoriteCacheManager()
+                .refreshCachedSummaries(data)
+                .timeout(const Duration(seconds: 30));
           } catch (e, s) {
             Log.error('Refresh favorite cache', e, s);
           }

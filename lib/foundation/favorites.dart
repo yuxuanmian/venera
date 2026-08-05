@@ -783,6 +783,31 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     );
   }
 
+  /// Makes sure [folder] has a row in `favorite_folders`.
+  ///
+  /// Single-folder sources cache pages directly without calling
+  /// [refreshFolders], so without this the folder would never be picked up
+  /// by follow-up queries (`getFollowUpdateFolders`) even though its comics
+  /// are cached.
+  void _ensureFolder(NetworkFavoriteFolderRef folder) {
+    final rows = _db.select(
+      'SELECT 1 FROM favorite_folders WHERE source_key = ? AND folder_id = ?',
+      [folder.sourceKey, folder.folderId],
+    );
+    if (rows.isEmpty) {
+      _db.execute(
+        '''INSERT INTO favorite_folders
+           (source_key, folder_id, title, updated_at) VALUES (?, ?, ?, ?)''',
+        [
+          folder.sourceKey,
+          folder.folderId,
+          folder.title ?? '',
+          DateTime.now().millisecondsSinceEpoch,
+        ],
+      );
+    }
+  }
+
   void _upsertFolders(
     String sourceKey,
     List<NetworkFavoriteFolder> folders, {
@@ -950,6 +975,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     final now = DateTime.now();
     _db.execute('BEGIN');
     try {
+      _ensureFolder(folder);
       final updateState = <String, Map<String, Object?>>{};
       for (final row in _db.select(
         '''SELECT source_key, comic_id, comic_json, favorite_id, favorite_time,
