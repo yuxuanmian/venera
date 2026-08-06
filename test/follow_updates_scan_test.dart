@@ -512,6 +512,38 @@ void main() {
       );
     });
 
+    test('includeSuspect forces suspected comics back into the queue', () async {
+      await cacheComics(['one', 'two']);
+      cache.markComicSuspectGoneEverywhere('test-source', 'one');
+      var calls = <String>[];
+      final source = _detailSource((id) async {
+        calls.add(id);
+        return _details(id);
+      });
+      ComicSourceManager().add(source);
+
+      // Normal scans skip suspects (only the never-checked 'two' is queued).
+      await scanFollowUpdates(
+        [folder],
+        FollowUpdateMode.force,
+        ignoreRetryAfter: true,
+        cache: cache,
+      ).toList();
+      expect(calls, ['two']);
+
+      // The debug force-scan ignores the suspect skip; a successful check
+      // clears the mark again.
+      await scanFollowUpdates(
+        [folder],
+        FollowUpdateMode.force,
+        ignoreRetryAfter: true,
+        includeSuspect: true,
+        cache: cache,
+      ).toList();
+      expect(calls, containsAll(<String>['one', 'two']));
+      expect(cache.isComicSuspectGone('test-source', 'one'), isFalse);
+    });
+
     test('a source with no successful check never accumulates delist hits', () async {
       await cacheComics(['one']);
       final source = _detailSource((id) async {

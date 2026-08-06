@@ -854,6 +854,22 @@ abstract class FollowUpdatesService {
     }, cancelExisting: true);
   }
 
+  /// Debug-only: force every cached comic into the queue, ignoring cooldowns,
+  /// the 24h window and the suspected-removed skip.
+  static Future<void> forceScanAll() {
+    return _startTask((isCanceled) async {
+      await for (final _ in scanFollowUpdates(
+        getFollowUpdateFolders(),
+        FollowUpdateMode.force,
+        isCanceled: isCanceled,
+        ignoreRetryAfter: true,
+        includeSuspect: true,
+      )) {
+        // Cancellation is handled inside the scan; keep draining.
+      }
+    }, cancelExisting: true);
+  }
+
   static Future<void> _runBaseline(bool Function() isCanceled) async {
     final folders = getFollowUpdateFolders();
     final cache = NetworkFavoriteCacheManager();

@@ -224,6 +224,10 @@ Future<void> showDebugMenu(GlobalKey buttonKey) async {
         child: Text('Clear Favorites Cache'.tl),
       ),
       PopupMenuItem(value: 'clearBaselines', child: Text('Clear Baselines'.tl)),
+      PopupMenuItem(
+        value: 'forceScanAll',
+        child: Text('Force Scan All Comics'.tl),
+      ),
     ],
   );
   if (value != null) {
@@ -254,6 +258,11 @@ Future<void> showDebugMenuSheet() async {
             title: Text('Clear Baselines'.tl),
             onTap: () => context.pop('clearBaselines'),
           ),
+          ListTile(
+            leading: const Icon(Icons.playlist_add_check),
+            title: Text('Force Scan All Comics'.tl),
+            onTap: () => context.pop('forceScanAll'),
+          ),
         ],
       ),
     ),
@@ -277,6 +286,10 @@ void handleDebugMenuSelected(String value) {
       FollowUpdatesService.baselineStatus.value = null;
       App.favorites.clearAllBaselines();
       App.rootContext.showMessage(message: 'Baselines cleared'.tl);
+      break;
+    case 'forceScanAll':
+      FollowUpdatesService.forceScanAll();
+      App.rootContext.showMessage(message: 'Force scan started'.tl);
       break;
   }
 }

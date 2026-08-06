@@ -282,12 +282,13 @@ List<_ScanItem> _buildScanItems(
   FollowUpdateMode mode, {
   required bool ignoreRetryAfter,
   Set<String>? skipKeys,
+  bool includeSuspect = false,
 }) {
   final items = <String, _ScanItem>{};
   final earliestCheck = <String, DateTime?>{};
   for (final folder in folders) {
     for (final comic in manager.getComicsWithUpdatesInfo(folder)) {
-      if (comic.isSuspectGone) continue;
+      if (comic.isSuspectGone && !includeSuspect) continue;
       final lastCheckTime = comic.lastCheckTime;
       if (mode == FollowUpdateMode.missing) {
         if (lastCheckTime != null) continue;
@@ -347,6 +348,7 @@ Stream<UpdateProgress> scanFollowUpdates(
   bool Function()? isCanceled,
   bool ignoreRetryAfter = false,
   NetworkFavoriteCacheManager? cache,
+  bool includeSuspect = false,
 }) {
   var stream = StreamController<UpdateProgress>();
   _runScan(
@@ -356,6 +358,7 @@ Stream<UpdateProgress> scanFollowUpdates(
     isCanceled: isCanceled,
     ignoreRetryAfter: ignoreRetryAfter,
     cache: cache,
+    includeSuspect: includeSuspect,
   );
   return stream.stream;
 }
@@ -367,6 +370,7 @@ Future<void> _runScan(
   bool Function()? isCanceled,
   bool ignoreRetryAfter = false,
   NetworkFavoriteCacheManager? cache,
+  bool includeSuspect = false,
 }) async {
   final manager = cache ?? NetworkFavoriteCacheManager();
   var errors = 0;
@@ -404,6 +408,7 @@ Future<void> _runScan(
         storedMode,
         ignoreRetryAfter: previousRun.ignoreRetryAfter,
         skipKeys: manager.getDoneScanItems(previousRun.runId),
+        includeSuspect: includeSuspect,
       );
       run = previousRun;
     } else {
@@ -412,6 +417,7 @@ Future<void> _runScan(
         folders,
         mode,
         ignoreRetryAfter: ignoreRetryAfter,
+        includeSuspect: includeSuspect,
       );
       run = manager.createScanRun(
         mode: mode.name,
