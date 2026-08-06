@@ -50,7 +50,7 @@ class PopUpWidget<T> extends PopupRoute<T> {
         enabledCallback: () => true,
         gestureWidth: 20.0,
         onStartPopGesture: () =>
-            IOSBackGestureController(controller!, navigator!),
+            IOSBackGestureController(this, controller!, navigator!),
         child: body,
       );
     }

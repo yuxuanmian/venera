@@ -531,7 +531,7 @@ void main() {
     expect(cache.searchCachedComics(folder, 'oldtag').single.id, 'old-id');
     expect(cache.searchCachedComics(folder, 'old author').single.id, 'old-id');
 
-    cache.markComicRetryLater(folder, 'old-id');
+    cache.markComicRetryLaterEverywhere('test-source', 'old-id');
     expect(cache.getComicsWithUpdatesInfo(folder).single.retryAfter, isNotNull);
   });
 
@@ -550,8 +550,8 @@ void main() {
       chapterCount: 12,
     );
     expect(
-      cache.recordComicCheck(
-        folder,
+      cache.recordComicCheckEverywhere(
+        'test-source',
         'one',
         updateTime: '2026-8-3',
         updateMarker: 'time:2026-8-3|chapters:12',
@@ -566,8 +566,8 @@ void main() {
     expect(checked.hasNewUpdate, isFalse);
 
     expect(
-      cache.recordComicCheck(
-        folder,
+      cache.recordComicCheckEverywhere(
+        'test-source',
         'one',
         updateTime: '2026-8-3',
         updateMarker: 'time:2026-8-3|chapters:13',
@@ -595,21 +595,21 @@ void main() {
       expect(cache.countUncheckedComics(folder), 3);
       expect(cache.hasUncheckedComics(folder), isTrue);
 
-      cache.recordComicCheck(
-        folder,
+      cache.recordComicCheckEverywhere(
+        'test-source',
         'one',
         updateTime: '2026-8-3',
         updateMarker: 'time:2026-8-3|chapters:5',
       );
       expect(cache.countUncheckedComics(folder), 2);
-      cache.recordComicCheck(
-        folder,
+      cache.recordComicCheckEverywhere(
+        'test-source',
         'two',
         updateTime: '2026-8-3',
         updateMarker: 'time:2026-8-3|chapters:6',
       );
-      cache.recordComicCheck(
-        folder,
+      cache.recordComicCheckEverywhere(
+        'test-source',
         'three',
         updateTime: '2026-8-3',
         updateMarker: 'time:2026-8-3|chapters:7',
@@ -634,7 +634,7 @@ void main() {
     },
   );
 
-  test('missing updateFolder only checks unchecked comics', () async {
+  test('missing scan only checks unchecked comics', () async {
     final data = _numericData(
       (page, [folder]) async => Res(<Comic>[
         _comic('one'),
@@ -644,8 +644,8 @@ void main() {
     );
     await cache.refreshFolders(data);
     await cache.refreshPage(data, folder, 1);
-    cache.recordComicCheck(
-      folder,
+    cache.recordComicCheckEverywhere(
+      'test-source',
       'one',
       updateTime: '2026-8-3',
       updateMarker: 'time:2026-8-3|chapters:5',
@@ -669,15 +669,15 @@ void main() {
     ComicSourceManager().add(source);
     addTearDown(() => ComicSourceManager().remove('test-source'));
 
-    await updateFolder(folder, FollowUpdateMode.missing, cache: cache).toList();
+    await scanFollowUpdates([folder], FollowUpdateMode.missing, cache: cache).toList();
     expect(detailCalls, 2);
     expect(cache.countUncheckedComics(folder), 0);
 
-    await updateFolder(folder, FollowUpdateMode.missing, cache: cache).toList();
+    await scanFollowUpdates([folder], FollowUpdateMode.missing, cache: cache).toList();
     expect(detailCalls, 2);
   });
 
-  test('regular updateFolder skips recent checks and fills gaps', () async {
+  test('regular scan skips recent checks and fills gaps', () async {
     final data = _numericData(
       (page, [folder]) async => Res(<Comic>[
         _comic('one'),
@@ -687,8 +687,8 @@ void main() {
     );
     await cache.refreshFolders(data);
     await cache.refreshPage(data, folder, 1);
-    cache.recordComicCheck(
-      folder,
+    cache.recordComicCheckEverywhere(
+      'test-source',
       'one',
       updateTime: '2026-8-3',
       updateMarker: 'time:2026-8-3|chapters:5',
@@ -712,12 +712,12 @@ void main() {
     ComicSourceManager().add(source);
     addTearDown(() => ComicSourceManager().remove('test-source'));
 
-    await updateFolder(folder, FollowUpdateMode.regular, cache: cache).toList();
+    await scanFollowUpdates([folder], FollowUpdateMode.regular, cache: cache).toList();
     expect(detailCalls, 2);
     expect(cache.countUncheckedComics(folder), 0);
   });
 
-  test('force updateFolder rechecks every comic', () async {
+  test('force scan rechecks every comic', () async {
     final data = _numericData(
       (page, [folder]) async => Res(<Comic>[
         _comic('one'),
@@ -728,8 +728,8 @@ void main() {
     await cache.refreshFolders(data);
     await cache.refreshPage(data, folder, 1);
     for (final id in ['one', 'two', 'three']) {
-      cache.recordComicCheck(
-        folder,
+      cache.recordComicCheckEverywhere(
+        'test-source',
         id,
         updateTime: '2026-8-3',
         updateMarker: 'time:2026-8-3|chapters:5',
@@ -754,11 +754,11 @@ void main() {
     ComicSourceManager().add(source);
     addTearDown(() => ComicSourceManager().remove('test-source'));
 
-    await updateFolder(folder, FollowUpdateMode.force, cache: cache).toList();
+    await scanFollowUpdates([folder], FollowUpdateMode.force, cache: cache).toList();
     expect(detailCalls, 3);
   });
 
-  test('canceled updateFolder does not process comics', () async {
+  test('canceled scan does not process comics', () async {
     final data = _numericData(
       (page, [folder]) async => Res(<Comic>[
         _comic('one'),
@@ -787,8 +787,8 @@ void main() {
     ComicSourceManager().add(source);
     addTearDown(() => ComicSourceManager().remove('test-source'));
 
-    await updateFolder(
-      folder,
+    await scanFollowUpdates(
+      [folder],
       FollowUpdateMode.missing,
       isCanceled: () => true,
       cache: cache,
@@ -835,7 +835,7 @@ void main() {
     );
     await cache.refreshFolders(data);
     await cache.refreshPage(data, folder, 1);
-    cache.markComicRetryLater(folder, 'two');
+    cache.markComicRetryLaterEverywhere('test-source', 'two');
 
     var detailCalls = 0;
     final source = _detailSource((id) async {
@@ -855,11 +855,11 @@ void main() {
     ComicSourceManager().add(source);
     addTearDown(() => ComicSourceManager().remove('test-source'));
 
-    await updateFolder(folder, FollowUpdateMode.missing, cache: cache).toList();
+    await scanFollowUpdates([folder], FollowUpdateMode.missing, cache: cache).toList();
     expect(detailCalls, 2);
 
-    await updateFolder(
-      folder,
+    await scanFollowUpdates(
+      [folder],
       FollowUpdateMode.missing,
       ignoreRetryAfter: true,
       cache: cache,
@@ -877,17 +877,17 @@ void main() {
     );
     await cache.refreshFolders(data);
     await cache.refreshPage(data, folder, 1);
-    cache.recordComicCheck(
-      folder,
+    cache.recordComicCheckEverywhere(
+      'test-source',
       'one',
       updateTime: '2026-8-3',
       updateMarker: 'time:2026-8-3|chapters:5',
     );
-    cache.markComicRetryLater(folder, 'two');
-    cache.markComicRetryLater(folder, 'three');
+    cache.markComicRetryLaterEverywhere('test-source', 'two');
+    cache.markComicRetryLaterEverywhere('test-source', 'three');
 
-    final progress = await updateFolder(
-      folder,
+    final progress = await scanFollowUpdates(
+      [folder],
       FollowUpdateMode.missing,
       cache: cache,
     ).toList();
@@ -927,28 +927,22 @@ void main() {
         3,
       );
 
-      // A future cooldown on every row excludes the comic from the
-      // pending count; cooling a single row does not while another copy
-      // of the comic is still pending.
-      cache.markComicRetryLater(folder, 'two');
-      expect(
-        cache.countPendingUncheckedComicsInFolders([folder, otherFolder]),
-        3,
-      );
-      cache.markComicRetryLater(otherFolder, 'two');
+      // A future cooldown excludes the comic from the pending count; the
+      // cooldown is comic-level, so one call cools it in every folder.
+      cache.markComicRetryLaterEverywhere('test-source', 'two');
       expect(
         cache.countPendingUncheckedComicsInFolders([folder, otherFolder]),
         2,
       );
 
       // An expired cooldown counts again.
-      cache.markComicRetryLater(
-        folder,
+      cache.markComicRetryLaterEverywhere(
+        'test-source',
         'two',
         delay: const Duration(seconds: -1),
       );
-      cache.markComicRetryLater(
-        otherFolder,
+      cache.markComicRetryLaterEverywhere(
+        'test-source',
         'two',
         delay: const Duration(seconds: -1),
       );
@@ -957,15 +951,9 @@ void main() {
         3,
       );
 
-      // A successful check in every folder no longer counts as pending.
-      cache.recordComicCheck(
-        folder,
-        'one',
-        updateTime: '2026-8-3',
-        updateMarker: 'time:2026-8-3|chapters:5',
-      );
-      cache.recordComicCheck(
-        otherFolder,
+      // A successful check no longer counts as pending (comic-level state).
+      cache.recordComicCheckEverywhere(
+        'test-source',
         'one',
         updateTime: '2026-8-3',
         updateMarker: 'time:2026-8-3|chapters:5',
@@ -977,8 +965,8 @@ void main() {
 
       // Rows of the same comic across folders are counted once, so a
       // comic with every row cooled is no longer pending.
-      cache.markComicRetryLater(folder, 'two');
-      cache.markComicRetryLater(otherFolder, 'two');
+      cache.markComicRetryLaterEverywhere('test-source', 'two');
+      cache.markComicRetryLaterEverywhere('test-source', 'two');
       expect(
         cache.countPendingUncheckedComicsInFolders([folder, otherFolder]),
         1,
@@ -1032,16 +1020,16 @@ void main() {
     expect(page.length, 2);
     expect(page.map((c) => c.id).toSet().length, 2);
 
-    cache.recordComicCheck(
-      folder,
+    cache.recordComicCheckEverywhere(
+      'test-source',
       'one',
       updateTime: '2026-8-3',
       updateMarker: 'time:2026-8-3|chapters:5',
     );
     expect(cache.countUncheckedComicsInFolders([folder, folderB]), 3);
 
-    cache.recordComicCheck(
-      folder,
+    cache.recordComicCheckEverywhere(
+      'test-source',
       'one',
       updateTime: '2026-8-4',
       updateMarker: 'time:2026-8-4|chapters:6',
@@ -1084,9 +1072,10 @@ void main() {
     );
   });
 
-  test('single scan confirms suspect gone after a 404 retry', () async {
+  test('a 404 on a healthy source marks the comic suspect immediately', () async {
     final data = _numericData(
-      (page, [folder]) async => Res(<Comic>[_comic('one')], subData: 1),
+      (page, [folder]) async =>
+          Res(<Comic>[_comic('ok'), _comic('bad')], subData: 1),
     );
     await cache.refreshFolders(data);
     await cache.refreshPage(data, folder, 1);
@@ -1094,32 +1083,47 @@ void main() {
     var detailCalls = 0;
     final source = _detailSource((id) async {
       detailCalls++;
+      if (id == 'ok') {
+        return Res(
+          ComicDetails.fromJson({
+            'title': 'Comic',
+            'subtitle': 'Author',
+            'cover': '',
+            'tags': <String, List<String>>{},
+            'chapters': <String, String>{'1': 'Chapter 1'},
+            'sourceKey': 'test-source',
+            'comicId': id,
+          }),
+        );
+      }
       return Res.error('404 Invalid status code: 404');
     });
     ComicSourceManager().add(source);
     addTearDown(() => ComicSourceManager().remove('test-source'));
 
-    await updateFolder(
-      folder,
+    Future<void> scan() => scanFollowUpdates(
+      [folder],
       FollowUpdateMode.force,
       ignoreRetryAfter: true,
       cache: cache,
     ).toList();
-    var item = cache.getComicsWithUpdatesInfo(folder).single;
-    expect(detailCalls, 2);
-    expect(item.isSuspectGone, isTrue);
-    expect(item.checkNotFoundCount, 0);
-    expect(item.lastCheckTime, isNotNull);
 
-    await updateFolder(
-      folder,
-      FollowUpdateMode.force,
-      ignoreRetryAfter: true,
-      cache: cache,
-    ).toList();
-    item = cache.getComicsWithUpdatesInfo(folder).single;
-    expect(detailCalls, 2);
-    expect(item.isSuspectGone, isTrue);
+    // The 'ok' comic keeps the source healthy, so the 404 is credible and
+    // marks 'bad' as suspected removed right away; the end-of-queue re-check
+    // skips comics that are already marked.
+    await scan();
+    var bad = cache
+        .getComicsWithUpdatesInfo(folder)
+        .firstWhere((c) => c.id == 'bad');
+    expect(detailCalls, 2); // ok + bad
+    expect(bad.isSuspectGone, isTrue);
+    expect(bad.lastCheckTime, isNotNull);
+
+    // Suspect comics are skipped by later scans.
+    await scan();
+    bad = cache.getComicsWithUpdatesInfo(folder).firstWhere((c) => c.id == 'bad');
+    expect(detailCalls, 3);
+    expect(bad.isSuspectGone, isTrue);
   });
 
   test('in-scan 404 retry recovers and clears pending state', () async {
@@ -1150,8 +1154,8 @@ void main() {
     ComicSourceManager().add(source);
     addTearDown(() => ComicSourceManager().remove('test-source'));
 
-    await updateFolder(
-      folder,
+    await scanFollowUpdates(
+      [folder],
       FollowUpdateMode.force,
       ignoreRetryAfter: true,
       cache: cache,
@@ -1170,6 +1174,7 @@ void main() {
     );
     await cache.refreshFolders(data);
     await cache.refreshPage(data, folder, 1);
+    cache.markComicSuspectGoneEverywhere('test-source', 'one');
 
     var detailCalls = 0;
     final source = _detailSource((id) async {
@@ -1179,27 +1184,21 @@ void main() {
     ComicSourceManager().add(source);
     addTearDown(() => ComicSourceManager().remove('test-source'));
 
-    await updateFolder(
-      folder,
+    await scanFollowUpdates(
+      [folder],
       FollowUpdateMode.force,
       ignoreRetryAfter: true,
       cache: cache,
     ).toList();
-    await updateFolder(
-      folder,
+    await scanFollowUpdates(
+      [folder],
       FollowUpdateMode.force,
       ignoreRetryAfter: true,
       cache: cache,
     ).toList();
     expect(cache.getComicsWithUpdatesInfo(folder).single.isSuspectGone, isTrue);
-
-    await updateFolder(
-      folder,
-      FollowUpdateMode.force,
-      ignoreRetryAfter: true,
-      cache: cache,
-    ).toList();
-    expect(detailCalls, 2);
+    // Suspect comics are filtered out at queue build time: no requests.
+    expect(detailCalls, 0);
   });
 
   test('successful check clears suspect state', () async {
@@ -1208,29 +1207,12 @@ void main() {
     );
     await cache.refreshFolders(data);
     await cache.refreshPage(data, folder, 1);
+    cache.markComicSuspectGoneEverywhere('test-source', 'one');
 
-    final source = _detailSource((id) async {
-      return Res.error('404 Invalid status code: 404');
-    });
-    ComicSourceManager().add(source);
-    addTearDown(() => ComicSourceManager().remove('test-source'));
-
-    await updateFolder(
-      folder,
-      FollowUpdateMode.force,
-      ignoreRetryAfter: true,
-      cache: cache,
-    ).toList();
-    await updateFolder(
-      folder,
-      FollowUpdateMode.force,
-      ignoreRetryAfter: true,
-      cache: cache,
-    ).toList();
-    expect(cache.getComicsWithUpdatesInfo(folder).single.isSuspectGone, isTrue);
-
-    cache.recordComicCheck(
-      folder,
+    // A successful detail load (page path / recordComicCheck) clears the mark
+    // and the accumulated hits.
+    cache.recordComicCheckEverywhere(
+      'test-source',
       'one',
       updateTime: '2026-8-3',
       updateMarker: 'time:2026-8-3|chapters:5',
@@ -1239,6 +1221,7 @@ void main() {
     expect(item.isSuspectGone, isFalse);
     expect(item.checkFailures, 0);
     expect(item.checkNotFoundCount, 0);
+    expect(item.retryAfter, isNull);
   });
 
   test(
@@ -1256,8 +1239,7 @@ void main() {
       await cache.refreshPage(data, folder, 1);
       await cache.refreshPage(data, folderB, 1);
 
-      cache.markComicSuspectGone(folder, 'one');
-      cache.markComicSuspectGone(folderB, 'one');
+      cache.markComicSuspectGoneEverywhere('test-source', 'one');
 
       expect(cache.isComicSuspectGone('test-source', 'one'), isTrue);
       expect(cache.getSuspectGoneComicsInFolders([folder, folderB]).length, 1);
@@ -1283,8 +1265,8 @@ void main() {
     ComicSourceManager().add(source);
     addTearDown(() => ComicSourceManager().remove('test-source'));
 
-    await updateFolder(
-      folder,
+    await scanFollowUpdates(
+      [folder],
       FollowUpdateMode.force,
       ignoreRetryAfter: true,
       cache: cache,
@@ -1295,8 +1277,8 @@ void main() {
     expect(item.checkNotFoundCount, 0);
     expect(item.retryAfter, isNotNull);
 
-    await updateFolder(
-      folder,
+    await scanFollowUpdates(
+      [folder],
       FollowUpdateMode.force,
       ignoreRetryAfter: true,
       cache: cache,
@@ -1306,22 +1288,33 @@ void main() {
     expect(item.checkFailures, 2);
   });
 
-  test('recordComicNotFoundEverywhere follows two-hit rule', () async {
+  test('recordComicNotFoundEverywhere marks suspect on first hit and is idempotent', () async {
     final data = _numericData(
       (page, [folder]) async => Res(<Comic>[_comic('one')], subData: 1),
     );
     await cache.refreshFolders(data);
     await cache.refreshPage(data, folder, 1);
 
+    // The user saw a 404/400 on the detail page first-hand: one response is
+    // enough to mark the comic as suspected removed.
     cache.recordComicNotFoundEverywhere('test-source', 'one');
     var item = cache.getComicsWithUpdatesInfo(folder).single;
-    expect(item.checkNotFoundCount, 1);
-    expect(item.isSuspectGone, isFalse);
+    expect(item.isSuspectGone, isTrue);
 
+    // Repeated hits stay idempotent (no window, no accumulation).
     cache.recordComicNotFoundEverywhere('test-source', 'one');
     item = cache.getComicsWithUpdatesInfo(folder).single;
     expect(item.isSuspectGone, isTrue);
-    expect(item.lastCheckTime, isNotNull);
+
+    // A successful load clears the mark.
+    cache.recordComicCheckEverywhere(
+      'test-source',
+      'one',
+      updateTime: '2026-8-3',
+      updateMarker: 'time:2026-8-3|chapters:5',
+    );
+    item = cache.getComicsWithUpdatesInfo(folder).single;
+    expect(item.isSuspectGone, isFalse);
   });
 
   test('update marker includes the date and chapter count', () {
@@ -1363,5 +1356,108 @@ void main() {
       ),
     );
     expect(readLegacyFollowUpdatesFolder(database, 'unlinked'), isNull);
+  });
+
+  test('scan run persistence round-trips and clears', () {
+    final run = cache.createScanRun(
+      mode: 'regular',
+      ignoreRetryAfter: true,
+      total: 2,
+      items: const [('test-source', 'one'), ('test-source', 'two')],
+    );
+    expect(run.status, 'running');
+    expect(run.mode, 'regular');
+    expect(run.ignoreRetryAfter, isTrue);
+    expect(cache.getCurrentScanRun()!.runId, run.runId);
+
+    expect(cache.getDoneScanItems(run.runId), isEmpty);
+    cache.markScanItemDone(run.runId, 'test-source', 'one', result: 'ok');
+    expect(
+      cache.getDoneScanItems(run.runId),
+      {'test-source\u0000one'},
+    );
+
+    cache.updateScanRunStatus(run.runId, 'finished');
+    expect(cache.getCurrentScanRun()!.status, 'finished');
+    expect(cache.getCurrentScanRun()!.finishedAt, isNotNull);
+
+    cache.clearScanRun();
+    expect(cache.getCurrentScanRun(), isNull);
+
+    // A fresh run after a terminal one replaces the queue.
+    final next = cache.createScanRun(
+      mode: 'missing',
+      ignoreRetryAfter: false,
+      total: 1,
+      items: const [('test-source', 'three')],
+    );
+    expect(next.runId, isNot(run.runId));
+    expect(cache.getDoneScanItems(next.runId), isEmpty);
+  });
+
+  test('malformed scan run metadata degrades to no run', () {
+    final db = sqlite3.open(
+      '${tempDir.path}${Platform.pathSeparator}cache.db',
+    );
+    db.execute(
+      'INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)',
+      ['follow_update_run', 'not-json'],
+    );
+    db.dispose();
+    expect(cache.getCurrentScanRun(), isNull);
+  });
+
+  test('everywhere variants write all folder rows and fall back when membership is empty', () async {
+    const folderB = NetworkFavoriteFolderRef(
+      sourceKey: 'test-source',
+      folderId: 'remote-b',
+      title: 'Remote B',
+    );
+    final data = _numericData(
+      (page, [folder]) async => Res(<Comic>[_comic('one')], subData: 1),
+    );
+    await cache.refreshFolders(data);
+    await cache.refreshPage(data, folder, 1);
+    await cache.refreshPage(data, folderB, 1);
+
+    cache.updateBasicInfoEverywhere(folder, 'one', chapterCount: 9);
+    for (final f in [folder, folderB]) {
+      final item = cache.getComicsWithUpdatesInfo(f).single;
+      expect(item.chapterCount, 9);
+    }
+
+    cache.recordComicCheckEverywhere(
+      'test-source',
+      'one',
+      updateTime: '2026-8-3',
+      updateMarker: 'time:2026-8-3|chapters:9',
+    );
+    for (final f in [folder, folderB]) {
+      final item = cache.getComicsWithUpdatesInfo(f).single;
+      expect(item.checkNotFoundCount, 0);
+      expect(item.lastCheckTime, isNotNull);
+    }
+
+    // Comic-level state is shared by every folder row: a comic cached only in
+    // one folder still gets its retry state from the same table.
+    await cache.refreshPage(data, const NetworkFavoriteFolderRef(
+      sourceKey: 'test-source',
+      folderId: 'solo',
+      title: 'Solo',
+    ), 1);
+    cache.markComicRetryLaterEverywhere(
+      'test-source',
+      'one',
+      delay: const Duration(hours: 2),
+    );
+    final solo = cache.getComicsWithUpdatesInfo(const NetworkFavoriteFolderRef(
+      sourceKey: 'test-source',
+      folderId: 'solo',
+      title: 'Solo',
+    )).single;
+    expect(solo.retryAfter, isNotNull);
+
+    cache.markComicSuspectGoneEverywhere('test-source', 'one');
+    expect(cache.isComicSuspectGone('test-source', 'one'), isTrue);
   });
 }

@@ -638,6 +638,11 @@ class _NaviPopScope extends StatelessWidget {
           }
           panStartAtEdge = false;
         },
+        onPanCancel: () {
+          // A canceled pan never reaches onPanEnd; clear the flag so a later
+          // unrelated pan cannot trigger a stale back action.
+          panStartAtEdge = false;
+        },
         child: res,
       );
     }

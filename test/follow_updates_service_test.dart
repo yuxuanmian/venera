@@ -208,8 +208,13 @@ void main() {
 
       // Start a manual check quickly (before the 2s auto-scan debounce), with
       // comic 'one' blocked so the queue stays alive while we mutate the cache.
+      // Clear any stale run left by the previous test's auto-scan so this
+      // manual check starts a fresh queue instead of resuming it.
+      // 'one'..'five' were just checked by the previous test (comic-level
+      // state, 24h window), so only the fresh 'six' joins 'one' in the queue.
+      cache.clearScanRun();
       final runFuture = FollowUpdatesService.runCheckNow();
-      await _waitUntil(() => detailCalls.contains('two'));
+      await _waitUntil(() => detailCalls.contains('six'));
 
       // While the queue is consuming, a full-cache style refresh adds comics.
       final fuller = _numericData(

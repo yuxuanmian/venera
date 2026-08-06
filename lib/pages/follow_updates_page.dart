@@ -274,10 +274,16 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
               builder: (context, status, _) {
                 final cache = NetworkFavoriteCacheManager();
                 final folders = getFollowUpdateFolders();
-                final total = cache.countCachedComicsInFolders(folders);
-                final completed =
-                    total - cache.countUncheckedComicsInFolders(folders);
+                // While a scan runs, show the queue's own numbers (final total
+                // from the first frame, monotonic completion); when idle, fall
+                // back to the database gap counts.
                 final running = status?.isRunning == true;
+                final total = running
+                    ? (status?.total ?? 0)
+                    : cache.countCachedComicsInFolders(folders);
+                final completed = running
+                    ? (status?.completed ?? 0)
+                    : total - cache.countUncheckedComicsInFolders(folders);
                 final incomplete = !running && total > completed;
                 return Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -589,10 +595,16 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
           builder: (context, status, _) {
             final cache = NetworkFavoriteCacheManager();
             final folders = getFollowUpdateFolders();
-            final total = cache.countCachedComicsInFolders(folders);
-            final completed =
-                total - cache.countUncheckedComicsInFolders(folders);
+            // While a scan runs, show the queue's own numbers (final total
+            // from the first frame, monotonic completion); when idle, fall
+            // back to the database gap counts.
             final running = status?.isRunning == true;
+            final total = running
+                ? (status?.total ?? 0)
+                : cache.countCachedComicsInFolders(folders);
+            final completed = running
+                ? (status?.completed ?? 0)
+                : total - cache.countUncheckedComicsInFolders(folders);
             final incomplete = !running && total > completed;
             return Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -829,18 +841,15 @@ abstract class FollowUpdatesService {
 
   static Future<void> runCheckNow() {
     return _startTask((isCanceled) async {
-      for (final folder in getFollowUpdateFolders()) {
-        if (isCanceled()) return;
-        // Consume the stream to its end even when cancelled so the underlying
-        // scan fully shuts down before this task is considered finished.
-        await for (final _ in updateFolder(
-          folder,
-          FollowUpdateMode.regular,
-          isCanceled: isCanceled,
-          ignoreRetryAfter: true,
-        )) {
-          // Cancellation is handled inside updateFolder; keep draining.
-        }
+      // Consume the stream to its end even when cancelled so the underlying
+      // scan fully shuts down before this task is considered finished.
+      await for (final _ in scanFollowUpdates(
+        getFollowUpdateFolders(),
+        FollowUpdateMode.regular,
+        isCanceled: isCanceled,
+        ignoreRetryAfter: true,
+      )) {
+        // Cancellation is handled inside the scan; keep draining.
       }
     }, cancelExisting: true);
   }
@@ -865,38 +874,27 @@ abstract class FollowUpdatesService {
       updated: 0,
     );
     try {
-      var checkedBeforeFolder = completed;
-      for (final folder in folders) {
-        if (isCanceled()) break;
-        var folderErrors = 0;
-        var folderUpdated = 0;
-        // Consume the stream to its end even when cancelled; updateFolder's
-        // internal checks stop it from picking up new work, so this drains
-        // quickly and no background scan outlives this task.
-        await for (final progress in updateFolder(
-          folder,
-          FollowUpdateMode.missing,
-          isCanceled: isCanceled,
-          ignoreRetryAfter: true,
-        )) {
-          folderErrors = progress.errors;
-          folderUpdated = progress.updated;
-          if (!isCanceled()) {
-            baselineStatus.value = BaselineStatus(
-              isRunning: true,
-              total: total,
-              completed: checkedBeforeFolder + progress.current,
-              errors: errors + folderErrors,
-              updated: updated + folderUpdated,
-              currentComic: progress.comic?.title,
-            );
-          }
+      // Consume the stream to its end even when cancelled; the scan's internal
+      // checks stop it from picking up new work, so this drains quickly and no
+      // background scan outlives this task.
+      await for (final progress in scanFollowUpdates(
+        folders,
+        FollowUpdateMode.missing,
+        isCanceled: isCanceled,
+        ignoreRetryAfter: true,
+      )) {
+        errors = progress.errors;
+        updated = progress.updated;
+        if (!isCanceled()) {
+          baselineStatus.value = BaselineStatus(
+            isRunning: true,
+            total: progress.total,
+            completed: progress.current,
+            errors: errors,
+            updated: updated,
+            currentComic: progress.comic?.title,
+          );
         }
-        if (isCanceled()) break;
-        errors += folderErrors;
-        updated += folderUpdated;
-        checkedBeforeFolder =
-            total - cache.countUncheckedComicsInFolders(folders);
       }
       if (isCanceled()) {
         Log.info('Follow updates', 'Baseline canceled');
@@ -950,46 +948,39 @@ abstract class FollowUpdatesService {
     var errors = 0;
     var updated = 0;
     try {
-      for (final folder in folders) {
-        if (isCanceled()) break;
-        if (cache.countPendingUncheckedComicsInFolders([folder]) == 0) {
-          continue;
+      if (isCanceled() ||
+          cache.countPendingUncheckedComicsInFolders(folders) == 0) {
+        return;
+      }
+      baselineStatus.value = BaselineStatus(
+        isRunning: true,
+        total: cache.countCachedComicsInFolders(folders),
+        completed:
+            cache.countCachedComicsInFolders(folders) -
+            cache.countUncheckedComicsInFolders(folders),
+        errors: errors,
+        updated: updated,
+      );
+      // Consume the stream to its end even when cancelled so the underlying
+      // scan fully shuts down before this task is considered finished.
+      await for (final progress in scanFollowUpdates(
+        folders,
+        FollowUpdateMode.missing,
+        isCanceled: isCanceled,
+        ignoreRetryAfter: false,
+      )) {
+        errors = progress.errors;
+        updated = progress.updated;
+        if (!isCanceled() && progress.total > 0) {
+          baselineStatus.value = BaselineStatus(
+            isRunning: true,
+            total: progress.total,
+            completed: progress.current,
+            errors: errors,
+            updated: updated,
+            currentComic: progress.comic?.title,
+          );
         }
-        final folderTotal = cache.countCachedComics(folder);
-        final folderChecked = folderTotal - cache.countUncheckedComics(folder);
-        baselineStatus.value = BaselineStatus(
-          isRunning: true,
-          total: folderTotal,
-          completed: folderChecked,
-          errors: errors,
-          updated: updated,
-        );
-        var folderErrors = 0;
-        var folderUpdated = 0;
-        // Consume the stream to its end even when cancelled so the underlying
-        // scan fully shuts down before this task is considered finished.
-        await for (final progress in updateFolder(
-          folder,
-          FollowUpdateMode.missing,
-          isCanceled: isCanceled,
-          ignoreRetryAfter: false,
-        )) {
-          folderErrors = progress.errors;
-          folderUpdated = progress.updated;
-          if (!isCanceled() && progress.total > 0) {
-            baselineStatus.value = BaselineStatus(
-              isRunning: true,
-              total: folderTotal,
-              completed: folderChecked + progress.current,
-              errors: errors + folderErrors,
-              updated: updated + folderUpdated,
-              currentComic: progress.comic?.title,
-            );
-          }
-        }
-        if (isCanceled()) break;
-        errors += folderErrors;
-        updated += folderUpdated;
       }
       if (isCanceled()) {
         baselineStatus.value = null;
@@ -1034,34 +1025,16 @@ abstract class FollowUpdatesService {
         }
       }
 
-      for (final folder in getFollowUpdateFolders()) {
-        if (isCanceled()) return;
-        final cache = NetworkFavoriteCacheManager();
-        final onlyMissing = cache.hasUncheckedComics(folder);
-        // Consume the stream to its end even when cancelled so the scan fully
-        // shuts down before this task is considered finished.
-        await for (final progress in updateFolder(
-          folder,
-          onlyMissing ? FollowUpdateMode.missing : FollowUpdateMode.regular,
-          isCanceled: isCanceled,
-        )) {
-          updated += progress.updated;
-          if (onlyMissing && progress.total > 0) {
-            baselineStatus.value = BaselineStatus(
-              isRunning: !isCanceled(),
-              total: progress.total,
-              completed: progress.current,
-              errors: progress.errors,
-              updated: progress.updated,
-              currentComic: progress.comic?.title,
-            );
-          }
-        }
-        if (onlyMissing &&
-            cache.countUncheckedComicsInFolders(getFollowUpdateFolders()) ==
-                0) {
-          baselineStatus.value = null;
-        }
+      // Consume the stream to its end even when cancelled so the scan fully
+      // shuts down before this task is considered finished. Regular mode is a
+      // superset of missing: never-checked comics are always included, and
+      // recently checked ones are skipped by the 24h filter.
+      await for (final progress in scanFollowUpdates(
+        getFollowUpdateFolders(),
+        FollowUpdateMode.regular,
+        isCanceled: isCanceled,
+      )) {
+        updated += progress.updated;
       }
     } finally {
       if (updated > 0) updateFollowUpdatesUI();

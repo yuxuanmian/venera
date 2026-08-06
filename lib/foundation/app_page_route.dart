@@ -37,7 +37,16 @@ class AppPageRoute<T> extends PageRoute<T> with _AppRouteTransitionMixin{
   Widget buildContent(BuildContext context) {
     var widget = builder(context);
     label = widget.runtimeType.toString();
-    return widget;
+    // The Android predictive back transitions (PredictiveBack/FadeForwards
+    // builders) do not paint a background behind the route content, unlike
+    // [SlidePageTransitionBuilder]. A page whose content is transparent (e.g.
+    // the loading states) would then show the layer below through during the
+    // held back gesture. Paint an opaque surface background so the route never
+    // shows through, regardless of its content.
+    return ColoredBox(
+      color: Theme.of(context).colorScheme.surface,
+      child: widget,
+    );
   }
 
   @override
@@ -51,6 +60,23 @@ class AppPageRoute<T> extends PageRoute<T> with _AppRouteTransitionMixin{
 
   @override
   final bool preventRebuild;
+
+  @override
+  bool get popGestureEnabled {
+    // The Android predictive back gesture is claimed by every current route
+    // on every navigator (the observers are registered on the widget binding,
+    // not on a single navigator). With the app's two navigators, a route on
+    // the inner (main) navigator would claim the same gesture as the visible
+    // route on the root navigator, and a single back would pop BOTH routes.
+    // Only the top-most visible layer (root navigator) may claim the gesture.
+    final rootNavigator = App.rootNavigatorKey.currentState;
+    if (navigator != null &&
+        navigator != rootNavigator &&
+        (rootNavigator?.canPop() ?? false)) {
+      return false;
+    }
+    return super.popGestureEnabled;
+  }
 }
 
 mixin _AppRouteTransitionMixin<T> on PageRoute<T> {
@@ -102,6 +128,7 @@ mixin _AppRouteTransitionMixin<T> on PageRoute<T> {
 
   static bool _isPopGestureEnabled<T>(PageRoute<T> route) {
     if (route.isFirst ||
+        !route.isCurrent ||
         route.willHandlePopInternally ||
         route.popDisposition == RoutePopDisposition.doNotPop ||
         route.fullscreenDialog ||
@@ -140,20 +167,32 @@ mixin _AppRouteTransitionMixin<T> on PageRoute<T> {
   }
 
   IOSBackGestureController _startPopGesture(PageRoute<T> route) {
-    return IOSBackGestureController(route.controller!, route.navigator!);
+    return IOSBackGestureController(route, route.controller!, route.navigator!);
   }
 }
 
 class IOSBackGestureController {
+  final Route<dynamic> route;
+
   final AnimationController controller;
 
   final NavigatorState navigator;
 
-  IOSBackGestureController(this.controller, this.navigator) {
+  IOSBackGestureController(this.route, this.controller, this.navigator) {
     navigator.didStartUserGesture();
   }
 
   void dragEnd(double velocity) {
+    // The route may already have been popped by the system back gesture while
+    // this interactive gesture was in flight (e.g. the iOS edge-swipe back
+    // delivered mid-drag). Once the route is no longer the top-most route its
+    // controller is disposing/disposed and must not be touched, and popping
+    // again would close the page below with a single gesture.
+    if (!route.isCurrent) {
+      navigator.didStopUserGesture();
+      return;
+    }
+
     const Curve animationCurve = Curves.fastLinearToSlowEaseIn;
     final bool animateForward;
 
@@ -198,6 +237,12 @@ class IOSBackGestureController {
   }
 
   void dragUpdate(double delta) {
+    // Ignore updates once the route is no longer the top-most route; the route
+    // may already be popping (e.g. by the system back gesture), and mutating
+    // the controller would fight that animation.
+    if (!route.isCurrent) {
+      return;
+    }
     controller.value -= delta;
   }
 }

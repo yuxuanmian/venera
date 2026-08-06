@@ -220,43 +220,35 @@ Future<void> runHeadlessMode(List<String> args) async {
         int total = 0;
         int updated = 0;
         int errors = 0;
-        for (final folder in getFollowUpdateFolders()) {
-          int folderTotal = 0;
-          int folderUpdated = 0;
-          int folderErrors = 0;
-          await for (var progress in updateFolder(
-            folder,
-            FollowUpdateMode.force,
-            ignoreRetryAfter: true,
-          )) {
-            folderTotal = progress.total;
-            folderUpdated = progress.updated;
-            folderErrors = progress.errors;
-            Map<String, dynamic> data = {
-              'current': progress.current,
-              'total': progress.total,
+        await for (var progress in scanFollowUpdates(
+          getFollowUpdateFolders(),
+          FollowUpdateMode.force,
+          ignoreRetryAfter: true,
+        )) {
+          total = progress.total;
+          updated = progress.updated;
+          errors = progress.errors;
+          Map<String, dynamic> data = {
+            'current': progress.current,
+            'total': progress.total,
+          };
+          if (progress.comic != null) {
+            data['comic'] = {
+              'id': progress.comic!.id,
+              'name': progress.comic!.name,
+              'coverUrl': progress.comic!.coverPath,
+              'author': progress.comic!.author,
+              'type': progress.comic!.sourceKey,
+              'updateTime': progress.comic!.updateTime,
+              'tags': progress.comic!.tags,
             };
-            if (progress.comic != null) {
-              data['comic'] = {
-                'id': progress.comic!.id,
-                'name': progress.comic!.name,
-                'coverUrl': progress.comic!.coverPath,
-                'author': progress.comic!.author,
-                'type': progress.comic!.sourceKey,
-                'updateTime': progress.comic!.updateTime,
-                'tags': progress.comic!.tags,
-              };
-            }
-            var message = 'Progress';
-            if (progress.errorMessage != null) {
-              message = 'ProgressError';
-              data['error'] = progress.errorMessage;
-            }
-            cliPrint({'status': 'running', 'message': message, 'data': data});
           }
-          total += folderTotal;
-          updated += folderUpdated;
-          errors += folderErrors;
+          var message = 'Progress';
+          if (progress.errorMessage != null) {
+            message = 'ProgressError';
+            data['error'] = progress.errorMessage;
+          }
+          cliPrint({'status': 'running', 'message': message, 'data': data});
         }
         cliPrint({
           'status': 'running',

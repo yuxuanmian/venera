@@ -127,8 +127,15 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
   @override
   Widget build(BuildContext context) {
     final isOnChapterCommentsPage = context.reader.isOnChapterCommentsPage;
-    return Stack(
-      children: [
+    // The reader page must always paint an opaque background. Relying on the
+    // route's Material behind the reader leaves transparent areas while the
+    // page is loading or during interactive route transitions (e.g. the held
+    // system back gesture), where the layer below shows through and text/icon
+    // layers render incorrectly.
+    return ColoredBox(
+      color: context.colorScheme.surface,
+      child: Stack(
+        children: [
         Positioned.fill(
           child: AbsorbPointer(
             absorbing: context.reader.isPageAnimating,
@@ -162,7 +169,8 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
           right: 0,
           child: buildBottom(),
         ),
-      ],
+        ],
+      ),
     );
   }
 

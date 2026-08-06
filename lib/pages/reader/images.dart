@@ -98,7 +98,13 @@ class _ReaderImagesState extends State<_ReaderImages> {
   Widget build(BuildContext context) {
     if (reader.isLoading) {
       load();
-      return const Center(child: CircularProgressIndicator());
+      // Paint an opaque background while loading; otherwise the reader page is
+      // a bare spinner that shows the page below through during the interactive
+      // back gesture (or any route transition).
+      return ColoredBox(
+        color: context.colorScheme.surface,
+        child: const Center(child: CircularProgressIndicator()),
+      );
     } else if (error != null) {
       return GestureDetector(
         onTap: () {

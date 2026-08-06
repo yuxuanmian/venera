@@ -105,9 +105,14 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       ComicType.fromKey(widget.sourceKey),
     );
     final cache = NetworkFavoriteCacheManager();
-    final notFound = isNotFoundError(error ?? '');
-    final isFavorite = cache.isFavoriteKnown(widget.sourceKey, widget.id);
     final isSuspect = cache.isComicSuspectGone(widget.sourceKey, widget.id);
+    // Only a confirmed delist signal (404/410/delist wording) or an already
+    // suspected mark shows the destructive actions; a bare 400 may be a
+    // risk-control rejection.
+    final notFound =
+        classifyNotFoundError(error ?? '') == NotFoundSignal.strong ||
+        isSuspect;
+    final isFavorite = cache.isFavoriteKnown(widget.sourceKey, widget.id);
     final buttons = <Widget>[
       if (isDownloaded)
         FilledButton.tonalIcon(
