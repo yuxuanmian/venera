@@ -228,6 +228,10 @@ Future<void> showDebugMenu(GlobalKey buttonKey) async {
         value: 'forceScanAll',
         child: Text('Force Scan All Comics'.tl),
       ),
+      PopupMenuItem(
+        value: 'refreshRandomComics',
+        child: Text('Random Refresh Comics'.tl),
+      ),
     ],
   );
   if (value != null) {
@@ -263,6 +267,11 @@ Future<void> showDebugMenuSheet() async {
             title: Text('Force Scan All Comics'.tl),
             onTap: () => context.pop('forceScanAll'),
           ),
+          ListTile(
+            leading: const Icon(Icons.shuffle),
+            title: Text('Random Refresh Comics'.tl),
+            onTap: () => context.pop('refreshRandomComics'),
+          ),
         ],
       ),
     ),
@@ -290,6 +299,10 @@ void handleDebugMenuSelected(String value) {
     case 'forceScanAll':
       FollowUpdatesService.forceScanAll();
       App.rootContext.showMessage(message: 'Force scan started'.tl);
+      break;
+    case 'refreshRandomComics':
+      unawaited(FollowUpdatesService.refreshRandomComics());
+      App.rootContext.showMessage(message: 'Random refresh started'.tl);
       break;
   }
 }

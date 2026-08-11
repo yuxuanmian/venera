@@ -77,6 +77,53 @@ List<Duration> kNotFoundConfirmationDelays = const [
 /// replace this with zero; production keeps the short backoff.
 Duration kTransientRetryDelay = const Duration(seconds: 2);
 
+/// Number of per-source service-class errors (timeouts, 5xx, connection
+/// failures, risk control) after which the source is treated as down for
+/// delist purposes: no more marks are made this run and every mark already
+/// made for the source (including earlier runs) is rolled back. Counts are
+/// kept across runs and reset by any successful check. Tests shorten this.
+int kServiceErrorDelistThreshold = 5;
+
+/// Window size (requests on the worker path) after which a source with at
+/// least one delist-looking hit is probed again through its list endpoints.
+/// Tests shorten this.
+int kProbeWindowSize = 20;
+
+/// Per-source counts of service-class errors, kept across runs so small
+/// batches (a few comics per run) can still trip the delist detector.
+final serviceErrorCounts = <String, int>{};
+
+/// Per-source re-probe windows: requests seen since the window opened and
+/// delist-looking hits inside it. Kept across runs like [serviceErrorCounts].
+final probeWindowRequests = <String, int>{};
+final probeWindowHits = <String, int>{};
+
+/// Asks [sourceKey]'s list endpoints whether the site is alive.
+///
+/// Returns `true` (alive), `false` (dead: error, timeout or empty list) or
+/// `null` when the source has no list interface to probe with, in which case
+/// the caller must keep its previous behavior (no probing).
+Future<bool?> probeSourceAlive(String sourceKey) async {
+  final source = ComicSource.find(sourceKey);
+  final data = source?.favoriteData;
+  if (data == null) return null;
+  final hasFolders = data.loadFolders != null;
+  final hasComic = data.loadComic != null;
+  if (!hasFolders && !hasComic) return null;
+  try {
+    if (hasFolders) {
+      final res = await data.loadFolders!().timeout(
+        const Duration(seconds: 10),
+      );
+      return res.success && res.data.isNotEmpty;
+    }
+    final res = await data.loadComic!(1).timeout(const Duration(seconds: 10));
+    return res.success && res.data.isNotEmpty;
+  } catch (_) {
+    return false;
+  }
+}
+
 String? comicUpdateMarker(ComicDetails info) {
   final values = <String>[];
   final updateTime = info.findUpdateTime();
@@ -221,7 +268,7 @@ List<NetworkFavoriteFolderRef> getFollowUpdateFolders() {
   }).toList();
 }
 
-/// Progress of a background baseline-establishing run.
+/// Progress of a background follow-up scan run.
 class BaselineStatus {
   const BaselineStatus({
     required this.isRunning,
@@ -315,8 +362,8 @@ List<_ScanItem> _buildScanItems(
         );
       } else {
         // A never-checked row (epoch) beats any checked row.
-        final thisEffective = lastCheckTime ??
-            DateTime.fromMillisecondsSinceEpoch(0);
+        final thisEffective =
+            lastCheckTime ?? DateTime.fromMillisecondsSinceEpoch(0);
         if (thisEffective.isBefore(previous)) {
           earliestCheck[key] = lastCheckTime;
           items[key] = _ScanItem(
@@ -386,12 +433,41 @@ Future<void> _runScan(
   final markedThisRun = <({String sourceKey, String comicId})>[];
   final notFoundRetries =
       <({FavoriteItemWithUpdateInfo comic, NetworkFavoriteFolderRef folder})>[];
+  // In-flight source probes, deduplicating concurrent workers that hit the
+  // same source in the same frame.
+  final probingSources = <String, Future<bool?>>{};
 
   // A source is healthy while it has at least one successful check in this
-  // run and has not tripped the bulk-delist detector (see below).
+  // run, has not tripped the bulk-delist detector and has no accumulated
+  // service-class errors (timeouts/5xx are evidence the source is flaky, so
+  // delist-looking responses are not trusted).
   bool sourceHealthy(String sourceKey) =>
       healthySources.contains(sourceKey) &&
-      !bulkDelistSources.contains(sourceKey);
+      !bulkDelistSources.contains(sourceKey) &&
+      (serviceErrorCounts[sourceKey] ?? 0) == 0;
+
+  // Sources judged down from failure evidence (service-error accumulation or
+  // a failed list probe). Unlike the ordinary consecutive-error trip, the
+  // verdict is not undone by a later success in the same run: a single
+  // success right after a dead probe must not re-trust the delist-looking
+  // responses that preceded it. The next run re-evaluates from scratch.
+  final hardDelistedSources = <String>{};
+
+  // Judges the source as down for delist purposes: no more marks are made
+  // this run and every mark already made for it (including earlier runs) is
+  // rolled back, so delist-looking responses it served while failing cannot
+  // linger. Idempotent; the warning only fires on the first trip.
+  void delistSource(String sourceKey, {required String reason}) {
+    final newlyTripped = bulkDelistSources.add(sourceKey);
+    hardDelistedSources.add(sourceKey);
+    manager.clearComicSuspectGoneForSourceEverywhere(sourceKey);
+    if (newlyTripped) {
+      Log.warning(
+        'Follow updates',
+        'Source $sourceKey delist-tripped: $reason',
+      );
+    }
+  }
 
   late ScanRunInfo run;
   try {
@@ -411,6 +487,17 @@ Future<void> _runScan(
         includeSuspect: includeSuspect,
       );
       run = previousRun;
+      // The rebuilt queue may contain comics cached after the original run
+      // was persisted; they have no scan_queue rows yet. Backfill them so a
+      // second interruption excludes them via the done-set like every other
+      // item (otherwise force-mode resumes re-request them every time).
+      final queued = manager.getScanRunKeys(previousRun.runId);
+      final missing = [
+        for (final item in items)
+          if (!queued.contains('${item.sourceKey}\u0000${item.comicId}'))
+            (item.sourceKey, item.comicId),
+      ];
+      manager.addScanRunItems(previousRun.runId, missing);
     } else {
       items = _buildScanItems(
         manager,
@@ -430,11 +517,13 @@ Future<void> _runScan(
     // The final total is emitted once, before any work starts.
     stream.add(UpdateProgress(total, 0, 0, 0));
 
-    final threads = ((appdata.settings['followUpdateThreads'] as num?)
-                ?.toInt()
-                .clamp(1, 16) ??
-            5)
-        .toInt();
+    final threads =
+        ((appdata.settings['followUpdateThreads'] as num?)?.toInt().clamp(
+                  1,
+                  16,
+                ) ??
+                5)
+            .toInt();
     final batchDelay =
         (appdata.settings['followUpdateBatchDelay'] as num?)?.toDouble() ?? 5;
     final spacingMs = (batchDelay / 5 * 1000).round();
@@ -461,8 +550,9 @@ Future<void> _runScan(
           if (wait > Duration.zero) {
             await Future.delayed(wait);
           }
-          nextAllowed = DateTime.now()
-              .add(Duration(milliseconds: effectiveSpacing));
+          nextAllowed = DateTime.now().add(
+            Duration(milliseconds: effectiveSpacing),
+          );
         }
         // Re-read the row so the 24h hit window and retry state are current.
         final fresh = manager.getComicUpdateInfo(
@@ -478,6 +568,29 @@ Future<void> _runScan(
             result: 'skipped',
           );
           continue;
+        }
+        // Re-probe window counting (worker path only; the retry phase never
+        // touches the window). A full window with at least one delist-looking
+        // hit asks the list endpoints again: if the site has gone down since
+        // the first probe, everything marked in between is rolled back.
+        if (probeWindowRequests.containsKey(item.sourceKey)) {
+          probeWindowRequests[item.sourceKey] =
+              probeWindowRequests[item.sourceKey]! + 1;
+          if (probeWindowHits[item.sourceKey]! > 0 &&
+              probeWindowRequests[item.sourceKey]! >= kProbeWindowSize) {
+            final probe = probingSources.putIfAbsent(
+              item.sourceKey,
+              () => probeSourceAlive(item.sourceKey),
+            );
+            final alive = await probe;
+            probingSources.remove(item.sourceKey);
+            if (alive == false) {
+              delistSource(item.sourceKey, reason: 're-probe failed');
+            } else {
+              probeWindowRequests.remove(item.sourceKey);
+              probeWindowHits.remove(item.sourceKey);
+            }
+          }
         }
         final ComicUpdateResult result;
         try {
@@ -527,6 +640,21 @@ Future<void> _runScan(
           if ((sourceConsecutiveErrors[sourceKey] ?? 0) >= 10) {
             bulkDelistSources.add(sourceKey);
           }
+          // Service-class errors (timeouts, 5xx, risk control) are evidence
+          // the source itself is failing. They accumulate across runs so
+          // small batches can still trip the detector, and any successful
+          // check resets them; a delist-looking response is never both.
+          if (signal == NotFoundSignal.none) {
+            serviceErrorCounts[sourceKey] =
+                (serviceErrorCounts[sourceKey] ?? 0) + 1;
+            if ((serviceErrorCounts[sourceKey] ?? 0) >=
+                kServiceErrorDelistThreshold) {
+              delistSource(
+                sourceKey,
+                reason: '${serviceErrorCounts[sourceKey]} service errors',
+              );
+            }
+          }
           // A confirmed delist hit (strong 404 or a 3x400 session). Several
           // in one run strongly suggest the source itself is rejecting
           // requests (risk control or a full-site outage) rather than
@@ -551,6 +679,31 @@ Future<void> _runScan(
               }
             }
           }
+          // First delist-looking hit of the run: ask the list endpoints
+          // whether the site is alive before trusting further hits. A dead
+          // answer trips the detector right away (the mark of this comic is
+          // rolled back together with all others); an alive answer opens the
+          // periodic re-probe window. Sources without a list interface
+          // (probe returns null) keep their previous behavior.
+          if (signal != NotFoundSignal.none &&
+              !bulkDelistSources.contains(sourceKey)) {
+            if (!probeWindowRequests.containsKey(sourceKey)) {
+              final probe = probingSources.putIfAbsent(
+                sourceKey,
+                () => probeSourceAlive(sourceKey),
+              );
+              final alive = await probe;
+              probingSources.remove(sourceKey);
+              if (alive == false) {
+                delistSource(sourceKey, reason: 'probe failed');
+              } else if (alive == true) {
+                probeWindowRequests[sourceKey] = 0;
+                probeWindowHits[sourceKey] = 0;
+              }
+            } else {
+              probeWindowHits[sourceKey] = probeWindowHits[sourceKey]! + 1;
+            }
+          }
           errors++;
           manager.markScanItemDone(
             run.runId,
@@ -564,7 +717,10 @@ Future<void> _runScan(
           healthySources.add(item.sourceKey);
           sourceConsecutiveErrors[item.sourceKey] = 0;
           sourceConfirmedHits[item.sourceKey] = 0;
-          bulkDelistSources.remove(item.sourceKey);
+          serviceErrorCounts[item.sourceKey] = 0;
+          if (!hardDelistedSources.contains(item.sourceKey)) {
+            bulkDelistSources.remove(item.sourceKey);
+          }
           checked++;
           if (result.updated) updated++;
           manager.markScanItemDone(
@@ -600,10 +756,7 @@ Future<void> _runScan(
     if (notFoundRetries.isNotEmpty && isCanceled?.call() != true) {
       for (final retry in notFoundRetries) {
         if (isCanceled?.call() == true) break;
-        if (manager.isComicSuspectGone(
-          retry.comic.sourceKey,
-          retry.comic.id,
-        )) {
+        if (manager.isComicSuspectGone(retry.comic.sourceKey, retry.comic.id)) {
           continue;
         }
         // The source tripped the bulk-delist detector; re-checking only

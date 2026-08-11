@@ -576,9 +576,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     // Only runs while the state table is empty, so a crash mid-migration is
     // safe (the INSERT below is atomic) and later starts never re-apply stale
     // row snapshots over live state.
-    final stateExists = _db.select(
-      'SELECT 1 FROM comic_check_state LIMIT 1',
-    );
+    final stateExists = _db.select('SELECT 1 FROM comic_check_state LIMIT 1');
     if (stateExists.isEmpty) {
       _db.execute('''
         INSERT INTO comic_check_state
@@ -713,10 +711,9 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   /// Returns the persisted scan run, or null when there is none (or its JSON
   /// is malformed, which is treated as "no run").
   ScanRunInfo? getCurrentScanRun() {
-    final rows = _db.select(
-      'SELECT value FROM metadata WHERE key = ?',
-      [_scanRunMetadataKey],
-    );
+    final rows = _db.select('SELECT value FROM metadata WHERE key = ?', [
+      _scanRunMetadataKey,
+    ]);
     if (rows.isEmpty) return null;
     return ScanRunInfo.fromJson(rows.first['value']);
   }
@@ -772,9 +769,40 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
          WHERE run_id = ? AND status = 'done' ''',
       [runId],
     );
-    return rows
-        .map((r) => '${r['source_key']}\u0000${r['comic_id']}')
-        .toSet();
+    return rows.map((r) => '${r['source_key']}\u0000${r['comic_id']}').toSet();
+  }
+
+  /// All keys queued for [runId] (pending or done), as
+  /// `'sourceKey\u0000comicId'`.
+  Set<String> getScanRunKeys(int runId) {
+    final rows = _db.select(
+      '''SELECT source_key, comic_id FROM scan_queue
+         WHERE run_id = ?''',
+      [runId],
+    );
+    return rows.map((r) => '${r['source_key']}\u0000${r['comic_id']}').toSet();
+  }
+
+  /// Inserts [items] into [runId]'s queue as pending. Used when a resumed run
+  /// re-builds its queue from the current cache and finds comics that were
+  /// cached after the original run was persisted, so a second interruption
+  /// excludes them via the done-set like every other item.
+  void addScanRunItems(int runId, List<(String, String)> items) {
+    if (items.isEmpty) return;
+    _db.execute('BEGIN');
+    try {
+      for (final (sourceKey, comicId) in items) {
+        _db.execute(
+          '''INSERT OR IGNORE INTO scan_queue (run_id, source_key, comic_id, status)
+             VALUES (?, ?, ?, 'pending')''',
+          [runId, sourceKey, comicId],
+        );
+      }
+      _db.execute('COMMIT');
+    } catch (_) {
+      _db.execute('ROLLBACK');
+      rethrow;
+    }
   }
 
   void markScanItemDone(
@@ -794,22 +822,19 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   void updateScanRunStatus(int runId, String status) {
     final info = getCurrentScanRun();
     if (info == null || info.runId != runId) return;
-    _db.execute(
-      'INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)',
-      [
-        _scanRunMetadataKey,
-        jsonEncode(
-          info
-              .copyWith(
-                status: status,
-                finishedAt: status == 'finished'
-                    ? DateTime.now()
-                    : info.finishedAt,
-              )
-              .toJson(),
-        ),
-      ],
-    );
+    _db.execute('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)', [
+      _scanRunMetadataKey,
+      jsonEncode(
+        info
+            .copyWith(
+              status: status,
+              finishedAt: status == 'finished'
+                  ? DateTime.now()
+                  : info.finishedAt,
+            )
+            .toJson(),
+      ),
+    ]);
   }
 
   void clearScanRun() {
@@ -1881,9 +1906,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   }
 
   Map<String, Map<String, Object?>> _checkStateForRows(List<Row> rows) =>
-      _checkStateMap({
-        for (final row in rows) row['source_key'] as String,
-      });
+      _checkStateMap({for (final row in rows) row['source_key'] as String});
 
   List<FavoriteItemWithUpdateInfo> getComicsWithUpdatesInfo(
     NetworkFavoriteFolderRef folder,
@@ -2123,11 +2146,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
            check_not_found_count = 0,
            retry_after = NULL,
            last_check_time = excluded.last_check_time''',
-      [
-        sourceKey,
-        comicId,
-        DateTime.now().millisecondsSinceEpoch,
-      ],
+      [sourceKey, comicId, DateTime.now().millisecondsSinceEpoch],
     );
   }
 
@@ -2138,6 +2157,21 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
               check_not_found_count = 0, retry_after = NULL
           WHERE source_key = ? AND comic_id = ?''',
       [sourceKey, comicId],
+    );
+    notifyListeners();
+  }
+
+  /// Clears every suspected-removed mark of [sourceKey] (including marks made
+  /// by earlier runs). Used when the source is judged to be down: marks made
+  /// against its delist-looking responses are unreliable, so they are dropped
+  /// and the comics are re-evaluated by the next run once the source recovers.
+  void clearComicSuspectGoneForSourceEverywhere(String sourceKey) {
+    _db.execute(
+      '''UPDATE comic_check_state
+          SET check_suspect_gone = 0, check_failures = 0,
+              check_not_found_count = 0, retry_after = NULL
+          WHERE source_key = ? AND check_suspect_gone = 1''',
+      [sourceKey],
     );
     notifyListeners();
   }
@@ -2236,9 +2270,11 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   /// notification for every comic in a follow-updates run.
   void notifyCacheChanged() => notifyListeners();
 
-  /// Number of cached comics in [folder] that have never completed a
-  /// follow-up check. A comic only counts as checked once its detail request
-  /// succeeded, regardless of whether the source exposed a usable marker.
+  /// Number of cached comics in [folder] that have never been checked at all.
+  /// A comic only counts as checked once its detail request succeeded or its
+  /// failure put it into the retry cooldown; a cooldown is not an unchecked
+  /// gap (the scan already tried), so it must not surface as "baseline
+  /// incomplete" in the UI.
   int countUncheckedComics(NetworkFavoriteFolderRef folder) {
     final row = _db
         .select(
@@ -2246,7 +2282,8 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
              LEFT JOIN comic_check_state cs
                ON cs.source_key = fi.source_key AND cs.comic_id = fi.comic_id
              WHERE fi.source_key = ? AND fi.folder_id = ?
-               AND cs.last_check_time IS NULL''',
+               AND cs.last_check_time IS NULL AND cs.retry_after IS NULL
+               AND (cs.check_suspect_gone IS NULL OR cs.check_suspect_gone = 0)''',
           [folder.sourceKey, folder.folderId],
         )
         .first;
@@ -2259,13 +2296,18 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   /// Removes every follow-up baseline so the next check re-establishes it.
   ///
   /// Only update-check metadata is reset; cached comics and folders remain.
+  /// Retry cooldowns and failure counters are part of the baseline: without
+  /// clearing them the never-checked semantics would count cooled comics as
+  /// checked and the next scan would never retry them.
   void clearAllBaselines() {
     _db.execute('''
       UPDATE comic_check_state
       SET last_check_time = NULL,
           last_update_time = NULL,
           update_marker = NULL,
-          has_new_update = 0
+          has_new_update = 0,
+          retry_after = NULL,
+          check_failures = 0
     ''');
     notifyListeners();
   }
@@ -2308,19 +2350,30 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   int countCachedComicsInFolders(Iterable<NetworkFavoriteFolderRef> folders) =>
       _countDistinctComicsInFolders(folders);
 
+  /// Comics that have never been attempted: no successful check, no pending
+  /// retry cooldown and no suspect mark. Comics in a cooldown were already
+  /// tried, so they are not "unchecked" even though they may still lack a
+  /// successful check; a suspect comic was checked and judged as likely
+  /// removed, which is also a completed attempt.
   int countUncheckedComicsInFolders(
     Iterable<NetworkFavoriteFolderRef> folders,
   ) => _countDistinctComicsInFolders(
     folders,
-    stateCondition: 'cs.last_check_time IS NULL',
+    stateCondition:
+        'cs.last_check_time IS NULL AND cs.retry_after IS NULL'
+        ' AND (cs.check_suspect_gone IS NULL OR cs.check_suspect_gone = 0)',
   );
 
+  /// Comics that still need a check right now: never attempted, or whose
+  /// retry cooldown has already expired.
   int countPendingUncheckedComicsInFolders(
     Iterable<NetworkFavoriteFolderRef> folders,
   ) => _countDistinctComicsInFolders(
     folders,
     stateCondition:
-        'cs.last_check_time IS NULL AND (cs.retry_after IS NULL OR cs.retry_after <= ${DateTime.now().millisecondsSinceEpoch})',
+        '(cs.last_check_time IS NULL AND cs.retry_after IS NULL'
+        ' AND (cs.check_suspect_gone IS NULL OR cs.check_suspect_gone = 0))'
+        ' OR (cs.retry_after IS NOT NULL AND cs.retry_after <= ${DateTime.now().millisecondsSinceEpoch})',
   );
 
   int countUpdatesInFolders(Iterable<NetworkFavoriteFolderRef> folders) =>

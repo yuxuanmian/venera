@@ -895,10 +895,12 @@ void main() {
     expect(progress.last.total, 0);
     expect(progress.last.current, 0);
     expect(cache.countCachedComics(folder), 3);
-    expect(cache.countUncheckedComics(folder), 2);
+    // Failed-and-cooled comics were already attempted: they are not an
+    // unchecked gap, so the baseline counts as complete.
+    expect(cache.countUncheckedComics(folder), 0);
     expect(
       cache.countCachedComics(folder) - cache.countUncheckedComics(folder),
-      1,
+      3,
     );
   });
 
@@ -971,7 +973,19 @@ void main() {
         cache.countPendingUncheckedComicsInFolders([folder, otherFolder]),
         1,
       );
+      // Cooling comics are attempted, not unchecked: only 'three' remains.
+      expect(cache.countUncheckedComicsInFolders([folder, otherFolder]), 1);
+
+      // A suspect mark is also a completed attempt: it never counts as an
+      // unchecked gap, even after the baseline is reset.
+      cache.markComicSuspectGoneEverywhere('test-source', 'three');
+      expect(cache.countUncheckedComicsInFolders([folder, otherFolder]), 0);
+      expect(cache.countPendingUncheckedComicsInFolders([folder, otherFolder]), 0);
+      cache.clearAllBaselines();
+      // 'one'/'two' are reset to never-checked (baseline rebuild), but the
+      // suspect mark keeps 'three' out of the unchecked gap.
       expect(cache.countUncheckedComicsInFolders([folder, otherFolder]), 2);
+      expect(cache.countUncheckedComics(folder), 2);
     },
   );
 

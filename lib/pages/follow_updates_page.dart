@@ -174,24 +174,34 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
           SliverAppbar(
             title: Text('Follow Updates'.tl),
             actions: [
-              if (_enabled && baselineIncomplete)
-                IconButton(
-                  tooltip: 'Baseline progress'.tl,
-                  onPressed: showBaselineProgress,
-                  icon: ValueListenableBuilder<BaselineStatus?>(
-                    valueListenable: FollowUpdatesService.baselineStatus,
-                    builder: (context, status, _) {
-                      final running = status?.isRunning == true;
-                      return running
-                          ? const SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.sync_problem);
-                    },
-                  ),
-                ),
+              ValueListenableBuilder<bool>(
+                valueListenable: FollowUpdatesService.taskRunning,
+                builder: (context, running, _) {
+                  final show = _enabled && (running || baselineIncomplete);
+                  return show
+                      ? IconButton(
+                          tooltip: 'Update check progress'.tl,
+                          onPressed: showBaselineProgress,
+                          icon: ValueListenableBuilder<BaselineStatus?>(
+                            valueListenable:
+                                FollowUpdatesService.baselineStatus,
+                            builder: (context, status, _) {
+                              final runningNow = status?.isRunning == true;
+                              return runningNow
+                                  ? const SizedBox(
+                                      width: 20,
+                                      height: 20,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Icon(Icons.sync_problem);
+                            },
+                          ),
+                        )
+                      : const SizedBox.shrink();
+                },
+              ),
               if (_enabled)
                 PopupMenuButton<String>(
                   tooltip: 'more'.tl,
@@ -216,7 +226,12 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
           if (!_enabled)
             buildDisabled(context)
           else ...[
-            if (baselineIncomplete) buildBaselineInProgress(context),
+            ValueListenableBuilder<bool>(
+              valueListenable: FollowUpdatesService.taskRunning,
+              builder: (context, running, _) => running || baselineIncomplete
+                  ? buildBaselineInProgress(context)
+                  : const SliverToBoxAdapter(child: SizedBox.shrink()),
+            ),
             const SliverPadding(padding: EdgeInsets.only(top: 8)),
             buildUpdatedComics(),
             buildSuspectComics(),
@@ -267,7 +282,7 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
           children: [
             ListTile(
               leading: const Icon(Icons.sync),
-              title: Text('Baseline in progress'.tl),
+              title: Text('Checking updates'.tl),
             ),
             ValueListenableBuilder<BaselineStatus?>(
               valueListenable: FollowUpdatesService.baselineStatus,
@@ -315,12 +330,12 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
                         Expanded(
                           child: Text(
                             running
-                                ? 'Baseline runs in the background'.tl
+                                ? 'Follow-up scan in progress'.tl
                                 : status != null && status.errors > 0
                                 ? '@count failed, will retry later'.tlParams({
                                     'count': status.errors,
                                   })
-                                : 'Baseline incomplete, waiting for next check'
+                                : 'Some comics not checked, waiting for next scan'
                                       .tl,
                             style: ts.s12,
                             maxLines: 2,
@@ -589,7 +604,7 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
     await showDialog(
       context: App.rootContext,
       builder: (context) => ContentDialog(
-        title: 'Baseline progress'.tl,
+        title: 'Update check progress'.tl,
         content: ValueListenableBuilder<BaselineStatus?>(
           valueListenable: FollowUpdatesService.baselineStatus,
           builder: (context, status, _) {
@@ -636,10 +651,10 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
                     ).paddingTop(8),
                   Text(
                     running
-                        ? 'Baseline runs in the background'.tl
+                        ? 'Follow-up scan in progress'.tl
                         : incomplete
-                        ? 'Baseline incomplete, waiting for next check'.tl
-                        : 'Baseline complete'.tl,
+                        ? 'Some comics not checked, waiting for next scan'.tl
+                        : 'All checks complete'.tl,
                     style: ts.s14,
                   ).paddingTop(12),
                 ],
@@ -767,21 +782,114 @@ abstract class FollowUpdatesService {
 
   static void cancelChecking() => _cancelCurrent?.call();
 
+  /// Debug-only: pick 5-10 random cached comics (any state) and refresh their
+  /// check state with a live detail request, ignoring windows and cooldowns.
+  /// Runs inside the task queue so the progress card and the appbar indicator
+  /// light up like any other scan.
+  static Future<void> refreshRandomComics() {
+    return _startTask(
+      (isCanceled) async {
+        final cache = NetworkFavoriteCacheManager();
+        final folders = getFollowUpdateFolders();
+        final comics =
+            <({String sourceKey, String comicId, String folderId})>[];
+        final seen = <String>{};
+        for (final folder in folders) {
+          for (final comic in cache.getComicsWithUpdatesInfo(folder)) {
+            final key = '${comic.sourceKey}\u0000${comic.id}';
+            if (seen.add(key)) {
+              comics.add((
+                sourceKey: comic.sourceKey,
+                comicId: comic.id,
+                folderId: folder.folderId,
+              ));
+            }
+          }
+        }
+        if (comics.isEmpty) return;
+        final random = math.Random();
+        final count = math.min(5 + random.nextInt(6), comics.length);
+        comics.shuffle(random);
+        var updated = 0;
+        var errors = 0;
+        var completed = 0;
+        baselineStatus.value = BaselineStatus(
+          isRunning: true,
+          total: count,
+          completed: 0,
+          errors: 0,
+          updated: 0,
+        );
+        for (final item in comics.take(count)) {
+          if (isCanceled()) break;
+          final fresh = cache.getComicUpdateInfo(
+            item.sourceKey,
+            item.comicId,
+            item.folderId,
+          );
+          if (fresh != null) {
+            final result = await updateComic(
+              fresh,
+              NetworkFavoriteFolderRef(
+                sourceKey: item.sourceKey,
+                folderId: item.folderId,
+              ),
+              cache: cache,
+            );
+            if (result.errorMessage != null) {
+              errors++;
+            } else {
+              updated++;
+            }
+          }
+          completed++;
+          if (!isCanceled()) {
+            baselineStatus.value = BaselineStatus(
+              isRunning: true,
+              total: count,
+              completed: completed,
+              errors: errors,
+              updated: updated,
+              currentComic: fresh?.title,
+            );
+          }
+        }
+        if (isCanceled()) return;
+        baselineStatus.value = null;
+        Log.info(
+          'Follow updates',
+          'Random refresh: $updated ok, $errors failed',
+        );
+      },
+      cancelExisting: true,
+      waitForCancelled: false,
+    );
+  }
+
   static Future<void> _startTask(
     Future<void> Function(bool Function() isCanceled) task, {
     required bool cancelExisting,
+    bool waitForCancelled = true,
   }) async {
     if (_taskRunning) {
       if (!cancelExisting) return;
       _cancelCurrent?.call();
-      await _activeTask;
+      // The cancelled task may be stuck inside a detail request that only
+      // finishes later; only wait when the caller needs strict serialization.
+      if (waitForCancelled) await _activeTask;
     }
     var cancelRequested = false;
     _taskRunning = true;
     taskRunning.value = true;
     final current = task(() => cancelRequested);
     _activeTask = current;
-    _cancelCurrent = () => cancelRequested = true;
+    // Clearing the status here (instead of inside the cancelled task) keeps a
+    // replacement task's fresh status from being wiped by a late frame of the
+    // cancelled one.
+    _cancelCurrent = () {
+      cancelRequested = true;
+      baselineStatus.value = null;
+    };
     try {
       await current;
     } catch (e, s) {
@@ -797,6 +905,9 @@ abstract class FollowUpdatesService {
       // sync batch or folder refresh), so re-check for remaining gaps once the
       // task has fully finished instead of waiting for a manual Retry.
       _scheduleAutoScan();
+      // Rebuild the page so the baseline card and lists reflect the settled
+      // scan state (incomplete gap or fully checked).
+      updateFollowUpdatesUI();
     }
   }
 
@@ -833,123 +944,108 @@ abstract class FollowUpdatesService {
   static void startBaseline() {
     unawaited(
       _startTask(
-        (isCanceled) => _runBaseline(isCanceled),
+        (isCanceled) => _runScanWithStatus(
+          isCanceled,
+          mode: FollowUpdateMode.missing,
+          ignoreRetryAfter: true,
+        ),
         cancelExisting: true,
       ),
     );
   }
 
   static Future<void> runCheckNow() {
-    return _startTask((isCanceled) async {
-      // Consume the stream to its end even when cancelled so the underlying
-      // scan fully shuts down before this task is considered finished.
-      await for (final _ in scanFollowUpdates(
-        getFollowUpdateFolders(),
-        FollowUpdateMode.regular,
-        isCanceled: isCanceled,
+    return _startTask(
+      (isCanceled) => _runScanWithStatus(
+        isCanceled,
+        mode: FollowUpdateMode.regular,
         ignoreRetryAfter: true,
-      )) {
-        // Cancellation is handled inside the scan; keep draining.
-      }
-    }, cancelExisting: true);
+      ),
+      cancelExisting: true,
+    );
   }
 
   /// Debug-only: force every cached comic into the queue, ignoring cooldowns,
   /// the 24h window and the suspected-removed skip.
   static Future<void> forceScanAll() {
-    return _startTask((isCanceled) async {
-      await for (final _ in scanFollowUpdates(
-        getFollowUpdateFolders(),
-        FollowUpdateMode.force,
-        isCanceled: isCanceled,
+    return _startTask(
+      (isCanceled) => _runScanWithStatus(
+        isCanceled,
+        mode: FollowUpdateMode.force,
         ignoreRetryAfter: true,
         includeSuspect: true,
-      )) {
-        // Cancellation is handled inside the scan; keep draining.
-      }
-    }, cancelExisting: true);
+      ),
+      cancelExisting: true,
+    );
   }
 
-  static Future<void> _runBaseline(bool Function() isCanceled) async {
+  /// Runs [scanFollowUpdates] and publishes its progress to [baselineStatus].
+  /// The UI stays untouched when the queue is empty (first frame total == 0).
+  /// After the run the status settles to null when every comic was attempted,
+  /// or to a finished-but-incomplete state when unchecked comics remain.
+  static Future<void> _runScanWithStatus(
+    bool Function() isCanceled, {
+    required FollowUpdateMode mode,
+    bool ignoreRetryAfter = false,
+    bool includeSuspect = false,
+  }) async {
     final folders = getFollowUpdateFolders();
     final cache = NetworkFavoriteCacheManager();
-    var total = cache.countCachedComicsInFolders(folders);
-    var completed = total - cache.countUncheckedComicsInFolders(folders);
     var errors = 0;
     var updated = 0;
-    Log.info(
-      'Follow updates',
-      'Start baseline: ${folders.length} folders, '
-          '${total - completed} unchecked',
-    );
-    baselineStatus.value = BaselineStatus(
-      isRunning: true,
-      total: total,
-      completed: completed,
-      errors: 0,
-      updated: 0,
-    );
     try {
-      // Consume the stream to its end even when cancelled; the scan's internal
-      // checks stop it from picking up new work, so this drains quickly and no
-      // background scan outlives this task.
       await for (final progress in scanFollowUpdates(
         folders,
-        FollowUpdateMode.missing,
+        mode,
         isCanceled: isCanceled,
-        ignoreRetryAfter: true,
+        ignoreRetryAfter: ignoreRetryAfter,
+        includeSuspect: includeSuspect,
       )) {
         errors = progress.errors;
         updated = progress.updated;
-        if (!isCanceled()) {
-          baselineStatus.value = BaselineStatus(
-            isRunning: true,
-            total: progress.total,
-            completed: progress.current,
-            errors: errors,
-            updated: updated,
-            currentComic: progress.comic?.title,
-          );
-        }
+        // Empty queue: no plan, keep any previous UI state untouched.
+        if (progress.total == 0) continue;
+        // Cancellation stops publishing; the status is released by
+        // [_startTask]'s cancel callback, never by a late frame here (it may
+        // belong to a replacement task already).
+        if (isCanceled()) return;
+        baselineStatus.value = BaselineStatus(
+          isRunning: true,
+          total: progress.total,
+          completed: progress.current,
+          errors: errors,
+          updated: updated,
+          currentComic: progress.comic?.title,
+        );
       }
-      if (isCanceled()) {
-        Log.info('Follow updates', 'Baseline canceled');
-        baselineStatus.value = null;
-        return;
-      }
-      final remaining = cache.countUncheckedComicsInFolders(
-        getFollowUpdateFolders(),
-      );
+      if (isCanceled()) return;
+      final remaining = cache.countUncheckedComicsInFolders(folders);
       if (remaining > 0) {
         final last = baselineStatus.value;
         baselineStatus.value = BaselineStatus(
           isRunning: false,
-          total: last?.total ?? total,
-          completed: last?.completed ?? completed,
+          total: last?.total ?? 0,
+          completed: last?.completed ?? 0,
           errors: last?.errors ?? errors,
           updated: last?.updated ?? updated,
         );
         Log.warning(
           'Follow updates',
-          'Baseline incomplete: $remaining unchecked, '
-              '${baselineStatus.value?.errors} errors',
+          'Scan incomplete: $remaining unchecked, $errors errors',
         );
       } else {
         baselineStatus.value = null;
-        Log.info('Follow updates', 'Baseline complete');
       }
     } catch (e, s) {
-      Log.error('Follow updates baseline', e, s);
+      Log.error('Follow updates scan', e, s);
       final last = baselineStatus.value;
       baselineStatus.value = BaselineStatus(
         isRunning: false,
-        total: last?.total ?? total,
-        completed: last?.completed ?? completed,
+        total: last?.total ?? 0,
+        completed: last?.completed ?? 0,
         errors: last?.errors ?? errors,
         updated: last?.updated ?? updated,
       );
-    } finally {
-      updateFollowUpdatesUI();
     }
   }
 
@@ -961,100 +1057,32 @@ abstract class FollowUpdatesService {
   static Future<void> _runMissingOnly(bool Function() isCanceled) async {
     final folders = getFollowUpdateFolders();
     final cache = NetworkFavoriteCacheManager();
-    var errors = 0;
-    var updated = 0;
-    try {
-      if (isCanceled() ||
-          cache.countPendingUncheckedComicsInFolders(folders) == 0) {
-        return;
-      }
-      baselineStatus.value = BaselineStatus(
-        isRunning: true,
-        total: cache.countCachedComicsInFolders(folders),
-        completed:
-            cache.countCachedComicsInFolders(folders) -
-            cache.countUncheckedComicsInFolders(folders),
-        errors: errors,
-        updated: updated,
-      );
-      // Consume the stream to its end even when cancelled so the underlying
-      // scan fully shuts down before this task is considered finished.
-      await for (final progress in scanFollowUpdates(
-        folders,
-        FollowUpdateMode.missing,
-        isCanceled: isCanceled,
-        ignoreRetryAfter: false,
-      )) {
-        errors = progress.errors;
-        updated = progress.updated;
-        if (!isCanceled() && progress.total > 0) {
-          baselineStatus.value = BaselineStatus(
-            isRunning: true,
-            total: progress.total,
-            completed: progress.current,
-            errors: errors,
-            updated: updated,
-            currentComic: progress.comic?.title,
-          );
-        }
-      }
-      if (isCanceled()) {
-        baselineStatus.value = null;
-        return;
-      }
-      if (cache.countPendingUncheckedComicsInFolders(folders) == 0) {
-        baselineStatus.value = null;
-      }
-    } catch (e, s) {
-      Log.error('Follow updates auto scan', e, s);
-      final last = baselineStatus.value;
-      baselineStatus.value = BaselineStatus(
-        isRunning: false,
-        total: last?.total ?? 0,
-        completed: last?.completed ?? 0,
-        errors: last?.errors ?? errors,
-        updated: last?.updated ?? updated,
-      );
-    } finally {
-      updateFollowUpdatesUI();
+    if (isCanceled() ||
+        cache.countPendingUncheckedComicsInFolders(folders) == 0) {
+      return;
     }
+    await _runScanWithStatus(isCanceled, mode: FollowUpdateMode.missing);
   }
 
   static Future<void> _check(bool Function() isCanceled) async {
     if (!followUpdatesEnabled) return;
-    var updated = 0;
-    try {
-      final enabled = appdata.settings['favorites'];
-      if (enabled is List) {
-        for (final key in enabled.whereType<String>()) {
-          if (isCanceled()) return;
-          final source = ComicSource.find(key);
-          final data = source?.favoriteData;
-          if (data == null || !source!.isLogged) continue;
-          try {
-            await NetworkFavoriteCacheManager()
-                .refreshCachedSummaries(data)
-                .timeout(const Duration(seconds: 30));
-          } catch (e, s) {
-            Log.error('Refresh favorite cache', e, s);
-          }
+    final enabled = appdata.settings['favorites'];
+    if (enabled is List) {
+      for (final key in enabled.whereType<String>()) {
+        if (isCanceled()) return;
+        final source = ComicSource.find(key);
+        final data = source?.favoriteData;
+        if (data == null || !source!.isLogged) continue;
+        try {
+          await NetworkFavoriteCacheManager()
+              .refreshCachedSummaries(data)
+              .timeout(const Duration(seconds: 30));
+        } catch (e, s) {
+          Log.error('Refresh favorite cache', e, s);
         }
       }
-
-      // Consume the stream to its end even when cancelled so the scan fully
-      // shuts down before this task is considered finished. Regular mode is a
-      // superset of missing: never-checked comics are always included, and
-      // recently checked ones are skipped by the 24h filter.
-      await for (final progress in scanFollowUpdates(
-        getFollowUpdateFolders(),
-        FollowUpdateMode.regular,
-        isCanceled: isCanceled,
-      )) {
-        updated += progress.updated;
-      }
-    } finally {
-      if (updated > 0) updateFollowUpdatesUI();
     }
+    await _runScanWithStatus(isCanceled, mode: FollowUpdateMode.regular);
   }
 
   static void initChecker() {

@@ -280,4 +280,77 @@ void main() {
       await _waitUntil(() => cache.countUncheckedComics(singleFolder) == 0);
     },
   );
+
+  test('a manual check publishes live progress to baselineStatus', () async {
+    final gate = Completer<void>();
+    final source = _detailSource((id) async {
+      if (id == 'progress-one') await gate.future;
+      return _details(id);
+    });
+    source.data['account'] = <String, dynamic>{};
+    ComicSourceManager().add(source);
+    addTearDown(() => ComicSourceManager().remove('test-source'));
+
+    final data = _numericData(
+      (page, [folder]) async => Res(<Comic>[
+        _comic('progress-one'),
+        _comic('progress-two'),
+      ], subData: 1),
+    );
+    await cache.cacheAllPages(data, folder, isCanceled: () => false).drain();
+    cache.clearScanRun();
+
+    final runFuture = FollowUpdatesService.runCheckNow();
+    // While 'progress-one' is blocked, the status must be live and carry the
+    // queue size (regular mode includes every never-checked comic; the ids
+    // are unique so the 24h comic-level window from earlier tests skips
+    // nothing).
+    await _waitUntil(
+      () =>
+          FollowUpdatesService.baselineStatus.value?.isRunning == true &&
+          (FollowUpdatesService.baselineStatus.value?.total ?? 0) >= 1,
+    );
+
+    gate.complete();
+    await runFuture;
+    // Every comic attempted -> status settles to null (no incomplete gap).
+    await _waitUntil(() => FollowUpdatesService.baselineStatus.value == null);
+  });
+
+  test('random refresh publishes live progress to baselineStatus', () async {
+    final gate = Completer<void>();
+    final source = _detailSource((id) async {
+      await gate.future;
+      return _details(id);
+    });
+    source.data['account'] = <String, dynamic>{};
+    ComicSourceManager().add(source);
+    addTearDown(() => ComicSourceManager().remove('test-source'));
+
+    final data = _numericData(
+      (page, [folder]) async => Res(<Comic>[
+        for (var i = 1; i <= 8; i++) _comic('random-$i'),
+      ], subData: 1),
+    );
+    await cache.cacheAllPages(data, folder, isCanceled: () => false).drain();
+    cache.clearScanRun();
+
+    final runFuture = FollowUpdatesService.refreshRandomComics();
+    // While every detail call is blocked, the status must be live with a
+    // queue of 5-8 (the random pick, capped by the 8 cached comics).
+    // The pick is 5 + random(6), capped by the cached comic count, so the
+    // published total is anywhere in [5, 10] (earlier tests leave cached
+    // comics behind, so the cap is not the 8 cached here).
+    await _waitUntil(() {
+      final s = FollowUpdatesService.baselineStatus.value;
+      return s?.isRunning == true &&
+          (s?.total ?? 0) >= 5 &&
+          (s?.total ?? 0) <= 10;
+    });
+
+    gate.complete();
+    await runFuture;
+    // The random subset is a completed run: status settles to null.
+    await _waitUntil(() => FollowUpdatesService.baselineStatus.value == null);
+  });
 }

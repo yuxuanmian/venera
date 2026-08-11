@@ -71,6 +71,56 @@ ComicSource _detailSource(
   );
 }
 
+/// A source with a list (folders) endpoint, so the re-probe logic has
+/// something to probe.
+ComicSource _detailSourceWithFavorite(
+  Future<Res<ComicDetails>> Function(String id) loader, {
+  required Future<Res<Map<String, String>>> Function([String?]) loadFolders,
+}) {
+  return ComicSource(
+    'Test source',
+    'test-source',
+    null,
+    null,
+    null,
+    FavoriteData(
+      key: 'test-source',
+      title: 'Test source',
+      multiFolder: true,
+      loadComic: null,
+      loadNext: null,
+      loadFolders: loadFolders,
+    ),
+    const [],
+    null,
+    null,
+    loader,
+    null,
+    null,
+    null,
+    null,
+    '',
+    '',
+    '1.0.0',
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    false,
+    false,
+    null,
+    null,
+  );
+}
+
 Future<Res<ComicDetails>> _details(String id) async => Res(
   ComicDetails.fromJson({
     'title': 'Comic $id',
@@ -108,6 +158,10 @@ void main() {
     kTransientRetryDelay = Duration.zero;
     appdata.settings['followUpdateThreads'] = 5;
     appdata.settings['followUpdateBatchDelay'] = 0.0;
+    // Cross-run delist/probe state must not leak between tests.
+    serviceErrorCounts.clear();
+    probeWindowRequests.clear();
+    probeWindowHits.clear();
   });
 
   tearDown(() {
@@ -117,6 +171,7 @@ void main() {
       Duration(seconds: 30),
     ];
     kTransientRetryDelay = const Duration(seconds: 2);
+    kProbeWindowSize = 20;
     ComicSourceManager().remove('test-source');
     cache.close();
     tempDir.deleteSync(recursive: true);
@@ -124,10 +179,8 @@ void main() {
 
   Future<void> cacheComics(List<String> ids) async {
     final data = _numericData(
-      (page, [folder]) async => Res(
-        [for (final id in ids) _comic(id)],
-        subData: 1,
-      ),
+      (page, [folder]) async =>
+          Res([for (final id in ids) _comic(id)], subData: 1),
     );
     await cache.refreshFolders(data);
     await cache.refreshPage(data, folder, 1);
@@ -144,11 +197,15 @@ void main() {
         NotFoundSignal.strong,
       );
       expect(
-        classifyNotFoundError('Invalid Status Code: 400. The Request is invalid.'),
+        classifyNotFoundError(
+          'Invalid Status Code: 400. The Request is invalid.',
+        ),
         NotFoundSignal.weak,
       );
       expect(
-        classifyNotFoundError('Invalid Status Code: 401. The Request is unauthorized.'),
+        classifyNotFoundError(
+          'Invalid Status Code: 401. The Request is unauthorized.',
+        ),
         NotFoundSignal.none,
       );
       expect(
@@ -216,28 +273,33 @@ void main() {
       expect(fresh.lastCheckTime, isNotNull);
     });
 
-    test('a non-400 response during confirmation is transient, not delist', () async {
-      await cacheComics(['one']);
-      var calls = 0;
-      final source = _detailSource((id) async {
-        calls++;
-        if (calls <= 2) {
-          throw Exception('Invalid Status Code: 400. The Request is invalid.');
-        }
-        throw Exception('Invalid Status Code: 429. Too many requests.');
-      });
-      ComicSourceManager().add(source);
+    test(
+      'a non-400 response during confirmation is transient, not delist',
+      () async {
+        await cacheComics(['one']);
+        var calls = 0;
+        final source = _detailSource((id) async {
+          calls++;
+          if (calls <= 2) {
+            throw Exception(
+              'Invalid Status Code: 400. The Request is invalid.',
+            );
+          }
+          throw Exception('Invalid Status Code: 429. Too many requests.');
+        });
+        ComicSourceManager().add(source);
 
-      final item = cache.getComicsWithUpdatesInfo(folder).single;
-      final result = await updateComic(item, folder, cache: cache);
+        final item = cache.getComicsWithUpdatesInfo(folder).single;
+        final result = await updateComic(item, folder, cache: cache);
 
-      expect(result.errorMessage, isNotNull);
-      final fresh = cache.getComicsWithUpdatesInfo(folder).single;
-      // The transient response prevents any delist marking; the comic went
-      // to the retry cooldown instead.
-      expect(fresh.isSuspectGone, isFalse);
-      expect(fresh.retryAfter, isNotNull);
-    });
+        expect(result.errorMessage, isNotNull);
+        final fresh = cache.getComicsWithUpdatesInfo(folder).single;
+        // The transient response prevents any delist marking; the comic went
+        // to the retry cooldown instead.
+        expect(fresh.isSuspectGone, isFalse);
+        expect(fresh.retryAfter, isNotNull);
+      },
+    );
   });
 
   group('comic-level check state', () {
@@ -262,43 +324,47 @@ void main() {
       );
     });
 
-    test('maxPage shrink and relocation keep the suspect mark (Q2/Q3)', () async {
-      // Two pages of comics; 'one' lives on page 2 and is suspected gone.
-      final data = _numericData(
-        (page, [folder]) async => Res(
-          [for (final id in ['three', 'four', 'five']) _comic(id)],
-          subData: 2,
-        ),
-      );
-      await cache.refreshFolders(data);
-      await cache.refreshPage(data, folder, 1);
-      await cache.refreshPage(
-        _numericData(
-          (page, [folder]) async => Res(<Comic>[_comic('one')], subData: 2),
-        ),
-        folder,
-        2,
-      );
-      cache.markComicSuspectGoneEverywhere('test-source', 'one');
-
-      // Remote deletes comics, maxPage shrinks to 1 and 'one' moves onto the
-      // first page. Refreshing page 1 must not lose the mark.
-      await cache.refreshPage(
-        _numericData(
-          (page, [folder]) async => Res(
-            [for (final id in ['one', 'three', 'four', 'five']) _comic(id)],
-            subData: 1,
+    test(
+      'maxPage shrink and relocation keep the suspect mark (Q2/Q3)',
+      () async {
+        // Two pages of comics; 'one' lives on page 2 and is suspected gone.
+        final data = _numericData(
+          (page, [folder]) async => Res([
+            for (final id in ['three', 'four', 'five']) _comic(id),
+          ], subData: 2),
+        );
+        await cache.refreshFolders(data);
+        await cache.refreshPage(data, folder, 1);
+        await cache.refreshPage(
+          _numericData(
+            (page, [folder]) async => Res(<Comic>[_comic('one')], subData: 2),
           ),
-        ),
-        folder,
-        1,
-      );
-      expect(cache.isComicSuspectGone('test-source', 'one'), isTrue);
-      expect(
-        cache.getComicsWithUpdatesInfo(folder).firstWhere((c) => c.id == 'one').isSuspectGone,
-        isTrue,
-      );
-    });
+          folder,
+          2,
+        );
+        cache.markComicSuspectGoneEverywhere('test-source', 'one');
+
+        // Remote deletes comics, maxPage shrinks to 1 and 'one' moves onto the
+        // first page. Refreshing page 1 must not lose the mark.
+        await cache.refreshPage(
+          _numericData(
+            (page, [folder]) async => Res([
+              for (final id in ['one', 'three', 'four', 'five']) _comic(id),
+            ], subData: 1),
+          ),
+          folder,
+          1,
+        );
+        expect(cache.isComicSuspectGone('test-source', 'one'), isTrue);
+        expect(
+          cache
+              .getComicsWithUpdatesInfo(folder)
+              .firstWhere((c) => c.id == 'one')
+              .isSuspectGone,
+          isTrue,
+        );
+      },
+    );
 
     test('old row state migrates into the comic-level table once', () async {
       // Seed a legacy-style DB: state lives in favorite_items rows.
@@ -345,31 +411,34 @@ void main() {
       expect(cache.isComicSuspectGone('test-source', 'legacy-one'), isFalse);
     });
 
-    test('removed comics drop from listings but their state is reusable', () async {
-      await cacheComics(['one']);
-      cache.markComicSuspectGoneEverywhere('test-source', 'one');
+    test(
+      'removed comics drop from listings but their state is reusable',
+      () async {
+        await cacheComics(['one']);
+        cache.markComicSuspectGoneEverywhere('test-source', 'one');
 
-      // The comic disappears from the remote list; refreshing shrinks maxPage
-      // and removes the row (favorite_pages keep the item out of view).
-      await cache.refreshPage(
-        _numericData(
-          (page, [folder]) async => const Res(<Comic>[], subData: 0),
-        ),
-        folder,
-        1,
-      );
-      expect(cache.getComicsWithUpdatesInfo(folder), isEmpty);
+        // The comic disappears from the remote list; refreshing shrinks maxPage
+        // and removes the row (favorite_pages keep the item out of view).
+        await cache.refreshPage(
+          _numericData(
+            (page, [folder]) async => const Res(<Comic>[], subData: 0),
+          ),
+          folder,
+          1,
+        );
+        expect(cache.getComicsWithUpdatesInfo(folder), isEmpty);
 
-      // The comic comes back later; the old mark resurfaces with it.
-      await cache.refreshPage(
-        _numericData(
-          (page, [folder]) async => Res(<Comic>[_comic('one')], subData: 1),
-        ),
-        folder,
-        1,
-      );
-      expect(cache.isComicSuspectGone('test-source', 'one'), isTrue);
-    });
+        // The comic comes back later; the old mark resurfaces with it.
+        await cache.refreshPage(
+          _numericData(
+            (page, [folder]) async => Res(<Comic>[_comic('one')], subData: 1),
+          ),
+          folder,
+          1,
+        );
+        expect(cache.isComicSuspectGone('test-source', 'one'), isTrue);
+      },
+    );
   });
 
   group('scan pipeline', () {
@@ -405,73 +474,87 @@ void main() {
       expect(calls.where((id) => id == 'two').length, 1);
     });
 
-    test('an interrupted scan is resumed by the next scan without re-requesting done items', () async {
-      await cacheComics(['one', 'two', 'three', 'four']);
-      final gate = Completer<void>();
-      var calls = <String>[];
-      final source = _detailSource((id) async {
-        calls.add(id);
-        if (id == 'one' && calls.where((c) => c == 'one').length == 1) {
-          await gate.future; // simulate a crash while 'one' is in flight
-        }
-        return _details(id);
-      });
-      ComicSourceManager().add(source);
+    test(
+      'an interrupted scan is resumed by the next scan without re-requesting done items',
+      () async {
+        await cacheComics(['one', 'two', 'three', 'four']);
+        final gate = Completer<void>();
+        var calls = <String>[];
+        final source = _detailSource((id) async {
+          calls.add(id);
+          if (id == 'one' && calls.where((c) => c == 'one').length == 1) {
+            await gate.future; // simulate a crash while 'one' is in flight
+          }
+          return _details(id);
+        });
+        ComicSourceManager().add(source);
 
-      // First scan: 'one' blocks forever, the rest complete.
-      final firstScan = scanFollowUpdates(
-        [folder],
-        FollowUpdateMode.missing,
-        cache: cache,
-      ).toList();
-      await _waitUntil(() => calls.toSet().containsAll(['two', 'three', 'four']));
+        // First scan: 'one' blocks forever, the rest complete.
+        final firstScan = scanFollowUpdates(
+          [folder],
+          FollowUpdateMode.missing,
+          cache: cache,
+        ).toList();
+        await _waitUntil(
+          () => calls.toSet().containsAll(['two', 'three', 'four']),
+        );
 
-      // Abandon the first scan (no cancel) and start a new one: it must
-      // resume the interrupted run and only request the pending comic.
-      final secondScan = scanFollowUpdates(
-        [folder],
-        FollowUpdateMode.regular,
-        cache: cache,
-      ).toList();
-      await _waitUntil(() => calls.where((c) => c == 'one').length >= 2);
-      gate.complete();
-      await secondScan;
-      await firstScan;
+        // Abandon the first scan (no cancel) and start a new one: it must
+        // resume the interrupted run and only request the pending comic.
+        final secondScan = scanFollowUpdates(
+          [folder],
+          FollowUpdateMode.regular,
+          cache: cache,
+        ).toList();
+        await _waitUntil(() => calls.where((c) => c == 'one').length >= 2);
+        gate.complete();
+        await secondScan;
+        await firstScan;
 
-      expect(calls.where((c) => c == 'two').length, 1);
-      expect(calls.where((c) => c == 'three').length, 1);
-      expect(calls.where((c) => c == 'four').length, 1);
-      expect(
-        cache.getComicsWithUpdatesInfo(folder).every((c) => c.lastCheckTime != null),
-        isTrue,
-      );
-      expect(cache.getCurrentScanRun()!.status, 'finished');
-    });
+        expect(calls.where((c) => c == 'two').length, 1);
+        expect(calls.where((c) => c == 'three').length, 1);
+        expect(calls.where((c) => c == 'four').length, 1);
+        expect(
+          cache
+              .getComicsWithUpdatesInfo(folder)
+              .every((c) => c.lastCheckTime != null),
+          isTrue,
+        );
+        expect(cache.getCurrentScanRun()!.status, 'finished');
+      },
+    );
 
-    test('a run of transient errors still terminates with a finished run', () async {
-      await cacheComics(['one', 'two']);
-      final source = _detailSource((id) async {
-        throw Exception('Connection Timeout');
-      });
-      ComicSourceManager().add(source);
+    test(
+      'a run of transient errors still terminates with a finished run',
+      () async {
+        await cacheComics(['one', 'two']);
+        final source = _detailSource((id) async {
+          throw Exception('Connection Timeout');
+        });
+        ComicSourceManager().add(source);
 
-      final progress = await scanFollowUpdates(
-        [folder],
-        FollowUpdateMode.missing,
-        cache: cache,
-      ).toList();
+        final progress = await scanFollowUpdates(
+          [folder],
+          FollowUpdateMode.missing,
+          cache: cache,
+        ).toList();
 
-      expect(progress.last.total, 2);
-      expect(progress.last.current, 2);
-      expect(progress.last.errors, 2);
-      expect(
-        cache
-            .getComicsWithUpdatesInfo(folder)
-            .every((c) => c.retryAfter != null),
-        isTrue,
-      );
-      expect(cache.getCurrentScanRun()!.status, 'finished');
-    });
+        expect(progress.last.total, 2);
+        expect(progress.last.current, 2);
+        expect(progress.last.errors, 2);
+        expect(
+          cache
+              .getComicsWithUpdatesInfo(folder)
+              .every((c) => c.retryAfter != null),
+          isTrue,
+        );
+        // Failed-but-cooled comics were attempted, so they must not surface as
+        // an unchecked gap: the baseline UI would otherwise show "incomplete"
+        // forever even though every comic was tried.
+        expect(cache.countUncheckedComics(folder), 0);
+        expect(cache.getCurrentScanRun()!.status, 'finished');
+      },
+    );
 
     test('mid-run risk control rolls back marks and stops marking', () async {
       await cacheComics([
@@ -503,52 +586,156 @@ void main() {
       // the transient retry path instead of being marked.
       expect(all.every((c) => !c.isSuspectGone), isTrue);
       expect(
-        all.every(
-          (c) =>
-              c.lastCheckTime != null ||
-              c.retryAfter != null,
-        ),
+        all.every((c) => c.lastCheckTime != null || c.retryAfter != null),
         isTrue,
       );
     });
 
-    test('includeSuspect forces suspected comics back into the queue', () async {
-      await cacheComics(['one', 'two']);
-      cache.markComicSuspectGoneEverywhere('test-source', 'one');
-      var calls = <String>[];
-      final source = _detailSource((id) async {
-        calls.add(id);
-        return _details(id);
-      });
-      ComicSourceManager().add(source);
+    test(
+      'includeSuspect forces suspected comics back into the queue',
+      () async {
+        await cacheComics(['one', 'two']);
+        cache.markComicSuspectGoneEverywhere('test-source', 'one');
+        var calls = <String>[];
+        final source = _detailSource((id) async {
+          calls.add(id);
+          return _details(id);
+        });
+        ComicSourceManager().add(source);
 
-      // Normal scans skip suspects (only the never-checked 'two' is queued).
-      await scanFollowUpdates(
-        [folder],
-        FollowUpdateMode.force,
-        ignoreRetryAfter: true,
-        cache: cache,
-      ).toList();
-      expect(calls, ['two']);
+        // Normal scans skip suspects (only the never-checked 'two' is queued).
+        await scanFollowUpdates(
+          [folder],
+          FollowUpdateMode.force,
+          ignoreRetryAfter: true,
+          cache: cache,
+        ).toList();
+        expect(calls, ['two']);
 
-      // The debug force-scan ignores the suspect skip; a successful check
-      // clears the mark again.
-      await scanFollowUpdates(
-        [folder],
-        FollowUpdateMode.force,
-        ignoreRetryAfter: true,
-        includeSuspect: true,
-        cache: cache,
-      ).toList();
-      expect(calls, containsAll(<String>['one', 'two']));
-      expect(cache.isComicSuspectGone('test-source', 'one'), isFalse);
-    });
+        // The debug force-scan ignores the suspect skip; a successful check
+        // clears the mark again.
+        await scanFollowUpdates(
+          [folder],
+          FollowUpdateMode.force,
+          ignoreRetryAfter: true,
+          includeSuspect: true,
+          cache: cache,
+        ).toList();
+        expect(calls, containsAll(<String>['one', 'two']));
+        expect(cache.isComicSuspectGone('test-source', 'one'), isFalse);
+      },
+    );
 
-    test('a source with no successful check never accumulates delist hits', () async {
-      await cacheComics(['one']);
-      final source = _detailSource((id) async {
+    test(
+      'a source with no successful check never accumulates delist hits',
+      () async {
+        await cacheComics(['one']);
+        final source = _detailSource((id) async {
+          throw Exception('Invalid Status Code: 404. Not found.');
+        });
+        ComicSourceManager().add(source);
+
+        await scanFollowUpdates(
+          [folder],
+          FollowUpdateMode.force,
+          ignoreRetryAfter: true,
+          cache: cache,
+        ).toList();
+
+        final fresh = cache.getComicsWithUpdatesInfo(folder).single;
+        expect(fresh.checkNotFoundCount, 0);
+        expect(fresh.isSuspectGone, isFalse);
+        expect(fresh.retryAfter, isNotNull);
+      },
+    );
+
+    test(
+      'a service error gates delist marks for the rest of the run',
+      () async {
+        await cacheComics(['one', 'two', 'three']);
+        final source = _detailSource((id) async {
+          if (id == 'one') throw Exception('Connection Timeout');
+          if (id == 'two') {
+            throw Exception('Invalid Status Code: 404. Not found.');
+          }
+          return _details(id);
+        });
+        ComicSourceManager().add(source);
+
+        await scanFollowUpdates(
+          [folder],
+          FollowUpdateMode.force,
+          ignoreRetryAfter: true,
+          cache: cache,
+        ).toList();
+
+        // 'two' 404 arrived after a service-class error on the same source:
+        // the delist gate rejects it (either order of 'two'/'three' keeps the
+        // source unhealthy for marking).
+        expect(cache.isComicSuspectGone('test-source', 'two'), isFalse);
+        final two = cache
+            .getComicsWithUpdatesInfo(folder)
+            .firstWhere((c) => c.id == 'two');
+        expect(two.retryAfter, isNotNull);
+      },
+    );
+
+    test(
+      'service errors accumulate across runs and roll back earlier marks',
+      () async {
+        // Batch 1: two successes then a delist-looking 404 -> marked.
+        await cacheComics(['one', 'two', 'three']);
+        final mixed = _detailSource((id) async {
+          if (id == 'three') {
+            throw Exception('Invalid Status Code: 404. Not found.');
+          }
+          return _details(id);
+        });
+        ComicSourceManager().add(mixed);
+        await scanFollowUpdates(
+          [folder],
+          FollowUpdateMode.missing,
+          cache: cache,
+        ).toList();
+        expect(cache.isComicSuspectGone('test-source', 'three'), isTrue);
+        ComicSourceManager().remove('test-source');
+
+        // Batch 2+3: fresh comics all fail with 500s. The counts carry over
+        // across runs (3 + 3 >= 5), tripping the detector.
+        final down = _detailSource((id) async {
+          throw Exception('Invalid Status Code: 500. server-side error');
+        });
+        ComicSourceManager().add(down);
+        for (final ids in [
+          ['four', 'five', 'six'],
+          ['seven', 'eight', 'nine'],
+        ]) {
+          await cache.refreshPage(
+            _numericData(
+              (page, [folder]) async =>
+                  Res([for (final id in ids) _comic(id)], subData: 1),
+            ),
+            folder,
+            1,
+          );
+          await scanFollowUpdates(
+            [folder],
+            FollowUpdateMode.missing,
+            cache: cache,
+          ).toList();
+        }
+
+        // The source tripped: the batch-1 mark is rolled back too.
+        expect(cache.isComicSuspectGone('test-source', 'three'), isFalse);
+      },
+    );
+
+    test('a dead probe on first hit trips the detector immediately', () async {
+      await cacheComics(['one', 'two', 'three']);
+      final source = _detailSourceWithFavorite((id) async {
+        if (id == 'one' || id == 'two') return _details(id);
         throw Exception('Invalid Status Code: 404. Not found.');
-      });
+      }, loadFolders: ([String? _]) async => throw Exception('site down'));
       ComicSourceManager().add(source);
 
       await scanFollowUpdates(
@@ -558,11 +745,98 @@ void main() {
         cache: cache,
       ).toList();
 
-      final fresh = cache.getComicsWithUpdatesInfo(folder).single;
-      expect(fresh.checkNotFoundCount, 0);
-      expect(fresh.isSuspectGone, isFalse);
-      expect(fresh.retryAfter, isNotNull);
+      // 'three' 404 was served while the list endpoint was down: the mark it
+      // briefly received is rolled back and nothing else is marked.
+      expect(cache.isComicSuspectGone('test-source', 'three'), isFalse);
+      expect(
+        cache.getComicsWithUpdatesInfo(folder).every((c) => !c.isSuspectGone),
+        isTrue,
+      );
     });
+
+    test('a full re-probe window catches a source that dies mid-run', () async {
+      kProbeWindowSize = 2;
+      addTearDown(() => kProbeWindowSize = 20);
+      // Serial workers keep the window counting deterministic.
+      appdata.settings['followUpdateThreads'] = 1;
+      addTearDown(() => appdata.settings['followUpdateThreads'] = 5);
+      await cacheComics(['one', 'two', 'three', 'four']);
+      var probeCalls = 0;
+      final source = _detailSourceWithFavorite(
+        (id) async {
+          if (id == 'one' || id == 'three') {
+            throw Exception('Invalid Status Code: 404. Not found.');
+          }
+          return _details(id);
+        },
+        loadFolders: ([String? _]) async {
+          probeCalls++;
+          if (probeCalls == 2) throw Exception('site down');
+          return const Res(<String, String>{'remote': 'Remote'});
+        },
+      );
+      ComicSourceManager().add(source);
+
+      await scanFollowUpdates(
+        [folder],
+        FollowUpdateMode.force,
+        ignoreRetryAfter: true,
+        cache: cache,
+      ).toList();
+
+      // First probe (on 'one') said alive; the window then filled ('three'
+      // hit, window size 2) and the re-probe found the site down: both marks
+      // are rolled back.
+      expect(probeCalls, 2);
+      expect(cache.isComicSuspectGone('test-source', 'one'), isFalse);
+      expect(cache.isComicSuspectGone('test-source', 'three'), isFalse);
+    });
+
+    test(
+      'a resumed run backfills comics cached after the original run',
+      () async {
+        await cacheComics(['one', 'two']);
+        final run = cache.createScanRun(
+          mode: 'force',
+          ignoreRetryAfter: true,
+          total: 2,
+          items: [('test-source', 'one'), ('test-source', 'two')],
+        );
+        cache.markScanItemDone(run.runId, 'test-source', 'one', result: 'ok');
+        // A comic cached after the run was persisted.
+        await cache.refreshPage(
+          _numericData(
+            (page, [folder]) async => Res(<Comic>[_comic('three')], subData: 1),
+          ),
+          folder,
+          1,
+        );
+
+        var calls = <String>[];
+        final source = _detailSource((id) async {
+          calls.add(id);
+          return _details(id);
+        });
+        ComicSourceManager().add(source);
+
+        await scanFollowUpdates(
+          [folder],
+          FollowUpdateMode.force,
+          ignoreRetryAfter: true,
+          cache: cache,
+        ).toList();
+
+        // The interrupted run is resumed (same id), the new comic joins its
+        // queue, the done item is not re-requested.
+        expect(cache.getCurrentScanRun()!.runId, run.runId);
+        expect(
+          cache.getScanRunKeys(run.runId),
+          contains('test-source\u0000three'),
+        );
+        expect(calls, contains('three'));
+        expect(calls, isNot(contains('one')));
+      },
+    );
   });
 }
 
