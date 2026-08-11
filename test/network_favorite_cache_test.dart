@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -400,9 +401,7 @@ void main() {
     },
   );
 
-  test(
-    'full cache cancellation and failure keep committed pages incomplete',
-    () async {
+  test('full cache cancellation and failure keep committed pages incomplete', () async {
       var calls = 0;
       final data = _numericData((page, [folder]) async {
         calls++;
@@ -426,6 +425,138 @@ void main() {
       expect(cache.getFullCacheStatus(folder).isComplete, isFalse);
     },
   );
+
+  test('numbered full cache fetches the remaining pages concurrently', () async {
+    final gate = Completer<void>();
+    final allInFlight = Completer<void>();
+    var calls = <int>[];
+    final data = _numericData((page, [folder]) async {
+      calls.add(page);
+      if (page > 1) {
+        if (calls.toSet().containsAll(<int>[2, 3, 4])) {
+          allInFlight.complete();
+        }
+        await gate.future;
+      }
+      return Res(<Comic>[_comic('comic-$page')], subData: 4);
+    });
+    await cache.refreshFolders(data);
+
+    final run = cache
+        .cacheAllPages(data, folder, isCanceled: () => false)
+        .toList();
+    // Pages 2..4 must all be in flight before any of them is released;
+    // a sequential implementation would deadlock this test.
+    await allInFlight.future.timeout(const Duration(seconds: 5));
+    gate.complete();
+    final progress = await run;
+
+    expect(progress.last.isComplete, isTrue);
+    expect(progress.last.totalPages, 4);
+    expect(cache.getFullCacheStatus(folder).pageCount, 4);
+    expect(cache.getCachedPage(folder, 3)!.comics.single.id, 'comic-3');
+  });
+
+  test('full cache without a page count walks to an empty page', () async {
+    var calls = <int>[];
+    final data = _numericData((page, [folder]) async {
+      calls.add(page);
+      if (page >= 3) return const Res(<Comic>[]);
+      return Res(<Comic>[_comic('comic-$page')]);
+    });
+    await cache.refreshFolders(data);
+
+    final progress = await cache
+        .cacheAllPages(data, folder, isCanceled: () => false)
+        .toList();
+
+    expect(progress.last.isComplete, isTrue);
+    expect(progress.last.totalPages, isNull);
+    expect(cache.getCachedPage(folder, 1), isNotNull);
+    expect(cache.getCachedPage(folder, 2), isNotNull);
+    // The empty terminal page and anything fetched after it in the same
+    // batch are dropped, not kept as a hole.
+    expect(cache.getCachedPage(folder, 3), isNull);
+    expect(cache.getCachedPage(folder, 4), isNull);
+    final status = cache.getFullCacheStatus(folder);
+    expect(status.isComplete, isTrue);
+    expect(status.pageCount, 2);
+    expect(status.comicCount, 2);
+    // Pages 3 and 4 (same batch as the terminal page) were fetched too.
+    expect(calls.toSet(), {1, 2, 3, 4});
+  });
+
+  test('full cache without a page count stops at a repeating tail', () async {
+    var calls = <int>[];
+    final data = _numericData((page, [folder]) async {
+      calls.add(page);
+      if (page >= 3) return Res(<Comic>[_comic('comic-2')]);
+      return Res(<Comic>[_comic('comic-$page')]);
+    });
+    await cache.refreshFolders(data);
+
+    final progress = await cache
+        .cacheAllPages(data, folder, isCanceled: () => false)
+        .toList();
+
+    expect(progress.last.isComplete, isTrue);
+    expect(cache.getFullCacheStatus(folder).pageCount, 2);
+    // The pages after the clamp were fetched in the same batch; the walk
+    // stops without requesting anything beyond it.
+    expect(calls.toSet(), {1, 2, 3, 4});
+    expect(calls.length, 4);
+  });
+
+  test('full cache without a page count fetches pages concurrently', () async {
+    final gate = Completer<void>();
+    final allInFlight = Completer<void>();
+    var calls = <int>[];
+    final data = _numericData((page, [folder]) async {
+      calls.add(page);
+      if (page > 1 && page < 5) {
+        if (calls.toSet().containsAll(<int>[2, 3, 4])) {
+          allInFlight.complete();
+        }
+        await gate.future;
+      }
+      if (page >= 5) return const Res(<Comic>[]);
+      return Res(<Comic>[_comic('comic-$page')]);
+    });
+    await cache.refreshFolders(data);
+
+    final run = cache
+        .cacheAllPages(data, folder, isCanceled: () => false)
+        .toList();
+    // The unknown-total walk must still fetch pages 2..4 concurrently; a
+    // sequential walk would deadlock this test.
+    await allInFlight.future.timeout(const Duration(seconds: 5));
+    gate.complete();
+    final progress = await run;
+
+    expect(progress.last.isComplete, isTrue);
+    expect(cache.getFullCacheStatus(folder).pageCount, 4);
+    expect(cache.getCachedPage(folder, 4)!.comics.single.id, 'comic-4');
+    expect(cache.getCachedPage(folder, 5), isNull);
+  });
+
+  test('full cache without a page count hits the safety cap', () async {
+    NetworkFavoriteCacheManager.fullCacheUnknownTotalCap = 3;
+    addTearDown(
+      () => NetworkFavoriteCacheManager.fullCacheUnknownTotalCap = 500,
+    );
+    final data = _numericData((page, [folder]) async =>
+        Res(<Comic>[_comic('comic-$page')]));
+    await cache.refreshFolders(data);
+
+    final progress = await cache
+        .cacheAllPages(data, folder, isCanceled: () => false)
+        .toList();
+
+    expect(progress.last.errorMessage, contains('page count'));
+    expect(cache.getFullCacheStatus(folder).isComplete, isFalse);
+    // Pages fetched up to the cap are still committed.
+    expect(cache.getCachedPage(folder, 3), isNotNull);
+  });
 
   test('cached search covers all pages and all summary fields', () async {
     final data = _numericData((page, [folder]) async {

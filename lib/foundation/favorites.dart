@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:sqlite3/sqlite3.dart';
@@ -170,6 +171,24 @@ class FavoriteItemWithUpdateInfo extends FavoriteItem {
 
   @override
   String get description => '${updateTime ?? 'Unknown'} | $sourceKey';
+}
+
+/// Lightweight scan-candidate row (snapshot row + check-state join), used
+/// by the scan queue builder so it never materializes whole folders.
+class ScanCandidate {
+  const ScanCandidate({
+    required this.sourceKey,
+    required this.comicId,
+    required this.folderId,
+    required this.lastCheckTime,
+    required this.retryAfter,
+  });
+
+  final String sourceKey;
+  final String comicId;
+  final String folderId;
+  final DateTime? lastCheckTime;
+  final DateTime? retryAfter;
 }
 
 class NetworkFavoriteFolderRef {
@@ -431,8 +450,16 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   late Database _db;
   final Set<String> _refreshing = {};
   final Set<String> _fullCaching = {};
-  static const _backgroundRefreshAfter = Duration(seconds: 30);
+  static const _backgroundRefreshAfter = Duration(minutes: 5);
   static const backgroundSummaryRefreshAfter = Duration(hours: 6);
+
+  /// Pages fetched concurrently per batch by full-cache and summary sweeps.
+  static const _fullCacheBatchSize = 3;
+
+  /// Safety valve for full-cache runs on sources that never report a page
+  /// count: the walk stops after this many pages instead of looping forever.
+  /// Tests shorten this.
+  static int fullCacheUnknownTotalCap = 100;
 
   Future<void> init({String? databasePath, bool migrateLegacy = true}) async {
     _db = sqlite3.open(
@@ -1505,13 +1532,27 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
             )
             .map((row) => row['page_index'] as int)
             .toList();
-        for (final page in pages) {
-          final cached = getCachedPage(folder, page);
-          if (cached == null ||
-              DateTime.now().difference(cached.updatedAt) < minimumAge) {
-            continue;
-          }
-          await refreshPage(data, folder, page, preserveExistingCover: true);
+        // Refresh a few pages concurrently per batch; large folders otherwise
+        // stall on one request at a time. The staleness check and the cache
+        // re-read stay inside each batch entry.
+        for (var i = 0; i < pages.length; i += _fullCacheBatchSize) {
+          await Future.wait([
+            for (final page in pages.skip(i).take(_fullCacheBatchSize))
+              () async {
+                final cached = getCachedPage(folder, page);
+                if (cached == null ||
+                    DateTime.now().difference(cached.updatedAt) <
+                        minimumAge) {
+                  return;
+                }
+                await refreshPage(
+                  data,
+                  folder,
+                  page,
+                  preserveExistingCover: true,
+                );
+              }(),
+          ]);
         }
       } else if (data.loadNext != null) {
         String? token;
@@ -1610,13 +1651,70 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     StreamController<FavoriteFullCacheProgress> stream,
     bool Function() isCanceled,
   ) async {
-    var page = 1;
-    int? totalPages;
-    while (true) {
+    if (isCanceled()) {
+      stream.add(
+        FavoriteFullCacheProgress(
+          pagesCached: 0,
+          comicsCached: countCachedComics(folder),
+          isCanceled: true,
+        ),
+      );
+      return;
+    }
+    // Page 1 must land first: it reveals the total page count (or its
+    // absence). Every later page is independent, so the rest is fetched in
+    // concurrent batches.
+    final first = await refreshPage(
+      data,
+      folder,
+      1,
+      preserveExistingCover: true,
+    );
+    if (first.error) {
+      stream.add(
+        FavoriteFullCacheProgress(
+          pagesCached: 0,
+          comicsCached: countCachedComics(folder),
+          errorMessage: first.errorMessage,
+        ),
+      );
+      return;
+    }
+    final totalPages = first.data.maxPage;
+    if (totalPages == null) {
+      // Some sources never report a page count; walk to the end instead of
+      // giving up (see _cacheNumberedWalk).
+      await _cacheNumberedWalk(data, folder, stream, isCanceled, first.data);
+      return;
+    }
+    stream.add(
+      FavoriteFullCacheProgress(
+        pagesCached: 1,
+        comicsCached: countCachedComics(folder),
+        totalPages: totalPages,
+      ),
+    );
+    await _cacheNumberedSweep(data, folder, stream, isCanceled, 2, totalPages);
+  }
+
+  /// Fetches pages [startPage]..[totalPages] concurrently, three at a time.
+  /// Each completed page emits its own progress event; the first error
+  /// aborts the sweep (pages already committed are kept) and the folder is
+  /// marked complete only after the last page succeeds.
+  Future<void> _cacheNumberedSweep(
+    FavoriteData data,
+    NetworkFavoriteFolderRef folder,
+    StreamController<FavoriteFullCacheProgress> stream,
+    bool Function() isCanceled,
+    int startPage,
+    int totalPages,
+  ) async {
+    var completed = startPage - 1;
+    for (var next = startPage; next <= totalPages; next += _fullCacheBatchSize) {
       if (isCanceled()) {
         stream.add(
           FavoriteFullCacheProgress(
-            pagesCached: page - 1,
+            pagesCached: completed,
             comicsCached: countCachedComics(folder),
             totalPages: totalPages,
             isCanceled: true,
@@ -1624,56 +1722,170 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         );
         return;
       }
-      final result = await refreshPage(
-        data,
-        folder,
-        page,
-        preserveExistingCover: true,
-      );
-      if (result.error) {
+      final last = math.min(next + _fullCacheBatchSize - 1, totalPages);
+      final results = await Future.wait([
+        for (var p = next; p <= last; p++)
+          refreshPage(data, folder, p, preserveExistingCover: true),
+      ]);
+      for (final result in results) {
+        if (result.error) {
+          stream.add(
+            FavoriteFullCacheProgress(
+              pagesCached: completed,
+              comicsCached: countCachedComics(folder),
+              totalPages: totalPages,
+              errorMessage: result.errorMessage,
+            ),
+          );
+          return;
+        }
+        completed++;
         stream.add(
           FavoriteFullCacheProgress(
-            pagesCached: page - 1,
+            pagesCached: completed,
             comicsCached: countCachedComics(folder),
             totalPages: totalPages,
-            errorMessage: result.errorMessage,
           ),
         );
-        return;
       }
-      totalPages ??= result.data.maxPage;
-      if (totalPages == null) {
-        stream.add(
-          FavoriteFullCacheProgress(
-            pagesCached: page,
-            comicsCached: countCachedComics(folder),
-            errorMessage: 'Favorite source did not provide a page count',
-          ),
-        );
-        return;
-      }
-      final comicsCached = countCachedComics(folder);
+    }
+    final comicsCached = countCachedComics(folder);
+    _markFullCacheComplete(folder, totalPages, comicsCached);
+    stream.add(
+      FavoriteFullCacheProgress(
+        pagesCached: totalPages,
+        comicsCached: comicsCached,
+        totalPages: totalPages,
+        isComplete: true,
+      ),
+    );
+  }
+
+  /// Walks a source that never reports a page count. The end can only be
+  /// discovered by fetching, so pages are fetched in the same concurrent
+  /// batches as the numbered sweep. The walk ends at the first empty page
+  /// (dropped again, together with any pages after it in the same batch), a
+  /// page repeating the previous page's comic ids (sources that clamp their
+  /// tail), or [fullCacheUnknownTotalCap] pages as a safety valve. Completed
+  /// pages are kept and the folder is marked complete at the last non-empty
+  /// page.
+  Future<void> _cacheNumberedWalk(
+    FavoriteData data,
+    NetworkFavoriteFolderRef folder,
+    StreamController<FavoriteFullCacheProgress> stream,
+    bool Function() isCanceled,
+    CachedFavoritePage firstPage,
+  ) async {
+    if (firstPage.comics.isEmpty) {
+      // An empty first page means an empty folder; drop the empty page row
+      // and complete with zero pages.
+      _deletePageRows(folder, 1);
+      _markFullCacheComplete(folder, 0, 0);
       stream.add(
-        FavoriteFullCacheProgress(
-          pagesCached: page,
-          comicsCached: comicsCached,
-          totalPages: totalPages,
+        const FavoriteFullCacheProgress(
+          pagesCached: 0,
+          comicsCached: 0,
+          isComplete: true,
         ),
       );
-      if (page >= totalPages) {
-        _markFullCacheComplete(folder, page, comicsCached);
+      return;
+    }
+    var lastNonEmpty = 1;
+    var previousIds = {for (final c in firstPage.comics) c.id};
+    var page = 2;
+    var terminated = false;
+    while (page <= fullCacheUnknownTotalCap && !terminated) {
+      if (isCanceled()) {
         stream.add(
           FavoriteFullCacheProgress(
-            pagesCached: page,
-            comicsCached: comicsCached,
-            totalPages: totalPages,
-            isComplete: true,
+            pagesCached: lastNonEmpty,
+            comicsCached: countCachedComics(folder),
+            isCanceled: true,
           ),
         );
         return;
       }
-      page++;
+      final last = math.min(page + _fullCacheBatchSize - 1, fullCacheUnknownTotalCap);
+      final results = await Future.wait([
+        for (var p = page; p <= last; p++)
+          refreshPage(data, folder, p, preserveExistingCover: true),
+      ]);
+      // Results keep input order, so repeat detection compares against the
+      // page that precedes each entry even when requests finish out of order.
+      for (var i = 0; i < results.length; i++) {
+        final current = page + i;
+        final result = results[i];
+        if (result.error) {
+          stream.add(
+            FavoriteFullCacheProgress(
+              pagesCached: lastNonEmpty,
+              comicsCached: countCachedComics(folder),
+              errorMessage: result.errorMessage,
+            ),
+          );
+          return;
+        }
+        if (result.data.comics.isEmpty) {
+          // Terminal page: drop it and anything fetched after it in this
+          // batch, so the cache ends at the last real page.
+          for (var p = current; p <= last; p++) {
+            _deletePageRows(folder, p);
+          }
+          terminated = true;
+          break;
+        }
+        final ids = {for (final c in result.data.comics) c.id};
+        if (ids.length == previousIds.length && ids.containsAll(previousIds)) {
+          // The source repeats the last page forever; nothing new beyond
+          // here. The duplicate page is harmless and stays.
+          terminated = true;
+          break;
+        }
+        previousIds = ids;
+        lastNonEmpty = current;
+        stream.add(
+          FavoriteFullCacheProgress(
+            pagesCached: current,
+            comicsCached: countCachedComics(folder),
+          ),
+        );
+      }
+      page = last + 1;
     }
+    if (page > fullCacheUnknownTotalCap) {
+      stream.add(
+        FavoriteFullCacheProgress(
+          pagesCached: lastNonEmpty,
+          comicsCached: countCachedComics(folder),
+          errorMessage:
+              'Favorite source did not provide a page count (stopped after '
+              '$fullCacheUnknownTotalCap pages)',
+        ),
+      );
+      return;
+    }
+    final comicsCached = countCachedComics(folder);
+    _markFullCacheComplete(folder, lastNonEmpty, comicsCached);
+    stream.add(
+      FavoriteFullCacheProgress(
+        pagesCached: lastNonEmpty,
+        comicsCached: comicsCached,
+        isComplete: true,
+      ),
+    );
+  }
+
+  void _deletePageRows(NetworkFavoriteFolderRef folder, int pageIndex) {
+    _db.execute(
+      'DELETE FROM favorite_items '
+      'WHERE source_key = ? AND folder_id = ? AND page_index = ?',
+      [folder.sourceKey, folder.folderId, pageIndex],
+    );
+    _db.execute(
+      'DELETE FROM favorite_pages '
+      'WHERE source_key = ? AND folder_id = ? AND page_index = ?',
+      [folder.sourceKey, folder.folderId, pageIndex],
+    );
   }
 
   Future<void> _cacheAllCursorPages(
@@ -1908,6 +2120,71 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   Map<String, Map<String, Object?>> _checkStateForRows(List<Row> rows) =>
       _checkStateMap({for (final row in rows) row['source_key'] as String});
 
+  /// Scan-eligible comics across [folders], filtered in SQL exactly like the
+  /// old Dart-side filtering: suspect skip (unless [includeSuspect]), the
+  /// [modeName] time window ('missing' = never checked, 'regular' = never
+  /// checked or checked more than 24h ago, 'force' = everything) and the
+  /// retry-after cooldown. The mode is passed as a string so this library
+  /// never needs to import follow_updates.dart, which imports it.
+  ///
+  /// One row per (source, comic, folder); comics appearing in several
+  /// folders are deduplicated by the queue builder, not here.
+  List<ScanCandidate> getScanCandidates(
+    List<NetworkFavoriteFolderRef> folders, {
+    required String modeName,
+    required bool ignoreRetryAfter,
+    required bool includeSuspect,
+  }) {
+    if (folders.isEmpty) return const [];
+    final now = DateTime.now();
+    final dayAgo = now.subtract(const Duration(days: 1)).millisecondsSinceEpoch;
+    final nowMs = now.millisecondsSinceEpoch;
+    final where = <String>[_folderWhereClause(folders)];
+    final args = <Object>[
+      for (final f in folders) ...[f.sourceKey, f.folderId],
+    ];
+    if (!includeSuspect) {
+      where.add('(cs.check_suspect_gone IS NULL OR cs.check_suspect_gone = 0)');
+    }
+    if (modeName == 'missing') {
+      where.add('cs.last_check_time IS NULL');
+    } else if (modeName == 'regular') {
+      where.add('(cs.last_check_time IS NULL OR cs.last_check_time <= ?)');
+      args.add(dayAgo);
+    }
+    if (!ignoreRetryAfter) {
+      where.add('(cs.retry_after IS NULL OR cs.retry_after <= ?)');
+      args.add(nowMs);
+    }
+    final rows = _db.select(
+      '''SELECT fi.source_key, fi.comic_id, fi.folder_id,
+                cs.last_check_time, cs.retry_after
+         FROM favorite_items fi
+         LEFT JOIN comic_check_state cs
+           ON cs.source_key = fi.source_key AND cs.comic_id = fi.comic_id
+         WHERE ${where.join(' AND ')}
+         GROUP BY fi.source_key, fi.comic_id, fi.folder_id
+         ORDER BY fi.folder_id, fi.page_index, fi.display_order, fi.comic_id''',
+      args,
+    );
+    return [
+      for (final row in rows)
+        ScanCandidate(
+          sourceKey: row['source_key'] as String,
+          comicId: row['comic_id'] as String,
+          folderId: row['folder_id'] as String,
+          lastCheckTime: row['last_check_time'] == null
+              ? null
+              : DateTime.fromMillisecondsSinceEpoch(
+                  row['last_check_time'] as int,
+                ),
+          retryAfter: row['retry_after'] == null
+              ? null
+              : DateTime.fromMillisecondsSinceEpoch(row['retry_after'] as int),
+        ),
+    ];
+  }
+
   List<FavoriteItemWithUpdateInfo> getComicsWithUpdatesInfo(
     NetworkFavoriteFolderRef folder,
   ) {
@@ -2121,8 +2398,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
          VALUES (?, ?, ?, ?)
          ON CONFLICT(source_key, comic_id) DO UPDATE SET
            retry_after = excluded.retry_after,
-           check_failures = excluded.check_failures,
-           check_not_found_count = 0''',
+           check_failures = excluded.check_failures''',
       [
         sourceKey,
         comicId,
@@ -2130,6 +2406,25 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         failures,
       ],
     );
+  }
+
+  /// Records one bare-400 delist hit and returns the accumulated count.
+  /// Reset by any successful check, a suspect mark or a source-wide clear.
+  int markComicNotFoundHitEverywhere(String sourceKey, String comicId) {
+    _db.execute(
+      '''INSERT INTO comic_check_state
+          (source_key, comic_id, check_not_found_count)
+         VALUES (?, ?, 1)
+         ON CONFLICT(source_key, comic_id) DO UPDATE SET
+           check_not_found_count = comic_check_state.check_not_found_count + 1''',
+      [sourceKey, comicId],
+    );
+    final rows = _db.select(
+      '''SELECT check_not_found_count FROM comic_check_state
+         WHERE source_key = ? AND comic_id = ?''',
+      [sourceKey, comicId],
+    );
+    return rows.first['check_not_found_count'] as int;
   }
 
   /// Marks [comicId] as suspected removed. Such comics are skipped by all

@@ -988,14 +988,15 @@ abstract class FollowUpdatesService {
     required FollowUpdateMode mode,
     bool ignoreRetryAfter = false,
     bool includeSuspect = false,
+    List<NetworkFavoriteFolderRef>? folders,
   }) async {
-    final folders = getFollowUpdateFolders();
+    final effectiveFolders = folders ?? getFollowUpdateFolders();
     final cache = NetworkFavoriteCacheManager();
     var errors = 0;
     var updated = 0;
     try {
       await for (final progress in scanFollowUpdates(
-        folders,
+        effectiveFolders,
         mode,
         isCanceled: isCanceled,
         ignoreRetryAfter: ignoreRetryAfter,
@@ -1019,7 +1020,7 @@ abstract class FollowUpdatesService {
         );
       }
       if (isCanceled()) return;
-      final remaining = cache.countUncheckedComicsInFolders(folders);
+      final remaining = cache.countUncheckedComicsInFolders(effectiveFolders);
       if (remaining > 0) {
         final last = baselineStatus.value;
         baselineStatus.value = BaselineStatus(
@@ -1082,7 +1083,18 @@ abstract class FollowUpdatesService {
         }
       }
     }
-    await _runScanWithStatus(isCanceled, mode: FollowUpdateMode.regular);
+    // While "cache all pages" is running for a folder, its pages churn
+    // constantly; the periodic scan must not fight the full-cache worker
+    // over the same comics.
+    final cache = NetworkFavoriteCacheManager();
+    final folders = getFollowUpdateFolders()
+        .where((f) => !cache.isFullCacheRunning(f))
+        .toList();
+    await _runScanWithStatus(
+      isCanceled,
+      mode: FollowUpdateMode.regular,
+      folders: folders,
+    );
   }
 
   static void initChecker() {

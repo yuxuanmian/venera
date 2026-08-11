@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
@@ -41,6 +42,19 @@ final _statusCodePattern = RegExp(
   caseSensitive: false,
 );
 
+/// Last log time per error message, so a source failing identically for
+/// every comic (e.g. a 500 storm) prints one stack trace per 30s instead of
+/// one per comic.
+final _lastErrorLogAt = <String, DateTime>{};
+void _logCheckError(String message, Object e, StackTrace s) {
+  final now = DateTime.now();
+  final last = _lastErrorLogAt[message];
+  if (last == null || now.difference(last) > const Duration(seconds: 30)) {
+    _lastErrorLogAt[message] = now;
+    Log.error('Check Updates', e, s);
+  }
+}
+
 NotFoundSignal classifyNotFoundError(String message) {
   if (_riskControlPattern.hasMatch(message)) return NotFoundSignal.none;
   final status = _statusCodePattern.firstMatch(message)?.group(1);
@@ -63,15 +77,6 @@ Duration retryDelayForFailures(int failures) {
   if (failures == 3) return const Duration(hours: 24);
   return const Duration(days: 7);
 }
-
-/// Spacing of the confirmation retries for a bare 400 response. Tests replace
-/// this with zero delays; production keeps the increasing gaps so a short
-/// risk-control window has time to clear before the hit is confirmed.
-List<Duration> kNotFoundConfirmationDelays = const [
-  Duration(seconds: 3),
-  Duration(seconds: 10),
-  Duration(seconds: 30),
-];
 
 /// Delay between transient (non-delist) retries inside [updateComic]. Tests
 /// replace this with zero; production keeps the short backoff.
@@ -176,8 +181,8 @@ Future<ComicUpdateResult> updateComic(
       );
       return await onSuccess(info.data);
     } catch (e, s) {
-      Log.error("Check Updates", e, s);
       final message = e.toString();
+      _logCheckError(message, e, s);
       final signal = classifyNotFoundError(message);
       if (signal != NotFoundSignal.none && sourceHealthy) {
         if (signal == NotFoundSignal.strong) {
@@ -186,37 +191,26 @@ Future<ComicUpdateResult> updateComic(
           manager.markComicSuspectGoneEverywhere(c.sourceKey, c.id);
           return ComicUpdateResult(false, message);
         }
-        // Bare 400: ambiguous between delist and risk control. Confirm with a
-        // bounded retry session (3s/10s/30s, inline in this worker); only
-        // three consecutive 400s count as a confirmed delist and mark the
-        // comic. Any non-400 response during the session is treated as a
-        // transient failure.
-        var all400 = true;
-        for (final delay in kNotFoundConfirmationDelays) {
-          await Future.delayed(delay);
-          try {
-            final retryInfo = await comicSource.loadComicInfo!(c.id).timeout(
-              const Duration(seconds: 20),
-            );
-            return await onSuccess(retryInfo.data);
-          } catch (e2, s2) {
-            Log.error("Check Updates 400 confirmation", e2, s2);
-            final signal2 = classifyNotFoundError(e2.toString());
-            if (signal2 == NotFoundSignal.strong) {
-              manager.markComicSuspectGoneEverywhere(c.sourceKey, c.id);
-              return ComicUpdateResult(false, e2.toString());
-            }
-            if (signal2 != NotFoundSignal.weak) {
-              all400 = false;
-              break;
-            }
-          }
-        }
-        if (all400) {
+        // Bare 400: ambiguous between delist and risk control. Record one
+        // hit; the count accumulates across rounds (this check plus the
+        // retry phase re-check) and three hits confirm the delist. Not
+        // confirmed yet: skip this round's remaining retries so the worker
+        // is never blocked by a 400 loop; the next round accumulates another
+        // hit. A transient (non-400) failure never resets the accumulated
+        // count, only a successful check or a suspect mark does.
+        final hits = manager.markComicNotFoundHitEverywhere(c.sourceKey, c.id);
+        if (hits >= 3) {
           manager.markComicSuspectGoneEverywhere(c.sourceKey, c.id);
           return ComicUpdateResult(false, message);
         }
-        // Fall through to the transient retry path.
+        final failures = c.checkFailures + 1;
+        manager.markComicRetryLaterEverywhere(
+          c.sourceKey,
+          c.id,
+          delay: retryDelayForFailures(failures),
+          failures: failures,
+        );
+        return ComicUpdateResult(false, message);
       }
       await Future.delayed(kTransientRetryDelay);
       retries--;
@@ -317,12 +311,13 @@ class _ScanItem {
 
 /// Builds the deduplicated candidate queue for one scan run.
 ///
-/// Skips suspect-gone comics, applies [mode] (missing: never checked only;
+/// The suspect skip, the [mode] window (missing: never checked only;
 /// regular: never checked or checked more than 24h ago; force: all) and the
-/// retry-after cooldown. Comics appearing in several folders are deduplicated
-/// by keeping the row with the earliest last check (never-checked wins).
-/// [skipKeys] excludes already-processed items when resuming an interrupted
-/// run.
+/// retry-after cooldown are all applied in SQL by
+/// [NetworkFavoriteCacheManager.getScanCandidates]; this function only
+/// deduplicates comics that appear in several folders, keeping the row with
+/// the earliest last check (never-checked wins). [skipKeys] excludes
+/// already-processed items when resuming an interrupted run.
 List<_ScanItem> _buildScanItems(
   NetworkFavoriteCacheManager manager,
   List<NetworkFavoriteFolderRef> folders,
@@ -333,45 +328,32 @@ List<_ScanItem> _buildScanItems(
 }) {
   final items = <String, _ScanItem>{};
   final earliestCheck = <String, DateTime?>{};
-  for (final folder in folders) {
-    for (final comic in manager.getComicsWithUpdatesInfo(folder)) {
-      if (comic.isSuspectGone && !includeSuspect) continue;
-      final lastCheckTime = comic.lastCheckTime;
-      if (mode == FollowUpdateMode.missing) {
-        if (lastCheckTime != null) continue;
-      } else if (mode == FollowUpdateMode.regular) {
-        if (lastCheckTime != null &&
-            DateTime.now().difference(lastCheckTime).inDays < 1) {
-          continue;
-        }
-      }
-      final retryAfter = comic.retryAfter;
-      if (!ignoreRetryAfter &&
-          retryAfter != null &&
-          retryAfter.isAfter(DateTime.now())) {
-        continue;
-      }
-      final key = '${comic.sourceKey}\u0000${comic.id}';
-      final previous = earliestCheck[key];
-      if (previous == null) {
-        earliestCheck[key] = lastCheckTime;
+  for (final c in manager.getScanCandidates(
+    folders,
+    modeName: mode.name,
+    ignoreRetryAfter: ignoreRetryAfter,
+    includeSuspect: includeSuspect,
+  )) {
+    final key = '${c.sourceKey}\u0000${c.comicId}';
+    final previous = earliestCheck[key];
+    if (previous == null) {
+      earliestCheck[key] = c.lastCheckTime;
+      items[key] = _ScanItem(
+        sourceKey: c.sourceKey,
+        comicId: c.comicId,
+        representativeFolderId: c.folderId,
+      );
+    } else {
+      // A never-checked row (epoch) beats any checked row.
+      final thisEffective =
+          c.lastCheckTime ?? DateTime.fromMillisecondsSinceEpoch(0);
+      if (thisEffective.isBefore(previous)) {
+        earliestCheck[key] = c.lastCheckTime;
         items[key] = _ScanItem(
-          sourceKey: comic.sourceKey,
-          comicId: comic.id,
-          representativeFolderId: folder.folderId,
+          sourceKey: c.sourceKey,
+          comicId: c.comicId,
+          representativeFolderId: c.folderId,
         );
-      } else {
-        // A never-checked row (epoch) beats any checked row.
-        final thisEffective =
-            lastCheckTime ?? DateTime.fromMillisecondsSinceEpoch(0);
-        if (thisEffective.isBefore(previous)) {
-          earliestCheck[key] = lastCheckTime;
-          items[key] = _ScanItem(
-            sourceKey: comic.sourceKey,
-            comicId: comic.id,
-            representativeFolderId: folder.folderId,
-          );
-        }
       }
     }
   }
@@ -424,12 +406,14 @@ Future<void> _runScan(
   var updated = 0;
   var checked = 0;
   var current = 0;
-  var consecutiveErrors = 0;
-  var usingFallback = false;
   final healthySources = <String>{};
   final sourceConsecutiveErrors = <String, int>{};
   final sourceConfirmedHits = <String, int>{};
   final bulkDelistSources = <String>{};
+  // Sources that tripped the consecutive-error threshold; their requests are
+  // rate-limited to half speed. Unlike the old global fallback, one bad
+  // source no longer slows down every healthy source.
+  final sourceSlowMode = <String>{};
   final markedThisRun = <({String sourceKey, String comicId})>[];
   final notFoundRetries =
       <({FavoriteItemWithUpdateInfo comic, NetworkFavoriteFolderRef folder})>[];
@@ -541,10 +525,11 @@ Future<void> _runScan(
           folderId: item.representativeFolderId,
         );
         // Rate limit: keep the old effective pace (batchDelay seconds per 5
-        // comics), doubled while in fallback mode. Approximate shared
+        // comics), doubled for sources in slow mode. Approximate shared
         // timestamp; a rare same-frame double fire is acceptable.
         final now = DateTime.now();
-        final effectiveSpacing = spacingMs * (usingFallback ? 2 : 1);
+        final effectiveSpacing =
+            spacingMs * (sourceSlowMode.contains(item.sourceKey) ? 2 : 1);
         if (effectiveSpacing > 0) {
           final wait = nextAllowed.difference(now);
           if (wait > Duration.zero) {
@@ -602,9 +587,14 @@ Future<void> _runScan(
           );
         } catch (e, s) {
           // Defensive: an unexpected exception must never kill the worker or
-          // leave the item stuck.
+          // leave the item stuck. Back off by the accumulated failure count
+          // like every other failure path.
           Log.error('Follow updates item', e, s);
-          manager.markComicRetryLaterEverywhere(item.sourceKey, item.comicId);
+          manager.markComicRetryLaterEverywhere(
+            item.sourceKey,
+            item.comicId,
+            failures: fresh.checkFailures + 1,
+          );
           manager.markScanItemDone(
             run.runId,
             item.sourceKey,
@@ -628,8 +618,6 @@ Future<void> _runScan(
         }
         current++;
         if (result.errorMessage != null) {
-          consecutiveErrors++;
-          if (consecutiveErrors >= 10) usingFallback = true;
           final signal = classifyNotFoundError(result.errorMessage!);
           if (signal != NotFoundSignal.none) {
             notFoundRetries.add((comic: fresh, folder: folder));
@@ -639,6 +627,7 @@ Future<void> _runScan(
               (sourceConsecutiveErrors[sourceKey] ?? 0) + 1;
           if ((sourceConsecutiveErrors[sourceKey] ?? 0) >= 10) {
             bulkDelistSources.add(sourceKey);
+            sourceSlowMode.add(sourceKey);
           }
           // Service-class errors (timeouts, 5xx, risk control) are evidence
           // the source itself is failing. They accumulate across runs so
@@ -713,11 +702,11 @@ Future<void> _runScan(
             error: result.errorMessage,
           );
         } else {
-          consecutiveErrors = 0;
           healthySources.add(item.sourceKey);
           sourceConsecutiveErrors[item.sourceKey] = 0;
           sourceConfirmedHits[item.sourceKey] = 0;
           serviceErrorCounts[item.sourceKey] = 0;
+          sourceSlowMode.remove(item.sourceKey);
           if (!hardDelistedSources.contains(item.sourceKey)) {
             bulkDelistSources.remove(item.sourceKey);
           }
@@ -752,35 +741,52 @@ Future<void> _runScan(
     // Second opinion for not-found results: re-check each once after the
     // queue drains. A success clears the accumulated hits (recordComicCheck
     // resets the counters); another not-found stays inside the 24h window and
-    // cannot accumulate twice on the same day.
+    // cannot accumulate twice on the same day. Re-checks share the main
+    // workers' rate limiter and run on a few concurrent workers instead of
+    // serially.
     if (notFoundRetries.isNotEmpty && isCanceled?.call() != true) {
-      for (final retry in notFoundRetries) {
-        if (isCanceled?.call() == true) break;
-        if (manager.isComicSuspectGone(retry.comic.sourceKey, retry.comic.id)) {
-          continue;
-        }
-        // The source tripped the bulk-delist detector; re-checking only
-        // repeats the same rejected requests.
-        if (bulkDelistSources.contains(retry.comic.sourceKey)) continue;
-        final fresh = manager.getComicUpdateInfo(
-          retry.comic.sourceKey,
-          retry.comic.id,
-          retry.folder.folderId,
-        );
-        if (fresh == null) continue;
-        final result = await updateComic(
-          fresh,
-          retry.folder,
-          cache: manager,
-          sourceHealthy: sourceHealthy(retry.comic.sourceKey),
-        );
-        if (result.errorMessage == null) {
-          checked++;
-          if (result.updated) updated++;
-          if (errors > 0) errors--;
-          consecutiveErrors = 0;
+      final retryThreads = math.min(3, threads);
+      var retryIndex = 0;
+      Future<void> retryWorker() async {
+        while (true) {
+          if (isCanceled?.call() == true) return;
+          final i = retryIndex++;
+          if (i >= notFoundRetries.length) return;
+          final retry = notFoundRetries[i];
+          if (manager.isComicSuspectGone(retry.comic.sourceKey, retry.comic.id)) {
+            continue;
+          }
+          // The source tripped the bulk-delist detector; re-checking only
+          // repeats the same rejected requests.
+          if (bulkDelistSources.contains(retry.comic.sourceKey)) continue;
+          final fresh = manager.getComicUpdateInfo(
+            retry.comic.sourceKey,
+            retry.comic.id,
+            retry.folder.folderId,
+          );
+          if (fresh == null) continue;
+          final now = DateTime.now();
+          if (spacingMs > 0) {
+            final wait = nextAllowed.difference(now);
+            if (wait > Duration.zero) await Future.delayed(wait);
+            nextAllowed = DateTime.now().add(Duration(milliseconds: spacingMs));
+          }
+          final result = await updateComic(
+            fresh,
+            retry.folder,
+            cache: manager,
+            sourceHealthy: sourceHealthy(retry.comic.sourceKey),
+          );
+          if (result.errorMessage == null) {
+            checked++;
+            if (result.updated) updated++;
+            if (errors > 0) errors--;
+          }
         }
       }
+      await Future.wait([
+        for (var i = 0; i < retryThreads; i++) retryWorker(),
+      ]);
     }
 
     stream.add(UpdateProgress(total, current, errors, updated));

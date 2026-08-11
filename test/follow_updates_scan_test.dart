@@ -149,12 +149,7 @@ void main() {
       databasePath: '${tempDir.path}${Platform.pathSeparator}cache.db',
       migrateLegacy: false,
     );
-    // Zero the 400-confirmation and transient retry delays for fast tests.
-    kNotFoundConfirmationDelays = const [
-      Duration.zero,
-      Duration.zero,
-      Duration.zero,
-    ];
+    // Zero the transient retry delay for fast tests.
     kTransientRetryDelay = Duration.zero;
     appdata.settings['followUpdateThreads'] = 5;
     appdata.settings['followUpdateBatchDelay'] = 0.0;
@@ -165,11 +160,6 @@ void main() {
   });
 
   tearDown(() {
-    kNotFoundConfirmationDelays = const [
-      Duration(seconds: 3),
-      Duration(seconds: 10),
-      Duration(seconds: 30),
-    ];
     kTransientRetryDelay = const Duration(seconds: 2);
     kProbeWindowSize = 20;
     ComicSourceManager().remove('test-source');
@@ -232,8 +222,8 @@ void main() {
     });
   });
 
-  group('400 confirmation session', () {
-    test('three consecutive 400s confirm a delist and mark suspect', () async {
+  group('400 confirmation accumulation', () {
+    test('three accumulated 400 hits confirm a delist and mark suspect', () async {
       await cacheComics(['one']);
       var calls = 0;
       final source = _detailSource((id) async {
@@ -242,45 +232,68 @@ void main() {
       });
       ComicSourceManager().add(source);
 
-      final item = cache.getComicsWithUpdatesInfo(folder).single;
-      final result = await updateComic(item, folder, cache: cache);
-
-      expect(calls, 4); // initial + 3 confirmation retries
-      expect(result.errorMessage, isNotNull);
-      final fresh = cache.getComicsWithUpdatesInfo(folder).single;
-      expect(fresh.isSuspectGone, isTrue);
+      // Three rounds, each reading the fresh row like a separate scan run;
+      // the worker never blocks on an inline confirmation session.
+      for (var round = 0; round < 3; round++) {
+        final item = cache.getComicsWithUpdatesInfo(folder).single;
+        final result = await updateComic(item, folder, cache: cache);
+        expect(result.errorMessage, isNotNull);
+        final fresh = cache.getComicsWithUpdatesInfo(folder).single;
+        if (round == 0) {
+          expect(fresh.checkNotFoundCount, 1);
+          expect(fresh.isSuspectGone, isFalse);
+        } else if (round == 1) {
+          expect(fresh.checkNotFoundCount, 2);
+          expect(fresh.isSuspectGone, isFalse);
+        } else {
+          expect(fresh.isSuspectGone, isTrue);
+          // The suspect mark resets the accumulated count.
+          expect(fresh.checkNotFoundCount, 0);
+        }
+      }
+      // One request per round; no inline confirmation retries anymore.
+      expect(calls, 3);
     });
 
-    test('a success during confirmation clears the pending state', () async {
+    test('a success during accumulation clears the pending state', () async {
       await cacheComics(['one']);
       var calls = 0;
       final source = _detailSource((id) async {
         calls++;
-        if (calls < 4) {
+        if (calls <= 2) {
           throw Exception('Invalid Status Code: 400. The Request is invalid.');
         }
         return _details(id);
       });
       ComicSourceManager().add(source);
 
+      for (var round = 0; round < 2; round++) {
+        final item = cache.getComicsWithUpdatesInfo(folder).single;
+        final result = await updateComic(item, folder, cache: cache);
+        expect(result.errorMessage, isNotNull);
+      }
+      var fresh = cache.getComicsWithUpdatesInfo(folder).single;
+      expect(fresh.checkNotFoundCount, 2);
+      expect(fresh.isSuspectGone, isFalse);
+
       final item = cache.getComicsWithUpdatesInfo(folder).single;
       final result = await updateComic(item, folder, cache: cache);
-
-      expect(calls, 4);
       expect(result.errorMessage, isNull);
-      final fresh = cache.getComicsWithUpdatesInfo(folder).single;
+      fresh = cache.getComicsWithUpdatesInfo(folder).single;
+      // The successful check clears every delist/retry marker.
       expect(fresh.isSuspectGone, isFalse);
       expect(fresh.lastCheckTime, isNotNull);
+      expect(fresh.checkNotFoundCount, 0);
     });
 
     test(
-      'a non-400 response during confirmation is transient, not delist',
+      'a non-400 response is transient, not delist, and keeps the count',
       () async {
         await cacheComics(['one']);
         var calls = 0;
         final source = _detailSource((id) async {
           calls++;
-          if (calls <= 2) {
+          if (calls <= 1) {
             throw Exception(
               'Invalid Status Code: 400. The Request is invalid.',
             );
@@ -289,17 +302,67 @@ void main() {
         });
         ComicSourceManager().add(source);
 
-        final item = cache.getComicsWithUpdatesInfo(folder).single;
-        final result = await updateComic(item, folder, cache: cache);
-
+        // Round 1: one bare 400 records a single hit.
+        var item = cache.getComicsWithUpdatesInfo(folder).single;
+        var result = await updateComic(item, folder, cache: cache);
         expect(result.errorMessage, isNotNull);
-        final fresh = cache.getComicsWithUpdatesInfo(folder).single;
-        // The transient response prevents any delist marking; the comic went
-        // to the retry cooldown instead.
+        var fresh = cache.getComicsWithUpdatesInfo(folder).single;
+        expect(fresh.checkNotFoundCount, 1);
+        expect(fresh.isSuspectGone, isFalse);
+
+        // Round 2: risk control; transient retries, no delist mark, and the
+        // accumulated 400 hit survives (only a success or mark resets it).
+        item = cache.getComicsWithUpdatesInfo(folder).single;
+        result = await updateComic(item, folder, cache: cache);
+        expect(result.errorMessage, isNotNull);
+        fresh = cache.getComicsWithUpdatesInfo(folder).single;
         expect(fresh.isSuspectGone, isFalse);
         expect(fresh.retryAfter, isNotNull);
+        expect(fresh.checkNotFoundCount, 1);
       },
     );
+
+    test('400 hits accumulate across runs and confirm on the third hit', () async {
+      // Serial workers: the healthy comic sorts before the failing one, so
+      // the source is healthy when the 400 hits, keeping the per-run counting
+      // deterministic (main check records one hit, the retry phase re-check a
+      // second).
+      appdata.settings['followUpdateThreads'] = 1;
+      addTearDown(() => appdata.settings['followUpdateThreads'] = 5);
+      await cacheComics(['a-ok', 'b-bad']);
+      final source = _detailSource((id) async {
+        if (id == 'b-bad') {
+          throw Exception('Invalid Status Code: 400. The Request is invalid.');
+        }
+        return _details(id);
+      });
+      ComicSourceManager().add(source);
+
+      // Run 1: two hits recorded, not yet confirmed.
+      await scanFollowUpdates(
+        [folder],
+        FollowUpdateMode.force,
+        ignoreRetryAfter: true,
+        cache: cache,
+      ).toList();
+      var bad = cache
+          .getComicsWithUpdatesInfo(folder)
+          .firstWhere((c) => c.id == 'b-bad');
+      expect(bad.checkNotFoundCount, 2);
+      expect(bad.isSuspectGone, isFalse);
+
+      // Run 2: the third accumulated hit confirms the delist across runs.
+      await scanFollowUpdates(
+        [folder],
+        FollowUpdateMode.force,
+        ignoreRetryAfter: true,
+        cache: cache,
+      ).toList();
+      bad = cache
+          .getComicsWithUpdatesInfo(folder)
+          .firstWhere((c) => c.id == 'b-bad');
+      expect(bad.isSuspectGone, isTrue);
+    });
   });
 
   group('comic-level check state', () {
@@ -837,6 +900,158 @@ void main() {
         expect(calls, isNot(contains('one')));
       },
     );
+  });
+
+  group('scan candidate SQL', () {
+    test('getScanCandidates matches the full-scan manual filter', () async {
+      const folderB = NetworkFavoriteFolderRef(
+        sourceKey: 'test-source',
+        folderId: 'remote-b',
+        title: 'Remote B',
+      );
+      await cache.refreshFolders(
+        _numericData(
+          (page, [folder]) async => Res(<Comic>[_comic('one')], subData: 1),
+        ),
+      );
+      await cache.refreshPage(
+        _numericData(
+          (page, [folder]) async => Res(
+            [
+              for (final id in ['fresh', 'old', 'unchecked', 'cooled', 'suspect'])
+                _comic(id),
+            ],
+            subData: 1,
+          ),
+        ),
+        folder,
+        1,
+      );
+      await cache.refreshPage(
+        _numericData(
+          (page, [folder]) async => Res(
+            [for (final id in ['old', 'unchecked-b', 'suspect-b']) _comic(id)],
+            subData: 1,
+          ),
+        ),
+        folderB,
+        1,
+      );
+
+      // Seed mixed check states directly in SQL: checked within the 24h
+      // window, checked long ago, never checked (no row at all), cooling
+      // down, and suspected-removed. 'old' lives in both folders.
+      final db = sqlite3.open(
+        '${tempDir.path}${Platform.pathSeparator}cache.db',
+      );
+      final now = DateTime.now();
+      final seeds = <({String id, int? lastMs, int? retryMs, int suspect})>[
+        (
+          id: 'fresh',
+          lastMs: now
+              .subtract(const Duration(hours: 1))
+              .millisecondsSinceEpoch,
+          retryMs: null,
+          suspect: 0,
+        ),
+        (
+          id: 'old',
+          lastMs: now
+              .subtract(const Duration(hours: 25))
+              .millisecondsSinceEpoch,
+          retryMs: null,
+          suspect: 0,
+        ),
+        (
+          id: 'cooled',
+          lastMs: now
+              .subtract(const Duration(hours: 25))
+              .millisecondsSinceEpoch,
+          retryMs: now
+              .add(const Duration(hours: 1))
+              .millisecondsSinceEpoch,
+          suspect: 0,
+        ),
+        (
+          id: 'suspect',
+          lastMs: now
+              .subtract(const Duration(hours: 25))
+              .millisecondsSinceEpoch,
+          retryMs: null,
+          suspect: 1,
+        ),
+        (id: 'suspect-b', lastMs: null, retryMs: null, suspect: 1),
+      ];
+      for (final s in seeds) {
+        db.execute(
+          '''INSERT INTO comic_check_state
+             (source_key, comic_id, last_check_time, retry_after,
+              check_suspect_gone)
+             VALUES (?, ?, ?, ?, ?)''',
+          ['test-source', s.id, s.lastMs, s.retryMs, s.suspect],
+        );
+      }
+      db.dispose();
+
+      // Reference implementation: every row plus the old Dart-side filters.
+      Set<String> reference(
+        FollowUpdateMode mode, {
+        required bool ignoreRetryAfter,
+        bool includeSuspect = false,
+      }) {
+        final out = <String>{};
+        final refNow = DateTime.now();
+        for (final f in [folder, folderB]) {
+          for (final comic in cache.getComicsWithUpdatesInfo(f)) {
+            if (comic.isSuspectGone && !includeSuspect) continue;
+            final lct = comic.lastCheckTime;
+            if (mode == FollowUpdateMode.missing) {
+              if (lct != null) continue;
+            } else if (mode == FollowUpdateMode.regular) {
+              if (lct != null && refNow.difference(lct).inDays < 1) continue;
+            }
+            final ra = comic.retryAfter;
+            if (!ignoreRetryAfter && ra != null && ra.isAfter(refNow)) {
+              continue;
+            }
+            out.add('${comic.sourceKey}\u0000${comic.id}\u0000${f.folderId}');
+          }
+        }
+        return out;
+      }
+
+      for (final mode in FollowUpdateMode.values) {
+        for (final ignore in [false, true]) {
+          final got = {
+            for (final c in cache.getScanCandidates(
+              [folder, folderB],
+              modeName: mode.name,
+              ignoreRetryAfter: ignore,
+              includeSuspect: false,
+            ))
+              '${c.sourceKey}\u0000${c.comicId}\u0000${c.folderId}',
+          };
+          expect(
+            got,
+            reference(mode, ignoreRetryAfter: ignore),
+            reason: '${mode.name} ignoreRetryAfter=$ignore',
+          );
+        }
+      }
+      // includeSuspect only re-adds the suspect rows.
+      final all = cache.getScanCandidates(
+        [folder, folderB],
+        modeName: 'force',
+        ignoreRetryAfter: true,
+        includeSuspect: true,
+      );
+      expect(
+        {for (final c in all) '${c.comicId}\u0000${c.folderId}'},
+        reference(FollowUpdateMode.force, ignoreRetryAfter: true, includeSuspect: true)
+            .map((k) => k.split('\u0000').skip(1).join('\u0000'))
+            .toSet(),
+      );
+    });
   });
 }
 
