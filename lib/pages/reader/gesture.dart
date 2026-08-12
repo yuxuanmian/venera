@@ -9,7 +9,8 @@ class _ReaderGestureDetector extends StatefulWidget {
   State<_ReaderGestureDetector> createState() => _ReaderGestureDetectorState();
 }
 
-class _ReaderGestureDetectorState extends AutomaticGlobalState<_ReaderGestureDetector> {
+class _ReaderGestureDetectorState
+    extends AutomaticGlobalState<_ReaderGestureDetector> {
   late TapGestureRecognizer _tapGestureRecognizer;
 
   static const _kDoubleTapMaxTime = Duration(milliseconds: 200);
@@ -19,6 +20,15 @@ class _ReaderGestureDetectorState extends AutomaticGlobalState<_ReaderGestureDet
   static const _kDoubleTapMaxDistanceSquared = 20.0 * 20.0;
 
   static const _kTapToTurnPagePercent = 0.3;
+
+  /// Taps longer than this count as a press-and-hold and do not toggle the
+  /// toolbar. A quick tap is a deliberate action, while the tap used to stop
+  /// a coasting list is usually slower, so this filters the latter out.
+  static const _kTapMaxDuration = Duration(milliseconds: 150);
+
+  /// After the toolbar toggles, center taps within this window are ignored so
+  /// a quick double tap in the center cannot flash the toolbar open and shut.
+  static const _kMenuToggleCooldown = Duration(milliseconds: 400);
 
   final _dragListeners = <_DragListener>[];
 
@@ -53,6 +63,7 @@ class _ReaderGestureDetectorState extends AutomaticGlobalState<_ReaderGestureDet
     return Listener(
       behavior: HitTestBehavior.translucent,
       onPointerDown: (event) {
+        _lastTapDownTime = event.timeStamp;
         if (event.position == Offset.zero) {
           _previousEvent = null;
           return;
@@ -97,6 +108,7 @@ class _ReaderGestureDetectorState extends AutomaticGlobalState<_ReaderGestureDet
         }
       },
       onPointerUp: (event) {
+        _lastTapUpTime = event.timeStamp;
         fingers--;
         if (_longPressInProgress) {
           onLongPressedUp(event.position);
@@ -139,11 +151,13 @@ class _ReaderGestureDetectorState extends AutomaticGlobalState<_ReaderGestureDet
     }
     if (context.reader.mode.key.startsWith('gallery')) {
       if (forward) {
-        if (!context.reader.toNextPage() && !context.reader.isLastChapterOfGroup) {
+        if (!context.reader.toNextPage() &&
+            !context.reader.isLastChapterOfGroup) {
           context.reader.toNextChapter();
         }
       } else {
-        if (!context.reader.toPrevPage() && !context.reader.isFirstChapterOfGroup) {
+        if (!context.reader.toPrevPage() &&
+            !context.reader.isFirstChapterOfGroup) {
           context.reader.toPrevChapter(toLastPage: true);
         }
       }
@@ -156,12 +170,29 @@ class _ReaderGestureDetectorState extends AutomaticGlobalState<_ReaderGestureDet
 
   Offset? _lastTapMoveDistance;
 
+  /// Time stamps of the most recent pointer down/up, used to tell a quick tap
+  /// from a press-and-hold.
+  Duration? _lastTapDownTime;
+
+  Duration? _lastTapUpTime;
+
+  /// Whether the previous single tap was quick, used when a double tap is
+  /// missed and the first tap's action fires immediately.
+  bool _previousTapWasQuick = false;
+
+  /// Event time stamp of the last toolbar toggle, used to suppress center
+  /// taps within [_kMenuToggleCooldown].
+  Duration? _lastMenuToggleTime;
+
   bool _longPressInProgress = false;
 
   bool _dragInProgress = false;
 
-  bool get _enableDoubleTapToZoom =>
-      appdata.settings.getReaderSetting(reader.cid, reader.type.sourceKey, 'enableDoubleTapToZoom');
+  bool get _enableDoubleTapToZoom => appdata.settings.getReaderSetting(
+    reader.cid,
+    reader.type.sourceKey,
+    'enableDoubleTapToZoom',
+  );
 
   void onTapUp(TapUpDetails event) {
     if (event.globalPosition == Offset.zero &&
@@ -174,8 +205,14 @@ class _ReaderGestureDetectorState extends AutomaticGlobalState<_ReaderGestureDet
       return;
     }
     final location = event.globalPosition;
+    final eventTime = _lastTapUpTime;
+    if (eventTime == null) {
+      return;
+    }
+    final isQuickTap =
+        eventTime - (_lastTapDownTime ?? eventTime) < _kTapMaxDuration;
     if (!_enableDoubleTapToZoom) {
-      onTap(location);
+      onTap(location, eventTime: eventTime, isQuickTap: isQuickTap);
       return;
     }
     final previousLocation = _previousEvent?.globalPosition;
@@ -186,88 +223,127 @@ class _ReaderGestureDetectorState extends AutomaticGlobalState<_ReaderGestureDet
         _previousEvent = null;
         return;
       } else {
-        onTap(previousLocation);
+        onTap(
+          previousLocation,
+          eventTime: eventTime,
+          isQuickTap: _previousTapWasQuick,
+        );
       }
     }
     _previousEvent = event;
+    _previousTapWasQuick = isQuickTap;
     Future.delayed(_kDoubleTapMaxTime, () {
       if (_previousEvent == event) {
-        onTap(location);
+        onTap(location, eventTime: eventTime, isQuickTap: isQuickTap);
         _previousEvent = null;
       }
     });
   }
 
-  void onTap(Offset location) {
+  void onTap(
+    Offset location, {
+    required Duration eventTime,
+    required bool isQuickTap,
+  }) {
+    if (context.readerScaffold.isOpen) {
+      context.readerScaffold.openOrClose();
+      _lastMenuToggleTime = eventTime;
+      return;
+    }
+    // Don't open toolbar on chapter comments page
+    if (reader.isOnChapterCommentsPage) {
+      return;
+    }
+    if (appdata.settings.getReaderSetting(
+      reader.cid,
+      reader.type.sourceKey,
+      'enableTapToTurnPages',
+    )) {
+      bool isLeft = false, isRight = false, isTop = false, isBottom = false;
+      final width = context.width;
+      final height = context.height;
+      final x = location.dx;
+      final y = location.dy;
+      if (x < width * _kTapToTurnPagePercent) {
+        isLeft = true;
+      } else if (x > width * (1 - _kTapToTurnPagePercent)) {
+        isRight = true;
+      }
+      if (y < height * _kTapToTurnPagePercent) {
+        isTop = true;
+      } else if (y > height * (1 - _kTapToTurnPagePercent)) {
+        isBottom = true;
+      }
+      bool isCenter = false;
+      var prev = () => context.reader.toPrevPage();
+      var next = () => context.reader.toNextPage();
+      if (appdata.settings.getReaderSetting(
+        reader.cid,
+        reader.type.sourceKey,
+        'reverseTapToTurnPages',
+      )) {
+        prev = () => context.reader.toNextPage();
+        next = () => context.reader.toPrevPage();
+      }
+      switch (context.reader.mode) {
+        case ReaderMode.galleryLeftToRight:
+        case ReaderMode.continuousLeftToRight:
+          if (isLeft) {
+            prev();
+          } else if (isRight) {
+            next();
+          } else {
+            isCenter = true;
+          }
+        case ReaderMode.galleryRightToLeft:
+        case ReaderMode.continuousRightToLeft:
+          if (isLeft) {
+            next();
+          } else if (isRight) {
+            prev();
+          } else {
+            isCenter = true;
+          }
+        case ReaderMode.galleryTopToBottom:
+        case ReaderMode.continuousTopToBottom:
+          if (isTop) {
+            prev();
+          } else if (isBottom) {
+            next();
+          } else {
+            isCenter = true;
+          }
+      }
+      if (isCenter) {
+        _handleMenuToggleTap(location, eventTime, isQuickTap);
+      }
+    } else {
+      _handleMenuToggleTap(location, eventTime, isQuickTap);
+    }
+  }
+
+  /// Handles a tap whose only purpose is toggling the toolbar: a center tap,
+  /// or any tap when tap-to-turn is off. Suppressed while a user drag was
+  /// recent (continuous mode), when the tap is a press-and-hold, or shortly
+  /// after the toolbar already toggled (so a quick double tap in the center
+  /// cannot flash the toolbar open and shut).
+  void _handleMenuToggleTap(
+    Offset location,
+    Duration eventTime,
+    bool isQuickTap,
+  ) {
     if (reader._imageViewController!.handleOnTap(location)) {
       return;
-    } else if (context.readerScaffold.isOpen) {
-      context.readerScaffold.openOrClose();
-    } else {
-      // Don't open toolbar on chapter comments page
-      if (reader.isOnChapterCommentsPage) {
-        return;
-      }
-      if (appdata.settings.getReaderSetting(
-          reader.cid, reader.type.sourceKey, 'enableTapToTurnPages')) {
-        bool isLeft = false, isRight = false, isTop = false, isBottom = false;
-        final width = context.width;
-        final height = context.height;
-        final x = location.dx;
-        final y = location.dy;
-        if (x < width * _kTapToTurnPagePercent) {
-          isLeft = true;
-        } else if (x > width * (1 - _kTapToTurnPagePercent)) {
-          isRight = true;
-        }
-        if (y < height * _kTapToTurnPagePercent) {
-          isTop = true;
-        } else if (y > height * (1 - _kTapToTurnPagePercent)) {
-          isBottom = true;
-        }
-        bool isCenter = false;
-        var prev = () => context.reader.toPrevPage();
-        var next = () => context.reader.toNextPage();
-        if (appdata.settings.getReaderSetting(
-            reader.cid, reader.type.sourceKey, 'reverseTapToTurnPages')) {
-          prev = () => context.reader.toNextPage();
-          next = () => context.reader.toPrevPage();
-        }
-        switch (context.reader.mode) {
-          case ReaderMode.galleryLeftToRight:
-          case ReaderMode.continuousLeftToRight:
-            if (isLeft) {
-              prev();
-            } else if (isRight) {
-              next();
-            } else {
-              isCenter = true;
-            }
-          case ReaderMode.galleryRightToLeft:
-          case ReaderMode.continuousRightToLeft:
-            if (isLeft) {
-              next();
-            } else if (isRight) {
-              prev();
-            } else {
-              isCenter = true;
-            }
-          case ReaderMode.galleryTopToBottom:
-          case ReaderMode.continuousTopToBottom:
-            if (isTop) {
-              prev();
-            } else if (isBottom) {
-              next();
-            } else {
-              isCenter = true;
-            }
-        }
-        if (!isCenter) {
-          return;
-        }
-      }
-      context.readerScaffold.openOrClose();
     }
+    if (!isQuickTap) {
+      return;
+    }
+    final lastToggle = _lastMenuToggleTime;
+    if (lastToggle != null && eventTime - lastToggle < _kMenuToggleCooldown) {
+      return;
+    }
+    _lastMenuToggleTime = eventTime;
+    context.readerScaffold.openOrClose();
   }
 
   void onDoubleTap(Offset location) {
@@ -275,52 +351,48 @@ class _ReaderGestureDetectorState extends AutomaticGlobalState<_ReaderGestureDet
   }
 
   void onSecondaryTapUp(Offset location) {
-    showMenuX(
-      context,
-      location,
-      [
+    showMenuX(context, location, [
+      MenuEntry(
+        icon: Icons.settings,
+        text: "Settings".tl,
+        onClick: () {
+          context.readerScaffold.openSetting();
+        },
+      ),
+      MenuEntry(
+        icon: Icons.menu,
+        text: "Chapters".tl,
+        onClick: () {
+          context.readerScaffold.openChapterDrawer();
+        },
+      ),
+      MenuEntry(
+        icon: Icons.fullscreen,
+        text: "Fullscreen".tl,
+        onClick: () {
+          context.reader.fullscreen();
+        },
+      ),
+      MenuEntry(
+        icon: Icons.exit_to_app,
+        text: "Exit".tl,
+        onClick: () {
+          context.pop();
+        },
+      ),
+      if (App.isDesktop && !reader.isLoading)
         MenuEntry(
-          icon: Icons.settings,
-          text: "Settings".tl,
-          onClick: () {
-            context.readerScaffold.openSetting();
-          },
+          icon: Icons.copy,
+          text: "Copy Image".tl,
+          onClick: () => copyImage(location),
         ),
+      if (!reader.isLoading)
         MenuEntry(
-          icon: Icons.menu,
-          text: "Chapters".tl,
-          onClick: () {
-            context.readerScaffold.openChapterDrawer();
-          },
+          icon: Icons.download_outlined,
+          text: "Save Image".tl,
+          onClick: () => saveImage(location),
         ),
-        MenuEntry(
-          icon: Icons.fullscreen,
-          text: "Fullscreen".tl,
-          onClick: () {
-            context.reader.fullscreen();
-          },
-        ),
-        MenuEntry(
-          icon: Icons.exit_to_app,
-          text: "Exit".tl,
-          onClick: () {
-            context.pop();
-          },
-        ),
-        if (App.isDesktop && !reader.isLoading)
-          MenuEntry(
-            icon: Icons.copy,
-            text: "Copy Image".tl,
-            onClick: () => copyImage(location),
-          ),
-        if (!reader.isLoading)
-          MenuEntry(
-            icon: Icons.download_outlined,
-            text: "Save Image".tl,
-            onClick: () => saveImage(location),
-          ),
-      ],
-    );
+    ]);
   }
 
   void onLongPressedUp(Offset location) {

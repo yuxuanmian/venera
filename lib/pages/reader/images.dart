@@ -214,6 +214,7 @@ class _GalleryModeState extends State<_GalleryMode>
     reader._imageViewController = this;
     Future.microtask(() {
       context.readerScaffold.setFloatingButton(0);
+      cache(reader.page);
     });
     super.initState();
   }
@@ -332,8 +333,6 @@ class _GalleryModeState extends State<_GalleryMode>
               endIndex,
             );
 
-            cache(index);
-
             photoViewControllers[index] ??= PhotoViewController();
 
             if (reader.imagesPerPage == 1 || pageImages.length == 1) {
@@ -388,7 +387,8 @@ class _GalleryModeState extends State<_GalleryMode>
         },
         onPageChanged: (i) {
           if (i == 0) {
-            if (reader.isFirstChapterOfGroup || !reader.toPrevChapter(toLastPage: true)) {
+            if (reader.isFirstChapterOfGroup ||
+                !reader.toPrevChapter(toLastPage: true)) {
               controller.jumpToPage(1);
             }
           } else if (i == totalPages + 1) {
@@ -396,6 +396,7 @@ class _GalleryModeState extends State<_GalleryMode>
               controller.jumpToPage(totalPages);
             }
           } else {
+            cache(i);
             reader.setPage(i);
             context.readerScaffold.update();
             // Auto close toolbar when entering chapter comments page
@@ -660,6 +661,55 @@ const Set<PointerDeviceKind> _kTouchLikeDeviceTypes = <PointerDeviceKind>{
 
 const double _kChangeChapterOffset = 160;
 
+/// Suppresses taps that land around a user drag in continuous mode.
+///
+/// A single tap is only recognized within the tap slop, and the reader defers
+/// the tap action by 200ms to detect double taps. A drag only wins the gesture
+/// arena after exceeding the touch slop, so a tap can still fire right around
+/// a scroll — the deferred tap of a tap that preceded the drag, or a tap meant
+/// to stop a coasting list. Without this guard those taps would toggle the
+/// toolbar mid-scroll.
+///
+/// Only user-initiated drags arm the guard. Programmatic scrolls (tap-to-turn,
+/// keyboard, auto page turning, mouse wheel) leave it disarmed so rapid
+/// tap-to-turn keeps working.
+class ScrollTapGuard {
+  /// Taps stay suppressed for this long after the last scroll activity, so a
+  /// tap right after a flick (e.g. to stop a coasting list) cannot toggle the
+  /// toolbar. 1s is deliberately aggressive: the user must pause for a moment
+  /// before a center tap opens the menu.
+  static const _clearDelay = Duration(seconds: 1);
+
+  int _activity = 0;
+
+  bool _armed = false;
+
+  /// Whether a tap should be swallowed because a user drag happened recently.
+  bool get isArmed => _armed;
+
+  /// A scroll activity started. [userDrag] is true when the scroll was
+  /// initiated by a pointer drag ([ScrollStartNotification.dragDetails] is
+  /// non-null).
+  void onScrollStart({required bool userDrag}) {
+    _activity++;
+    if (userDrag) {
+      _armed = true;
+    }
+  }
+
+  /// A scroll activity ended. Disarms the guard after [_clearDelay] unless a
+  /// new activity starts in the meantime (e.g. the ballistic scroll that
+  /// follows a fling, or the next flick in a fast sequence).
+  void onScrollEnd() {
+    var activity = _activity;
+    Future.delayed(_clearDelay, () {
+      if (_activity == activity) {
+        _armed = false;
+      }
+    });
+  }
+}
+
 class _ContinuousMode extends StatefulWidget {
   const _ContinuousMode({super.key});
 
@@ -683,23 +733,18 @@ class _ContinuousModeState extends State<_ContinuousMode>
   var fingers = 0;
   bool disableScroll = false;
 
+  double? _pendingScrollDelta;
+
+  bool _scrollScheduled = false;
+
   late List<bool> cached;
 
   int get preCacheCount => appdata.settings["preloadImageCount"];
 
-  /// Whether the user was scrolling the page.
-  /// The gesture detector has a delay to detect tap event.
-  /// To handle the tap event, we need to know if the user was scrolling before the delay.
-  bool delayedIsScrolling = false;
+  /// Guards against taps that fire around a user drag (see [ScrollTapGuard]).
+  final scrollTapGuard = ScrollTapGuard();
 
   var imageStates = <State<ComicImage>>{};
-
-  void delayedSetIsScrolling(bool value) {
-    Future.delayed(
-      const Duration(milliseconds: 300),
-      () => delayedIsScrolling = value,
-    );
-  }
 
   bool prepareToPrevChapter = false;
   bool prepareToNextChapter = false;
@@ -795,7 +840,19 @@ class _ContinuousModeState extends State<_ContinuousMode>
       if (isCTRLPressed) {
         return;
       }
-      smoothTo(event.scrollDelta.dy);
+      // Coalesce wheel events within a frame into a single scroll so rapid
+      // wheel ticks do not start a new animation for every event.
+      _pendingScrollDelta = (_pendingScrollDelta ?? 0) + event.scrollDelta.dy;
+      if (_scrollScheduled) {
+        return;
+      }
+      _scrollScheduled = true;
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        _scrollScheduled = false;
+        var delta = _pendingScrollDelta ?? 0;
+        _pendingScrollDelta = null;
+        smoothTo(delta);
+      });
     }
   }
 
@@ -979,9 +1036,15 @@ class _ContinuousModeState extends State<_ContinuousMode>
     widget = NotificationListener<ScrollNotification>(
       onNotification: (notification) {
         if (notification is ScrollStartNotification) {
-          delayedSetIsScrolling(true);
+          // A user drag arms the guard immediately; a programmatic scroll
+          // (tap-to-turn, keyboard, auto page turning, mouse wheel) only
+          // invalidates pending clears so the guard is not cleared while the
+          // ballistic scroll after a fling is still running.
+          scrollTapGuard.onScrollStart(
+            userDrag: notification.dragDetails != null,
+          );
         } else if (notification is ScrollEndNotification) {
-          delayedSetIsScrolling(false);
+          scrollTapGuard.onScrollEnd();
         }
 
         var scale = photoViewController.scale ?? 1.0;
@@ -1100,7 +1163,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
 
   @override
   void handleLongPressDown(Offset location) {
-    if (!appdata.settings['enableLongPressToZoom'] || delayedIsScrolling) {
+    if (!appdata.settings['enableLongPressToZoom'] || scrollTapGuard.isArmed) {
       return;
     }
     double target = photoViewController.getInitialScale!.call()! * 1.75;
@@ -1188,10 +1251,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
 
   @override
   bool handleOnTap(Offset location) {
-    if (delayedIsScrolling) {
-      return true;
-    }
-    return false;
+    return scrollTapGuard.isArmed;
   }
 
   @override
@@ -1231,7 +1291,6 @@ ImageProvider _createImageProviderFromKey(
     reader.cid,
     reader.eid,
     reader.page,
-    enableResize: reader.mode.isContinuous, // For continuous mode, we need to resize the image to improve performance
   );
 }
 

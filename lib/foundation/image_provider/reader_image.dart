@@ -12,7 +12,13 @@ import 'package:venera/foundation/appdata.dart';
 class ReaderImageProvider
     extends BaseImageProvider<image_provider.ReaderImageProvider> {
   /// Image provider for normal image.
-  const ReaderImageProvider(this.imageKey, this.sourceKey, this.cid, this.eid, this.page, {this.enableResize = false});
+  const ReaderImageProvider(
+    this.imageKey,
+    this.sourceKey,
+    this.cid,
+    this.eid,
+    this.page,
+  );
 
   final String imageKey;
 
@@ -25,9 +31,6 @@ class ReaderImageProvider
   final int page;
 
   @override
-  final bool enableResize;
-
-  @override
   Future<Uint8List> load(chunkEvents, checkStop) async {
     Uint8List? imageBytes;
     if (imageKey.startsWith('file://')) {
@@ -38,13 +41,19 @@ class ReaderImageProvider
         throw "Error: File not found.";
       }
     } else {
-      await for (var event
-        in ImageDownloader.loadComicImage(imageKey, sourceKey, cid, eid)) {
+      await for (var event in ImageDownloader.loadComicImage(
+        imageKey,
+        sourceKey,
+        cid,
+        eid,
+      )) {
         checkStop();
-        chunkEvents.add(ImageChunkEvent(
-          cumulativeBytesLoaded: event.currentBytes,
-          expectedTotalBytes: event.totalBytes,
-        ));
+        chunkEvents.add(
+          ImageChunkEvent(
+            cumulativeBytesLoaded: event.currentBytes,
+            expectedTotalBytes: event.totalBytes,
+          ),
+        );
         if (event.imageBytes != null) {
           imageBytes = event.imageBytes;
           break;
@@ -98,8 +107,7 @@ class ReaderImageProvider
               while (futureImage == null) {
                 try {
                   checkStop();
-                }
-                catch(e) {
+                } catch (e) {
                   onCancel([]);
                   rethrow;
                 }
@@ -122,5 +130,5 @@ class ReaderImageProvider
   }
 
   @override
-  String get key => "$imageKey@$sourceKey@$cid@$eid@$enableResize";
+  String get key => "$imageKey@$sourceKey@$cid@$eid";
 }

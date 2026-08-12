@@ -14,20 +14,39 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
 
   static const int maxImagePixel = 2560 * 1440;
 
+  /// The decoded width must stay at least this many times the screen width,
+  /// otherwise the image looks blurry when displayed full screen or zoomed.
+  static const double minDecodeWidthFactor = 1.5;
+
+  static int get _screenPhysicalWidth {
+    final views = WidgetsBinding.instance.platformDispatcher.views;
+    if (views.isEmpty) {
+      return 0;
+    }
+    return views.first.physicalSize.width.round();
+  }
+
   static TargetImageSize _getTargetSize(int width, int height) {
     // ignore invalid size
     if (width <= 0 || height <= 0) {
       return TargetImageSize(width: width, height: height);
     }
-    // ignore too wide or too tall image
-    final imageRatio = width / height;
-    if (imageRatio > 2 || imageRatio < 0.5) {
-      return TargetImageSize(width: width, height: height);
-    }
     // resize if too large
     if (width * height > maxImagePixel) {
+      // Scaling a long strip image down by area alone would make it narrower
+      // than the screen (blurry when shown); keep the original size instead.
+      final minWidth = (_screenPhysicalWidth * minDecodeWidthFactor).round();
+      if (width < minWidth) {
+        return TargetImageSize(width: width, height: height);
+      }
       final ratio = sqrt(maxImagePixel / (width * height));
-      return TargetImageSize(width: (width * ratio).round(), height: (height * ratio).round());
+      var targetWidth = (width * ratio).round();
+      var targetHeight = (height * ratio).round();
+      if (targetWidth < minWidth) {
+        targetWidth = minWidth;
+        targetHeight = (minWidth * height / width).round();
+      }
+      return TargetImageSize(width: targetWidth, height: targetHeight);
     }
     return TargetImageSize(width: width, height: height);
   }
@@ -104,17 +123,15 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
 
       try {
         final buffer = await ImmutableBuffer.fromUint8List(data);
-        return await decode(
-          buffer,
-          getTargetSize: enableResize ? _getTargetSize : null,
-        );
+        return await decode(buffer, getTargetSize: _getTargetSize);
       } catch (e) {
         await CacheManager().delete(this.key);
         if (data.length < 2 * 1024) {
           // data is too short, it's likely that the data is text, not image
           try {
-            var text =
-                const Utf8Codec(allowMalformed: false).decoder.convert(data);
+            var text = const Utf8Codec(
+              allowMalformed: false,
+            ).decoder.convert(data);
             throw Exception("Expected image data, but got text: $text");
           } catch (e) {
             // ignore
@@ -154,8 +171,6 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
   String toString() {
     return "$runtimeType($key)";
   }
-
-  bool get enableResize => false;
 }
 
 typedef FileDecoderCallback = Future<ui.Codec> Function(Uint8List);

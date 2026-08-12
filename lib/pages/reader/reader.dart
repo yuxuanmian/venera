@@ -630,7 +630,7 @@ abstract mixin class _ReaderLocation {
 
   void setPage(int page) {
     // Prevent page change during animation
-    if (_animationCount > 0 && _pendingPage != null && page != _pendingPage) {
+    if (_isPageAnimating && _pendingPage != null && page != _pendingPage) {
       return;
     }
     this.page = page;
@@ -650,7 +650,12 @@ abstract mixin class _ReaderLocation {
     return toPage(page - 1);
   }
 
-  int _animationCount = 0;
+  /// Whether a page animation is in flight. Only the most recently started
+  /// animation can clear it, so a stuck (never completing) animation future
+  /// cannot freeze the reader: the next animation always takes over.
+  bool _isPageAnimating = false;
+
+  int _animationToken = 0;
 
   bool toPage(int page) {
     if (_validatePage(page)) {
@@ -660,10 +665,14 @@ abstract mixin class _ReaderLocation {
       final hasAnimation = enablePageAnimation(cid, type);
       if (hasAnimation) {
         _pendingPage = page;
-        _animationCount++;
+        final token = ++_animationToken;
+        _isPageAnimating = true;
         update();
         _imageViewController!.animateToPage(page).then((_) {
-          _animationCount--;
+          if (token != _animationToken) {
+            return;
+          }
+          _isPageAnimating = false;
           if (_pendingPage == page) {
             _pendingPage = null;
           }
@@ -679,7 +688,7 @@ abstract mixin class _ReaderLocation {
     return false;
   }
 
-  bool get isPageAnimating => _animationCount > 0;
+  bool get isPageAnimating => _isPageAnimating;
 
   bool _validateChapter(int chapter) {
     return chapter >= 1 && chapter <= maxChapter;
@@ -698,6 +707,11 @@ abstract mixin class _ReaderLocation {
 
   bool toChapter(int c, {bool toLastPage = false}) {
     if (_validateChapter(c) && !isLoading) {
+      // Invalidate any in-flight page animation so a superseded animation
+      // future cannot keep the reader frozen after the chapter change.
+      _animationToken++;
+      _isPageAnimating = false;
+      _pendingPage = null;
       chapter = c;
       page = 1;
       _jumpToLastPageOnLoad = toLastPage;

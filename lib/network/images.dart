@@ -10,9 +10,16 @@ import 'package:venera/utils/image.dart';
 import 'app_dio.dart';
 
 abstract class ImageDownloader {
+  /// Limits concurrent comic image downloads so fast scrolling into an
+  /// unbuffered region cannot start dozens of downloads at once (memory
+  /// spikes, GC pauses and frame drops).
+  static final _downloadSemaphore = _DownloadSemaphore(3);
+
   static Stream<ImageDownloadProgress> loadThumbnail(
-      String url, String? sourceKey,
-      [String? cid]) async* {
+    String url,
+    String? sourceKey, [
+    String? cid,
+  ]) async* {
     final cacheKey = "$url@$sourceKey${cid != null ? '@$cid' : ''}";
     final cache = await CacheManager().findCache(cacheKey);
 
@@ -39,25 +46,29 @@ abstract class ImageDownloader {
     if (((configs['url'] as String?) ?? url).startsWith('cover.') &&
         sourceKey != null) {
       var comicSource = ComicSource.find(sourceKey);
-      if(comicSource != null) {
+      if (comicSource != null) {
         var comicInfo = await comicSource.loadComicInfo!(cid!);
         yield* loadThumbnail(comicInfo.data.cover, sourceKey);
         return;
       }
     }
 
-    var dio = AppDio(BaseOptions(
-      headers: Map<String, dynamic>.from(configs['headers']),
-      method: configs['method'] ?? 'GET',
-      responseType: ResponseType.stream,
-    ));
+    var dio = AppDio(
+      BaseOptions(
+        headers: Map<String, dynamic>.from(configs['headers']),
+        method: configs['method'] ?? 'GET',
+        responseType: ResponseType.stream,
+      ),
+    );
 
     String requestUrl = configs['url'] ?? url;
     if (requestUrl.startsWith('//')) {
       requestUrl = 'https:$requestUrl';
     }
-    var req = await dio.request<ResponseBody>(requestUrl,
-        data: configs['data']);
+    var req = await dio.request<ResponseBody>(
+      requestUrl,
+      data: configs['data'],
+    );
     var stream = req.data?.stream ?? (throw "Error: Empty response body.");
     int? expectedBytes = req.data!.contentLength;
     if (expectedBytes == -1) {
@@ -88,7 +99,8 @@ abstract class ImageDownloader {
     );
   }
 
-  static final _loadingImages = <String, _StreamWrapper<ImageDownloadProgress>>{};
+  static final _loadingImages =
+      <String, _StreamWrapper<ImageDownloadProgress>>{};
 
   /// Cancel all loading images.
   static void cancelAllLoadingImages() {
@@ -101,7 +113,11 @@ abstract class ImageDownloader {
   /// Load a comic image from the network or cache.
   /// The function will prevent multiple requests for the same image.
   static Stream<ImageDownloadProgress> loadComicImage(
-      String imageKey, String? sourceKey, String cid, String eid) {
+    String imageKey,
+    String? sourceKey,
+    String cid,
+    String eid,
+  ) {
     final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
     if (_loadingImages.containsKey(cacheKey)) {
       return _loadingImages[cacheKey]!.stream;
@@ -117,12 +133,20 @@ abstract class ImageDownloader {
   }
 
   static Stream<ImageDownloadProgress> loadComicImageUnwrapped(
-      String imageKey, String? sourceKey, String cid, String eid) {
+    String imageKey,
+    String? sourceKey,
+    String cid,
+    String eid,
+  ) {
     return _loadComicImage(imageKey, sourceKey, cid, eid);
   }
 
   static Stream<ImageDownloadProgress> _loadComicImage(
-      String imageKey, String? sourceKey, String cid, String eid) async* {
+    String imageKey,
+    String? sourceKey,
+    String cid,
+    String eid,
+  ) async* {
     final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
     final cache = await CacheManager().findCache(cacheKey);
 
@@ -140,16 +164,18 @@ abstract class ImageDownloader {
     var configs = <String, dynamic>{};
     if (sourceKey != null) {
       var comicSource = ComicSource.find(sourceKey);
-      configs = (await comicSource!.getImageLoadingConfig
-              ?.call(imageKey, cid, eid)) ??
+      configs =
+          (await comicSource!.getImageLoadingConfig?.call(
+            imageKey,
+            cid,
+            eid,
+          )) ??
           {};
     }
     var retryLimit = 5;
     while (true) {
       try {
-        configs['headers'] ??= {
-          'user-agent': webUA,
-        };
+        configs['headers'] ??= {'user-agent': webUA};
 
         if (configs['onLoadFailed'] is JSInvokable) {
           onLoadFailed = () async {
@@ -162,63 +188,71 @@ abstract class ImageDownloader {
           };
         }
 
-        var dio = AppDio(BaseOptions(
-          headers: configs['headers'],
-          method: configs['method'] ?? 'GET',
-          responseType: ResponseType.stream,
-        ));
-
-        var req = await dio.request<ResponseBody>(configs['url'] ?? imageKey,
-            data: configs['data']);
-        var stream = req.data?.stream ?? (throw "Error: Empty response body.");
-        int? expectedBytes = req.data!.contentLength;
-        if (expectedBytes == -1) {
-          expectedBytes = null;
-        }
-        var buffer = <int>[];
-        await for (var data in stream) {
-          buffer.addAll(data);
-          yield ImageDownloadProgress(
-            currentBytes: buffer.length,
-            totalBytes: expectedBytes,
-          );
-        }
-
-        if (configs['onResponse'] is JSInvokable) {
-          dynamic result = (configs['onResponse'] as JSInvokable)([Uint8List.fromList(buffer)]);
-          if (result is Future) {
-            result = await result;
-          }
-          if (result is List<int>) {
-            buffer = result;
-          } else {
-            throw "Error: Invalid onResponse result.";
-          }
-          (configs['onResponse'] as JSInvokable).free();
-        }
-
-        Uint8List data;
-        if (buffer is Uint8List) {
-          data = buffer;
-        } else {
-          data = Uint8List.fromList(buffer);
-          buffer.clear();
-        }
-
-        if (configs['modifyImage'] != null) {
-          var newData = await modifyImageWithScript(
-            data,
-            configs['modifyImage'],
-          );
-          data = newData;
-        }
-
-        await CacheManager().writeCache(cacheKey, data);
-        yield ImageDownloadProgress(
-          currentBytes: data.length,
-          totalBytes: data.length,
-          imageBytes: data,
+        var dio = AppDio(
+          BaseOptions(
+            headers: configs['headers'],
+            method: configs['method'] ?? 'GET',
+            responseType: ResponseType.stream,
+          ),
         );
+
+        await _downloadSemaphore.acquire();
+        try {
+          var req = await dio.request<ResponseBody>(
+            configs['url'] ?? imageKey,
+            data: configs['data'],
+          );
+          var stream =
+              req.data?.stream ?? (throw "Error: Empty response body.");
+          int? expectedBytes = req.data!.contentLength;
+          if (expectedBytes == -1) {
+            expectedBytes = null;
+          }
+          // Accumulate chunks without repeated copying.
+          final builder = BytesBuilder(copy: false);
+          await for (var data in stream) {
+            builder.add(data);
+            yield ImageDownloadProgress(
+              currentBytes: builder.length,
+              totalBytes: expectedBytes,
+            );
+          }
+
+          Uint8List data;
+          if (configs['onResponse'] is JSInvokable) {
+            dynamic result = (configs['onResponse'] as JSInvokable)([
+              builder.takeBytes(),
+            ]);
+            if (result is Future) {
+              result = await result;
+            }
+            if (result is List<int>) {
+              data = result is Uint8List ? result : Uint8List.fromList(result);
+            } else {
+              throw "Error: Invalid onResponse result.";
+            }
+            (configs['onResponse'] as JSInvokable).free();
+          } else {
+            data = builder.takeBytes();
+          }
+
+          if (configs['modifyImage'] != null) {
+            var newData = await modifyImageWithScript(
+              data,
+              configs['modifyImage'],
+            );
+            data = newData;
+          }
+
+          await CacheManager().writeCache(cacheKey, data);
+          yield ImageDownloadProgress(
+            currentBytes: data.length,
+            totalBytes: data.length,
+            imageBytes: data,
+          );
+        } finally {
+          _downloadSemaphore.release();
+        }
         return;
       } catch (e) {
         if (retryLimit < 0 || onLoadFailed == null) {
@@ -268,15 +302,13 @@ class _StreamWrapper<T> {
           }
         }
       }
-    }
-    catch (e) {
+    } catch (e) {
       for (var controller in controllers) {
         if (!controller.isClosed) {
           controller.addError(e);
         }
       }
-    }
-    finally {
+    } finally {
       for (var controller in controllers) {
         if (!controller.isClosed) {
           controller.close();
@@ -321,4 +353,33 @@ class ImageDownloadProgress {
     required this.totalBytes,
     this.imageBytes,
   });
+}
+
+/// A simple counting semaphore limiting concurrent image downloads.
+class _DownloadSemaphore {
+  final int max;
+
+  int _count = 0;
+
+  final List<Completer<void>> _waiters = [];
+
+  _DownloadSemaphore(this.max);
+
+  Future<void> acquire() async {
+    if (_count < max) {
+      _count++;
+      return;
+    }
+    final completer = Completer<void>();
+    _waiters.add(completer);
+    await completer.future;
+  }
+
+  void release() {
+    if (_waiters.isNotEmpty) {
+      _waiters.removeAt(0).complete();
+    } else {
+      _count--;
+    }
+  }
 }
