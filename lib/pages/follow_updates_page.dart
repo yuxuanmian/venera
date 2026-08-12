@@ -186,7 +186,10 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
                             valueListenable:
                                 FollowUpdatesService.baselineStatus,
                             builder: (context, status, _) {
-                              final runningNow = status?.isRunning == true;
+                              final runningNow =
+                                  status?.isRunning == true ||
+                                  (status == null &&
+                                      FollowUpdatesService.taskRunning.value);
                               return runningNow
                                   ? const SizedBox(
                                       width: 20,
@@ -293,6 +296,14 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
                 // from the first frame, monotonic completion); when idle, fall
                 // back to the database gap counts.
                 final running = status?.isRunning == true;
+                // A task is active but has not published its queue yet (folder
+                // summaries still refreshing, queue being built). Database gap
+                // counts are meaningless in that window: a fully checked cache
+                // would render a false 100% and then jump backwards when the
+                // scan's real queue numbers arrive. Show an indeterminate
+                // state instead.
+                final starting =
+                    status == null && FollowUpdatesService.taskRunning.value;
                 final total = running
                     ? (status?.total ?? 0)
                     : cache.countCachedComicsInFolders(folders);
@@ -306,16 +317,19 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 16),
                       child: LinearProgressIndicator(
-                        value: total == 0 ? null : completed / total,
+                        value: starting || total == 0
+                            ? null
+                            : completed / total,
                       ),
                     ),
-                    Text(
-                      '@completed / @total checked'.tlParams({
-                        'completed': completed,
-                        'total': total,
-                      }),
-                      style: ts.s14,
-                    ).paddingHorizontal(16).paddingTop(8),
+                    if (!starting)
+                      Text(
+                        '@completed / @total checked'.tlParams({
+                          'completed': completed,
+                          'total': total,
+                        }),
+                        style: ts.s14,
+                      ).paddingHorizontal(16).paddingTop(8),
                     if (status != null && status.currentComic != null)
                       Text(
                         'Checking: @title'.tlParams({
@@ -329,7 +343,7 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
                       children: [
                         Expanded(
                           child: Text(
-                            running
+                            starting || running
                                 ? 'Follow-up scan in progress'.tl
                                 : status != null && status.errors > 0
                                 ? '@count failed, will retry later'.tlParams({
@@ -342,7 +356,7 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                        if (incomplete)
+                        if (incomplete && !starting)
                           FilledButton.tonal(
                             onPressed: FollowUpdatesService.startBaseline,
                             child: Text('Retry'.tl),
@@ -614,6 +628,14 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
             // from the first frame, monotonic completion); when idle, fall
             // back to the database gap counts.
             final running = status?.isRunning == true;
+            // A task is active but has not published its queue yet (folder
+            // summaries still refreshing, queue being built). Database gap
+            // counts are meaningless in that window: a fully checked cache
+            // would render a false 100% and then jump backwards when the
+            // scan's real queue numbers arrive. Show an indeterminate
+            // state instead.
+            final starting =
+                status == null && FollowUpdatesService.taskRunning.value;
             final total = running
                 ? (status?.total ?? 0)
                 : cache.countCachedComicsInFolders(folders);
@@ -628,15 +650,16 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   LinearProgressIndicator(
-                    value: total == 0 ? null : completed / total,
+                    value: starting || total == 0 ? null : completed / total,
                   ),
-                  Text(
-                    '@completed / @total checked'.tlParams({
-                      'completed': completed,
-                      'total': total,
-                    }),
-                    style: ts.s16,
-                  ).paddingTop(12),
+                  if (!starting)
+                    Text(
+                      '@completed / @total checked'.tlParams({
+                        'completed': completed,
+                        'total': total,
+                      }),
+                      style: ts.s16,
+                    ).paddingTop(12),
                   if (status != null && status.currentComic != null)
                     Text(
                       'Checking: @title'.tlParams({
@@ -650,7 +673,7 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
                       style: ts.s14,
                     ).paddingTop(8),
                   Text(
-                    running
+                    starting || running
                         ? 'Follow-up scan in progress'.tl
                         : incomplete
                         ? 'Some comics not checked, waiting for next scan'.tl
@@ -672,7 +695,9 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
               final completed =
                   total - cache.countUncheckedComicsInFolders(folders);
               final running = status?.isRunning == true;
-              final incomplete = !running && total > completed;
+              final starting =
+                  status == null && FollowUpdatesService.taskRunning.value;
+              final incomplete = !starting && !running && total > completed;
               return Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -905,6 +930,9 @@ abstract class FollowUpdatesService {
       // sync batch or folder refresh), so re-check for remaining gaps once the
       // task has fully finished instead of waiting for a manual Retry.
       _scheduleAutoScan();
+      // With the queue idle again, keep cached list metadata fresh (once per
+      // staleness window) without ever delaying the scan itself.
+      _maybeRefreshSummaries();
       // Rebuild the page so the baseline card and lists reflect the settled
       // scan state (incomplete gap or fully checked).
       updateFollowUpdatesUI();
@@ -1067,22 +1095,6 @@ abstract class FollowUpdatesService {
 
   static Future<void> _check(bool Function() isCanceled) async {
     if (!followUpdatesEnabled) return;
-    final enabled = appdata.settings['favorites'];
-    if (enabled is List) {
-      for (final key in enabled.whereType<String>()) {
-        if (isCanceled()) return;
-        final source = ComicSource.find(key);
-        final data = source?.favoriteData;
-        if (data == null || !source!.isLogged) continue;
-        try {
-          await NetworkFavoriteCacheManager()
-              .refreshCachedSummaries(data)
-              .timeout(const Duration(seconds: 30));
-        } catch (e, s) {
-          Log.error('Refresh favorite cache', e, s);
-        }
-      }
-    }
     // While "cache all pages" is running for a folder, its pages churn
     // constantly; the periodic scan must not fight the full-cache worker
     // over the same comics.
@@ -1095,6 +1107,68 @@ abstract class FollowUpdatesService {
       mode: FollowUpdateMode.regular,
       folders: folders,
     );
+  }
+
+  /// Last time a summary-refresh round started, so the refresh can never run
+  /// more often than [NetworkFavoriteCacheManager.backgroundSummaryRefreshAfter]
+  /// even when scan tasks finish in quick succession.
+  static DateTime? _lastSummaryRefreshAt;
+
+  /// Per-source time budget for one summary-refresh round. Generous enough
+  /// to make progress on large folders, short enough to never hog the
+  /// network for long; the sweep stops at a page boundary and the next round
+  /// continues with the stale remainder.
+  static const _summaryRefreshBudget = Duration(seconds: 30);
+
+  /// Refreshes cached favorite-list summaries (titles, authors, tags)
+  /// outside the scan task queue: a slow source must never delay the update
+  /// check or keep the task indicator spinning. Sources run concurrently,
+  /// each capped by its own budget. Skipped while a scan task is active so
+  /// the refresh never stacks list requests on top of a running scan.
+  static Future<void> _refreshSummaries() async {
+    if (!followUpdatesEnabled) return;
+    final enabled = appdata.settings['favorites'];
+    if (enabled is! List) return;
+    final cache = NetworkFavoriteCacheManager();
+    final sources = <String>[];
+    for (final key in enabled.whereType<String>()) {
+      if (_taskRunning) return;
+      final source = ComicSource.find(key);
+      if (source?.favoriteData == null || !source!.isLogged) continue;
+      sources.add(key);
+    }
+    await Future.wait([
+      for (final key in sources)
+        () async {
+          if (_taskRunning) return;
+          final source = ComicSource.find(key);
+          final data = source?.favoriteData;
+          if (data == null) return;
+          try {
+            await cache.refreshCachedSummaries(
+              data,
+              timeBudget: _summaryRefreshBudget,
+            );
+          } catch (e, s) {
+            Log.error('Refresh favorite cache', e, s);
+          }
+        }(),
+    ]);
+  }
+
+  /// Starts one summary-refresh round unless one already started within the
+  /// staleness window; the timestamp is claimed up front so a second trigger
+  /// while the round is running is a no-op.
+  static void _maybeRefreshSummaries() {
+    final now = DateTime.now();
+    final last = _lastSummaryRefreshAt;
+    if (last != null &&
+        now.difference(last) <
+            NetworkFavoriteCacheManager.backgroundSummaryRefreshAfter) {
+      return;
+    }
+    _lastSummaryRefreshAt = now;
+    unawaited(_refreshSummaries());
   }
 
   static void initChecker() {
@@ -1111,6 +1185,12 @@ abstract class FollowUpdatesService {
     Timer.periodic(
       const Duration(minutes: 10),
       (_) => unawaited(_startTask(_check, cancelExisting: false)),
+    );
+    // Metadata stays fresh independently of the scan schedule; the first
+    // round runs after the startup scan task settles (see _startTask).
+    Timer.periodic(
+      NetworkFavoriteCacheManager.backgroundSummaryRefreshAfter,
+      (_) => _maybeRefreshSummaries(),
     );
   }
 

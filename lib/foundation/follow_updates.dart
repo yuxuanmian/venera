@@ -148,18 +148,24 @@ Future<ComicUpdateResult> updateComic(
 
   Future<ComicUpdateResult> onSuccess(ComicDetails newInfo) async {
     final author = newInfo.subTitle?.trim();
+    // Record the check first: its "updated" verdict decides whether the
+    // (likely changed) cover URL is committed to the cache rows.
+    final updated = manager.recordComicCheckEverywhere(
+      c.sourceKey,
+      c.id,
+      updateTime: newInfo.findUpdateTime(),
+      updateMarker: comicUpdateMarker(newInfo),
+    );
     manager.updateBasicInfoEverywhere(
       folder,
       c.id,
       title: newInfo.title,
       author: author?.isNotEmpty == true ? author : newInfo.findAuthor(),
       chapterCount: newInfo.chapters?.length,
-    );
-    final updated = manager.recordComicCheckEverywhere(
-      c.sourceKey,
-      c.id,
-      updateTime: newInfo.findUpdateTime(),
-      updateMarker: comicUpdateMarker(newInfo),
+      // Only confirmed updates refresh the cover URL. Refreshing it on every
+      // successful check would invalidate the URL-keyed image cache during
+      // each 24h sweep, since many sources sign cover URLs per response.
+      cover: updated ? newInfo.cover : null,
     );
     return ComicUpdateResult(updated, null);
   }

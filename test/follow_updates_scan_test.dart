@@ -1053,6 +1053,69 @@ void main() {
       );
     });
   });
+
+  test('confirmed updates refresh the cover URL; unchanged comics keep it', () async {
+    await cacheComics(['one']);
+    var updateTime = '2026-08-01';
+    var cover = 'https://example.invalid/old.jpg';
+    final source = _detailSource((id) async {
+      return Res(
+        ComicDetails.fromJson({
+          'title': 'Comic',
+          'subtitle': 'Author',
+          'cover': cover,
+          'updateTime': updateTime,
+          'tags': <String, List<String>>{},
+          'chapters': <String, String>{'1': 'Chapter 1'},
+          'sourceKey': 'test-source',
+          'comicId': id,
+        }),
+      );
+    });
+    ComicSourceManager().add(source);
+    addTearDown(() => ComicSourceManager().remove('test-source'));
+
+    Future<void> checkOnce() => updateComic(
+      cache.getComicsWithUpdatesInfo(folder).single,
+      folder,
+      cache: cache,
+    );
+
+    // Baseline: the first check establishes the marker, no "update" verdict
+    // yet, so the cached cover stays untouched.
+    await checkOnce();
+    expect(
+      cache.getCachedPage(folder, 1)!.comics.single.coverPath,
+      'https://example.invalid/one.jpg',
+    );
+
+    // A confirmed update commits the new cover URL.
+    cover = 'https://example.invalid/new.jpg';
+    updateTime = '2026-08-02';
+    await checkOnce();
+    expect(
+      cache.getCachedPage(folder, 1)!.comics.single.coverPath,
+      'https://example.invalid/new.jpg',
+    );
+
+    // URL churn without an update (signed URLs, CDN rotation): the cached
+    // cover wins so the image cache is not invalidated by every sweep.
+    cover = 'https://example.invalid/signed.jpg';
+    await checkOnce();
+    expect(
+      cache.getCachedPage(folder, 1)!.comics.single.coverPath,
+      'https://example.invalid/new.jpg',
+    );
+
+    // An update with an empty cover keeps the existing URL.
+    cover = '';
+    updateTime = '2026-08-03';
+    await checkOnce();
+    expect(
+      cache.getCachedPage(folder, 1)!.comics.single.coverPath,
+      'https://example.invalid/new.jpg',
+    );
+  });
 }
 
 /// Polls [condition] until it is true or [timeout] elapses.

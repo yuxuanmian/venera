@@ -1504,10 +1504,16 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   ///
   /// Only metadata endpoints are used. Existing cover URLs are retained, so
   /// this does not invalidate image cache entries or cause cover downloads.
+  /// [timeBudget] time-boxes the sweep: when the budget runs out the loop
+  /// stops at the next page boundary and already-refreshed pages stay
+  /// committed; the next call picks up the stale remainder. Without a budget
+  /// the sweep refreshes every stale page.
   Future<void> refreshCachedSummaries(
     FavoriteData data, {
     Duration minimumAge = backgroundSummaryRefreshAfter,
+    Duration? timeBudget,
   }) async {
+    final deadline = timeBudget == null ? null : DateTime.now().add(timeBudget);
     var folders = getCachedFolders(data.key);
     final refreshFoldersNeeded =
         folders.isEmpty ||
@@ -1521,6 +1527,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     }
     for (final folder in folders) {
       if (_fullCaching.contains(_folderCacheKey(folder))) continue;
+      if (deadline != null && DateTime.now().isAfter(deadline)) return;
       if (data.loadComic != null) {
         final pages = _db
             .select(
@@ -1536,6 +1543,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         // stall on one request at a time. The staleness check and the cache
         // re-read stay inside each batch entry.
         for (var i = 0; i < pages.length; i += _fullCacheBatchSize) {
+          if (deadline != null && DateTime.now().isAfter(deadline)) return;
           await Future.wait([
             for (final page in pages.skip(i).take(_fullCacheBatchSize))
               () async {
@@ -1557,6 +1565,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       } else if (data.loadNext != null) {
         String? token;
         while (true) {
+          if (deadline != null && DateTime.now().isAfter(deadline)) return;
           final cached = getCachedNextPage(folder, token);
           if (cached == null) break;
           if (DateTime.now().difference(cached.updatedAt) >= minimumAge) {
@@ -2276,14 +2285,16 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     );
   }
 
-  /// Updates fields from a comic-detail JSON response without changing the
-  /// cover, tags, or other list metadata already in the device cache.
+  /// Updates fields from a comic-detail JSON response without changing tags
+  /// or other list metadata already in the device cache. The cover is only
+  /// replaced when [cover] is explicitly provided and non-empty.
   void updateBasicInfo(
     NetworkFavoriteFolderRef folder,
     String comicId, {
     String? title,
     String? author,
     int? chapterCount,
+    String? cover,
   }) {
     final rows = _db.select(
       '''SELECT * FROM favorite_items
@@ -2297,6 +2308,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         json['subTitle'] = author;
       }
       if (chapterCount != null) json['chapterCount'] = chapterCount;
+      if (cover != null && cover.trim().isNotEmpty) json['cover'] = cover;
       _db.execute(
         '''UPDATE favorite_items SET comic_json = ?, search_text = ?
            WHERE source_key = ? AND folder_id = ? AND page_index = ?
@@ -2320,6 +2332,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     String? title,
     String? author,
     int? chapterCount,
+    String? cover,
   }) {
     for (final folder in _comicFolders(fallback, comicId)) {
       updateBasicInfo(
@@ -2328,6 +2341,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         title: title,
         author: author,
         chapterCount: chapterCount,
+        cover: cover,
       );
     }
   }

@@ -336,6 +336,38 @@ void main() {
   );
 
   test(
+    'summary refresh time budget stops the sweep without dropping progress',
+    () async {
+      final data = _numericData(
+        (page, [folder]) async => Res(<Comic>[_comic('p$page')], subData: 3),
+      );
+      await cache.refreshFolders(data);
+      await cache.refreshPage(data, folder, 1);
+      await cache.refreshPage(data, folder, 2);
+      await cache.refreshPage(data, folder, 3);
+
+      var listCalls = 0;
+      final counting = _numericData((page, [folder]) async {
+        listCalls++;
+        return Res(<Comic>[_comic('p$page')], subData: 3);
+      });
+
+      // An exhausted budget returns before any page request and without
+      // error; already-committed pages stay untouched.
+      await cache.refreshCachedSummaries(
+        counting,
+        minimumAge: Duration.zero,
+        timeBudget: Duration.zero,
+      );
+      expect(listCalls, 0);
+
+      // Without a budget the same sweep refreshes every stale page.
+      await cache.refreshCachedSummaries(counting, minimumAge: Duration.zero);
+      expect(listCalls, 3);
+    },
+  );
+
+  test(
     'manual numeric full cache stores every page and preserves covers',
     () async {
       var useNewCover = false;
