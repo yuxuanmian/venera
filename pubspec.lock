@@ -921,7 +921,7 @@ packages:
       path: "packages/scrollable_positioned_list"
       ref: "1f74b0cffae01980a2744438aae33cf3f0ab425d"
       resolved-ref: "1f74b0cffae01980a2744438aae33cf3f0ab425d"
-      url: "https://github.com/venera-app/flutter.widgets"
+      url: "https://github.com/yuxuanmian/flutter.widgets"
     source: git
     version: "0.3.8+1"
   share_plus:
