@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter_qjs/flutter_qjs.dart';
 import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/consts.dart';
+import 'package:venera/foundation/log.dart';
 import 'package:venera/utils/image.dart';
 
 import 'app_dio.dart';
@@ -30,6 +32,10 @@ abstract class ImageDownloader {
         totalBytes: data.length,
         imageBytes: data,
       );
+      // Without this return the generator falls through to the network path,
+      // and consumers that drain the stream (e.g. the pre-download wrapper)
+      // would re-download already cached images.
+      return;
     }
 
     var configs = <String, dynamic>{};
@@ -58,6 +64,7 @@ abstract class ImageDownloader {
         headers: Map<String, dynamic>.from(configs['headers']),
         method: configs['method'] ?? 'GET',
         responseType: ResponseType.stream,
+        extra: {'veneraImage': true},
       ),
     );
 
@@ -122,10 +129,17 @@ abstract class ImageDownloader {
     if (_loadingImages.containsKey(cacheKey)) {
       return _loadingImages[cacheKey]!.stream;
     }
+    final cancelToken = CancelToken();
     final stream = _StreamWrapper<ImageDownloadProgress>(
-      _loadComicImage(imageKey, sourceKey, cid, eid),
+      _loadComicImage(imageKey, sourceKey, cid, eid, cancelToken),
       (wrapper) {
         _loadingImages.remove(cacheKey);
+      },
+      onCancel: () {
+        // The Dio cancel token completes the adapter's cancelFuture, which
+        // aborts the underlying rhttp request instead of leaving it running
+        // in the background.
+        cancelToken.cancel();
       },
     );
     _loadingImages[cacheKey] = stream;
@@ -138,7 +152,7 @@ abstract class ImageDownloader {
     String cid,
     String eid,
   ) {
-    return _loadComicImage(imageKey, sourceKey, cid, eid);
+    return _loadComicImage(imageKey, sourceKey, cid, eid, CancelToken());
   }
 
   static Stream<ImageDownloadProgress> _loadComicImage(
@@ -146,6 +160,7 @@ abstract class ImageDownloader {
     String? sourceKey,
     String cid,
     String eid,
+    CancelToken cancelToken,
   ) async* {
     final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
     final cache = await CacheManager().findCache(cacheKey);
@@ -157,7 +172,15 @@ abstract class ImageDownloader {
         totalBytes: data.length,
         imageBytes: data,
       );
+      // Without this return the generator falls through to the network path,
+      // and consumers that drain the stream (e.g. the pre-download wrapper)
+      // would re-download already cached images.
+      return;
     }
+
+    // Total load time including queue wait and retries; only the network
+    // download path reaches this point.
+    final totalWatch = Stopwatch()..start();
 
     Future<Map<String, dynamic>?> Function()? onLoadFailed;
 
@@ -193,15 +216,23 @@ abstract class ImageDownloader {
             headers: configs['headers'],
             method: configs['method'] ?? 'GET',
             responseType: ResponseType.stream,
+            extra: {'veneraImage': true},
           ),
         );
 
+        final queueWatch = Stopwatch()..start();
         await _downloadSemaphore.acquire();
+        queueWatch.stop();
         try {
+          // The request future completes when the response headers arrive,
+          // so this measures connection + TLS + time to first byte.
+          final connectWatch = Stopwatch()..start();
           var req = await dio.request<ResponseBody>(
             configs['url'] ?? imageKey,
             data: configs['data'],
+            cancelToken: cancelToken,
           );
+          connectWatch.stop();
           var stream =
               req.data?.stream ?? (throw "Error: Empty response body.");
           int? expectedBytes = req.data!.contentLength;
@@ -209,6 +240,7 @@ abstract class ImageDownloader {
             expectedBytes = null;
           }
           // Accumulate chunks without repeated copying.
+          final downloadWatch = Stopwatch()..start();
           final builder = BytesBuilder(copy: false);
           await for (var data in stream) {
             builder.add(data);
@@ -217,6 +249,7 @@ abstract class ImageDownloader {
               totalBytes: expectedBytes,
             );
           }
+          downloadWatch.stop();
 
           Uint8List data;
           if (configs['onResponse'] is JSInvokable) {
@@ -245,6 +278,23 @@ abstract class ImageDownloader {
           }
 
           await CacheManager().writeCache(cacheKey, data);
+          if (kDebugMode) {
+            // Debug-only timing breakdown: one self-contained line per image
+            // (actual request URL first) so concurrent downloads stay
+            // greppable. queue = waiting for a download slot, connect =
+            // TCP/TLS + first byte, download = body transfer, total =
+            // everything incl. retries and the cache write.
+            final requestUrl = (configs['url'] as String?) ?? imageKey;
+            Log.info(
+              "Image",
+              "$requestUrl${requestUrl != imageKey ? ' (key=$imageKey)' : ''} -> "
+                  "queue=${queueWatch.elapsedMilliseconds}ms "
+                  "connect=${connectWatch.elapsedMilliseconds}ms "
+                  "download=${downloadWatch.elapsedMilliseconds}ms "
+                  "total=${totalWatch.elapsedMilliseconds}ms "
+                  "size=${(data.length / 1024).toStringAsFixed(1)}KB",
+            );
+          }
           yield ImageDownloadProgress(
             currentBytes: data.length,
             totalBytes: data.length,
@@ -255,6 +305,10 @@ abstract class ImageDownloader {
         }
         return;
       } catch (e) {
+        if (e is DioException && e.type == DioExceptionType.cancel) {
+          // A cancelled image must not be retried through onLoadFailed.
+          rethrow;
+        }
         if (retryLimit < 0 || onLoadFailed == null) {
           rethrow;
         }
@@ -284,9 +338,13 @@ class _StreamWrapper<T> {
 
   final void Function(_StreamWrapper<T> wrapper) onClosed;
 
+  /// Called when [cancel] is invoked, so the underlying transfer can be
+  /// aborted instead of continuing in the background.
+  final void Function()? onCancel;
+
   bool isClosed = false;
 
-  _StreamWrapper(this._stream, this.onClosed) {
+  _StreamWrapper(this._stream, this.onClosed, {this.onCancel}) {
     _listen();
   }
 
@@ -338,6 +396,7 @@ class _StreamWrapper<T> {
     }
     controllers.clear();
     isClosed = true;
+    onCancel?.call();
   }
 }
 

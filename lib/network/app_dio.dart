@@ -4,10 +4,9 @@ import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:flutter/services.dart';
 import 'package:rhttp/rhttp.dart' as rhttp;
-import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/network/cache.dart';
-import 'package:venera/network/proxy.dart';
+import 'package:venera/network/rhttp_client_manager.dart';
 
 import '../foundation/app.dart';
 import 'cloudflare.dart';
@@ -18,32 +17,42 @@ export 'package:dio/dio.dart';
 class MyLogInterceptor implements Interceptor {
   @override
   void onError(DioException err, ErrorInterceptorHandler handler) {
-    Log.error("Network",
-        "${err.requestOptions.method} ${err.requestOptions.path}\n$err\n${err.response?.data.toString()}");
+    Log.error(
+      "Network",
+      "${err.requestOptions.method} ${err.requestOptions.path}\n$err\n${err.response?.data.toString()}",
+    );
     switch (err.type) {
       case DioExceptionType.badResponse:
         var statusCode = err.response?.statusCode;
         if (statusCode != null) {
           err = err.copyWith(
-              message: "Invalid Status Code: $statusCode. "
-                  "${_getStatusCodeInfo(statusCode)}");
+            message:
+                "Invalid Status Code: $statusCode. "
+                "${_getStatusCodeInfo(statusCode)}",
+          );
         }
       case DioExceptionType.connectionTimeout:
         err = err.copyWith(message: "Connection Timeout");
       case DioExceptionType.receiveTimeout:
         err = err.copyWith(
-            message: "Receive Timeout: "
-                "This indicates that the server is too busy to respond");
+          message:
+              "Receive Timeout: "
+              "This indicates that the server is too busy to respond",
+        );
       case DioExceptionType.unknown:
         if (err.toString().contains("Connection terminated during handshake")) {
           err = err.copyWith(
-              message: "Connection terminated during handshake: "
-                  "This may be caused by the firewall blocking the connection "
-                  "or your requests are too frequent.");
+            message:
+                "Connection terminated during handshake: "
+                "This may be caused by the firewall blocking the connection "
+                "or your requests are too frequent.",
+          );
         } else if (err.toString().contains("Connection reset by peer")) {
           err = err.copyWith(
-              message: "Connection reset by peer: "
-                  "The error is unrelated to app, please check your network.");
+            message:
+                "Connection reset by peer: "
+                "The error is unrelated to app, please check your network.",
+          );
         }
       default:
         {}
@@ -70,9 +79,20 @@ class MyLogInterceptor implements Interceptor {
 
   @override
   void onResponse(
-      Response<dynamic> response, ResponseInterceptorHandler handler) {
-    var headers = response.headers.map.map((key, value) => MapEntry(
-        key.toLowerCase(), value.length == 1 ? value.first : value.toString()));
+    Response<dynamic> response,
+    ResponseInterceptorHandler handler,
+  ) {
+    if (response.requestOptions.extra["veneraImage"] == true) {
+      // See [onRequest]: image requests skip the verbose response log.
+      handler.next(response);
+      return;
+    }
+    var headers = response.headers.map.map(
+      (key, value) => MapEntry(
+        key.toLowerCase(),
+        value.length == 1 ? value.first : value.toString(),
+      ),
+    );
     headers.remove("cookie");
     String content;
     if (response.data is List<int>) {
@@ -85,12 +105,13 @@ class MyLogInterceptor implements Interceptor {
       content = response.data.toString();
     }
     Log.addLog(
-        (response.statusCode != null && response.statusCode! < 400)
-            ? LogLevel.info
-            : LogLevel.error,
-        "Network",
-        "Response ${response.realUri.toString()} ${response.statusCode}\n"
-            "headers:\n$headers\n$content");
+      (response.statusCode != null && response.statusCode! < 400)
+          ? LogLevel.info
+          : LogLevel.error,
+      "Network",
+      "Response ${response.realUri.toString()} ${response.statusCode}\n"
+          "headers:\n$headers\n$content",
+    );
     handler.next(response);
   }
 
@@ -98,29 +119,23 @@ class MyLogInterceptor implements Interceptor {
   void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
     const String headerMask = "********";
     const String dataMask = "****** DATA_PROTECTED ******";
-    Log.info(
-        "Network",
-        "${options.method} ${options.uri}\n"
-            "headers:\n${
-              options.extra.containsKey("maskHeadersInLog")
-                ? options.headers.map((key, value) =>
-                  MapEntry(
-                    key,
-                    options.extra["maskHeadersInLog"].contains(key)
-                      ? headerMask
-                      : value
-                  ))
-                : options.headers
-            }\n"
-            "data:\n${
-              options.extra["maskDataInLog"] == true
-                ? dataMask
-                : options.data
-            }"
-    );
     options.connectTimeout = const Duration(seconds: 15);
     options.receiveTimeout = const Duration(seconds: 15);
     options.sendTimeout = const Duration(seconds: 15);
+    if (options.extra["veneraImage"] == true) {
+      // Comic images are the highest-frequency requests. Logging their
+      // headers/data here floods the log file and adds string construction
+      // and file writes per image; ImageDownloader logs one concise timing
+      // line per image instead. Errors are still logged in [onError].
+      handler.next(options);
+      return;
+    }
+    Log.info(
+      "Network",
+      "${options.method} ${options.uri}\n"
+          "headers:\n${options.extra.containsKey("maskHeadersInLog") ? options.headers.map((key, value) => MapEntry(key, options.extra["maskHeadersInLog"].contains(key) ? headerMask : value)) : options.headers}\n"
+          "data:\n${options.extra["maskDataInLog"] == true ? dataMask : options.data}",
+    );
     handler.next(options);
   }
 }
@@ -175,46 +190,12 @@ class AppDio with DioMixin {
 }
 
 class RHttpAdapter implements HttpClientAdapter {
-  Future<rhttp.ClientSettings> get settings async {
-    var proxy = await getProxy();
-
-    return rhttp.ClientSettings(
-      proxySettings: proxy == null
-          ? const rhttp.ProxySettings.noProxy()
-          : rhttp.ProxySettings.proxy(proxy),
-      redirectSettings: const rhttp.RedirectSettings.limited(5),
-      timeoutSettings: const rhttp.TimeoutSettings(
-        connectTimeout: Duration(seconds: 15),
-        keepAliveTimeout: Duration(seconds: 60),
-        keepAlivePing: Duration(seconds: 30),
-      ),
-      throwOnStatusCode: false,
-      dnsSettings: rhttp.DnsSettings.static(overrides: _getOverrides()),
-      tlsSettings: rhttp.TlsSettings(
-        sni: appdata.settings['sni'] != false,
-        verifyCertificates: appdata.settings['ignoreBadCertificate'] != true,
-      ),
-    );
-  }
-
-  static Map<String, List<String>> _getOverrides() {
-    if (!appdata.settings['enableDnsOverrides'] == true) {
-      return {};
-    }
-    var config = appdata.settings["dnsOverrides"];
-    var result = <String, List<String>>{};
-    if (config is Map) {
-      for (var entry in config.entries) {
-        if (entry.key is String && entry.value is String) {
-          result[entry.key] = [entry.value];
-        }
-      }
-    }
-    return result;
-  }
-
   @override
-  void close({bool force = false}) {}
+  void close({bool force = false}) {
+    // The shared rhttp client is owned by [SharedRhttpClientManager] and
+    // lives for the whole app lifetime. Closing a single Dio instance must
+    // not tear it down.
+  }
 
   @override
   Future<ResponseBody> fetch(
@@ -227,20 +208,46 @@ class RHttpAdapter implements HttpClientAdapter {
       options.headers['User-Agent'] = "venera/v${App.version}";
     }
 
-    var res = await rhttp.Rhttp.request(
-      method: rhttp.HttpMethod(options.method),
-      url: options.uri.toString(),
-      settings: await settings,
-      expectBody: rhttp.HttpExpectBody.stream,
-      body: requestStream == null ? null : rhttp.HttpBody.stream(requestStream),
-      headers: rhttp.HttpHeaders.rawMap(
-        Map.fromEntries(
-          options.headers.entries.map(
-            (e) => MapEntry(e.key, e.value.toString().trim()),
+    // Wire the Dio-level cancellation to an rhttp token so a cancelled
+    // request actually stops the transfer instead of being only abandoned
+    // on the Dart side.
+    final cancelToken = rhttp.CancelToken();
+    cancelFuture?.then((_) {
+      cancelToken.cancel().catchError((_) {});
+    });
+
+    final client = await SharedRhttpClientManager.instance.getClient();
+    final rhttp.HttpResponse res;
+    try {
+      res = await client.request(
+        method: rhttp.HttpMethod(options.method),
+        url: options.uri.toString(),
+        headers: rhttp.HttpHeaders.rawMap(
+          Map.fromEntries(
+            options.headers.entries.map(
+              (e) => MapEntry(e.key, e.value.toString().trim()),
+            ),
           ),
         ),
-      ),
-    );
+        body: requestStream == null
+            ? null
+            : rhttp.HttpBody.stream(requestStream),
+        expectBody: rhttp.HttpExpectBody.stream,
+        cancelToken: cancelToken,
+      );
+    } on rhttp.RhttpCancelException catch (e) {
+      throw DioException(
+        requestOptions: options,
+        type: DioExceptionType.cancel,
+        error: e,
+      );
+    } on rhttp.RhttpException catch (e) {
+      throw DioException(
+        requestOptions: options,
+        type: DioExceptionType.unknown,
+        error: e,
+      );
+    }
     if (res is! rhttp.HttpStreamResponse) {
       throw Exception("Invalid response type: ${res.runtimeType}");
     }

@@ -664,6 +664,11 @@ abstract mixin class _ReaderLocation {
       }
       final hasAnimation = enablePageAnimation(cid, type);
       if (hasAnimation) {
+        if (_pendingPage == page) {
+          // An animation to this page is already in flight; restarting it
+          // would retrigger the page jump machinery for no benefit.
+          return true;
+        }
         _pendingPage = page;
         final token = ++_animationToken;
         _isPageAnimating = true;
