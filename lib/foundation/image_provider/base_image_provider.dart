@@ -9,6 +9,12 @@ import 'package:flutter/material.dart';
 import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/log.dart';
 
+/// Result of a provider [BaseImageProvider.load] call: the image bytes plus
+/// the disk cache key ([CacheManager]) the bytes came from, if any. On
+/// decode failure the entry is deleted so the next load re-downloads instead
+/// of serving the corrupted bytes forever.
+typedef LoadResult = ({Uint8List bytes, String? cacheKey});
+
 abstract class BaseImageProvider<T extends BaseImageProvider<T>>
     extends ImageProvider<T> {
   const BaseImageProvider();
@@ -83,7 +89,13 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
         stop = true;
       };
 
-      Uint8List? data;
+      LoadResult? data;
+
+      // Number of times the loaded bytes failed to decode. The first failure
+      // purges the poisoned cache entry and reloads (fresh network bytes);
+      // a second failure means the server itself serves bad data, so the
+      // error is surfaced instead of looping forever.
+      var decodeFailures = 0;
 
       while (data == null && !stop) {
         try {
@@ -116,34 +128,57 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
           }
           await Future.delayed(Duration(seconds: retryTime));
         }
+
+        if (data == null) {
+          continue;
+        }
+
+        if (stop) {
+          throw const _ImageLoadingStopException();
+        }
+
+        if (data.bytes.isEmpty) {
+          throw Exception("Empty image data");
+        }
+
+        try {
+          final buffer = await ImmutableBuffer.fromUint8List(data.bytes);
+          return await decode(buffer, getTargetSize: _getTargetSize);
+        } catch (e) {
+          // The bytes could not be decoded. Purge the exact disk cache entry
+          // they came from (the provider key is an identity key and does NOT
+          // match the CacheManager key), so the retry below re-downloads
+          // instead of failing forever on a poisoned entry.
+          final cacheKey = data.cacheKey;
+          if (cacheKey != null) {
+            await CacheManager().delete(cacheKey);
+          }
+          if (data.bytes.length < 2 * 1024) {
+            // data is too short, it's likely that the data is text, not image
+            try {
+              var text = const Utf8Codec(
+                allowMalformed: false,
+              ).decoder.convert(data.bytes);
+              throw Exception("Expected image data, but got text: $text");
+            } catch (e) {
+              // ignore
+            }
+          }
+          decodeFailures++;
+          if (cacheKey == null || decodeFailures >= 2 || stop) {
+            rethrow;
+          }
+          // The poisoned entry is gone; reload to fetch fresh bytes.
+          data = null;
+        }
       }
 
       if (stop) {
         throw const _ImageLoadingStopException();
       }
 
-      if (data!.isEmpty) {
-        throw Exception("Empty image data");
-      }
-
-      try {
-        final buffer = await ImmutableBuffer.fromUint8List(data);
-        return await decode(buffer, getTargetSize: _getTargetSize);
-      } catch (e) {
-        await CacheManager().delete(this.key);
-        if (data.length < 2 * 1024) {
-          // data is too short, it's likely that the data is text, not image
-          try {
-            var text = const Utf8Codec(
-              allowMalformed: false,
-            ).decoder.convert(data);
-            throw Exception("Expected image data, but got text: $text");
-          } catch (e) {
-            // ignore
-          }
-        }
-        rethrow;
-      }
+      // Unreachable: the loop above either returns a decoded frame or throws.
+      throw Exception("Empty image data");
     } on _ImageLoadingStopException {
       rethrow;
     } catch (e, s) {
@@ -157,7 +192,7 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
     }
   }
 
-  Future<Uint8List> load(
+  Future<LoadResult> load(
     StreamController<ImageChunkEvent> chunkEvents,
     void Function() checkStop,
   );

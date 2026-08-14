@@ -16,7 +16,7 @@ class LocalComicImageProvider
   final LocalComic comic;
 
   @override
-  Future<Uint8List> load(chunkEvents, checkStop) async {
+  Future<LoadResult> load(chunkEvents, checkStop) async {
     File? file = comic.coverFile;
     if(! await file.exists()) {
       file = null;
@@ -54,7 +54,7 @@ class LocalComicImageProvider
     if(data.isEmpty) {
       throw "Exception: Empty file(${file.path}).";
     }
-    return data;
+    return (bytes: data, cacheKey: null);
   }
 
   @override

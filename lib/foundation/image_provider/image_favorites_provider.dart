@@ -7,6 +7,7 @@ import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/network/images.dart';
+import 'package:venera/utils/image.dart' show isLikelyImageBytes;
 import 'package:venera/utils/io.dart';
 import '../history.dart';
 import 'base_image_provider.dart';
@@ -28,7 +29,7 @@ class ImageFavoritesProvider
   String get eid => imageFavorite.eid;
 
   @override
-  Future<Uint8List> load(
+  Future<LoadResult> load(
     StreamController<ImageChunkEvent>? chunkEvents,
     void Function()? checkStop,
   ) async {
@@ -36,12 +37,12 @@ class ImageFavoritesProvider
     var localImage = await getImageFromLocal();
     checkStop?.call();
     if (localImage != null) {
-      return localImage;
+      return (bytes: localImage, cacheKey: null);
     }
     var cacheImage = await readFromCache();
     checkStop?.call();
     if (cacheImage != null) {
-      return cacheImage;
+      return (bytes: cacheImage, cacheKey: null);
     }
     var gotImageKey = false;
     if (imageKey == "") {
@@ -61,7 +62,15 @@ class ImageFavoritesProvider
       }
     }
     await writeToCache(image);
-    return image;
+    return (
+      bytes: image,
+      cacheKey: ImageDownloader.comicImageCacheKey(
+        imageKey,
+        sourceKey,
+        cid,
+        eid,
+      ),
+    );
   }
 
   Future<void> writeToCache(Uint8List image) async {
@@ -79,7 +88,14 @@ class ImageFavoritesProvider
     if (!file.existsSync()) {
       return null;
     }
-    return await file.readAsBytes();
+    var data = await file.readAsBytes();
+    if (!isLikelyImageBytes(data)) {
+      // A poisoned entry (e.g. an HTML error page cached as an image):
+      // drop it so the next load falls back to the network.
+      await file.delete();
+      return null;
+    }
+    return data;
   }
 
   /// Delete a image favorite cache
@@ -92,8 +108,10 @@ class ImageFavoritesProvider
   }
 
   Future<Uint8List?> getImageFromLocal() async {
-    var localComic =
-        LocalManager().find(sourceKey, ComicType.fromKey(sourceKey));
+    var localComic = LocalManager().find(
+      sourceKey,
+      ComicType.fromKey(sourceKey),
+    );
     if (localComic == null) {
       return null;
     }
@@ -115,14 +133,20 @@ class ImageFavoritesProvider
     StreamController<ImageChunkEvent>? chunkEvents,
     void Function()? checkStop,
   ) async {
-    await for (var progress
-        in ImageDownloader.loadComicImage(imageKey, sourceKey, cid, eid)) {
+    await for (var progress in ImageDownloader.loadComicImage(
+      imageKey,
+      sourceKey,
+      cid,
+      eid,
+    )) {
       checkStop?.call();
       if (chunkEvents != null) {
-        chunkEvents.add(ImageChunkEvent(
-          cumulativeBytesLoaded: progress.currentBytes,
-          expectedTotalBytes: progress.totalBytes,
-        ));
+        chunkEvents.add(
+          ImageChunkEvent(
+            cumulativeBytesLoaded: progress.currentBytes,
+            expectedTotalBytes: progress.totalBytes,
+          ),
+        );
       }
       if (progress.imageBytes != null) {
         return progress.imageBytes!;

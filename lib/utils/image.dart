@@ -293,6 +293,41 @@ class JsEngine {
 
 var _tasksCount = 0;
 
+/// Lightweight image sniffing: returns false when [data] is clearly not an
+/// image (too short, or mostly printable ASCII like an HTML error page).
+/// Unknown binary formats are treated as images to avoid false positives.
+bool isLikelyImageBytes(Uint8List data) {
+  if (data.length < 8) {
+    return false;
+  }
+  // Common image magic numbers.
+  if (data[0] == 0xFF && data[1] == 0xD8) return true; // JPEG
+  if (data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E) return true; // PNG
+  if (data[0] == 0x47 && data[1] == 0x49 && data[2] == 0x46) return true; // GIF
+  if (data[0] == 0x42 && data[1] == 0x4D) return true; // BMP
+  if (data[0] == 0x52 &&
+      data[1] == 0x49 &&
+      data[2] == 0x46 &&
+      data[3] == 0x46) {
+    return true; // RIFF (WebP)
+  }
+  if (data[0] == 0xFF && data[1] == 0x0A) return true; // JPEG XL
+  if (data[4] == 0x66 && data[5] == 0x74 && data[6] == 0x79 && data[7] == 0x70) {
+    return true; // ISO-BMFF (AVIF/HEIC)
+  }
+  // Fallback: if the head is mostly printable ASCII, it is probably a text
+  // error page (HTML/JSON); treat any other content as an image.
+  final n = data.length < 64 ? data.length : 64;
+  var printable = 0;
+  for (var i = 0; i < n; i++) {
+    final b = data[i];
+    if (b == 9 || b == 10 || b == 13 || (b >= 32 && b < 127)) {
+      printable++;
+    }
+  }
+  return printable * 2 < n;
+}
+
 Future<Uint8List> modifyImageWithScript(Uint8List data, String script) async {
   while (_tasksCount > 3) {
     await Future.delayed(const Duration(milliseconds: 200));

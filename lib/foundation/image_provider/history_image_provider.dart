@@ -17,33 +17,52 @@ class HistoryImageProvider
   final History history;
 
   @override
-  Future<Uint8List> load(chunkEvents, checkStop) async {
+  Future<LoadResult> load(chunkEvents, checkStop) async {
     var url = history.cover;
     if (!url.contains('/')) {
       var localComic = LocalManager().find(history.id, history.type);
       if (localComic != null) {
-        return localComic.coverFile.readAsBytes();
+        var data = await localComic.coverFile.readAsBytes();
+        checkStop();
+        return (bytes: data, cacheKey: null);
       }
       var comicSource =
           history.type.comicSource ?? (throw "Comic source not found.");
       var comic = await comicSource.loadComicInfo!(history.id);
       checkStop();
+      if (comic.error) {
+        throw comic.errorMessage ?? "Error: Failed to load comic info.";
+      }
       url = comic.data.cover;
-      history.cover = url;
-      HistoryManager().addHistory(history);
+      if (url != history.cover) {
+        // Only persist when the URL actually changed; otherwise every image
+        // load would trigger a DB write and a rebuild of the history list.
+        history.cover = url;
+        HistoryManager().addHistory(history);
+      }
     }
+    // History.sourceKey falls back to "Unknown:..." for uninstalled sources,
+    // while ComicType.sourceKey would throw a null check error.
+    var sourceKey = history.sourceKey;
+    final cacheKey = ImageDownloader.thumbnailCacheKey(
+      url,
+      sourceKey,
+      history.id,
+    );
     await for (var progress in ImageDownloader.loadThumbnail(
       url,
-      history.type.sourceKey,
+      sourceKey,
       history.id,
     )) {
       checkStop();
-      chunkEvents.add(ImageChunkEvent(
-        cumulativeBytesLoaded: progress.currentBytes,
-        expectedTotalBytes: progress.totalBytes,
-      ));
+      chunkEvents.add(
+        ImageChunkEvent(
+          cumulativeBytesLoaded: progress.currentBytes,
+          expectedTotalBytes: progress.totalBytes,
+        ),
+      );
       if (progress.imageBytes != null) {
-        return progress.imageBytes!;
+        return (bytes: progress.imageBytes!, cacheKey: cacheKey);
       }
     }
     throw "Error: Empty response body.";

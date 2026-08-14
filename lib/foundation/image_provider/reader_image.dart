@@ -31,8 +31,9 @@ class ReaderImageProvider
   final int page;
 
   @override
-  Future<Uint8List> load(chunkEvents, checkStop) async {
+  Future<LoadResult> load(chunkEvents, checkStop) async {
     Uint8List? imageBytes;
+    String? cacheKey;
     if (imageKey.startsWith('file://')) {
       var file = File(imageKey);
       if (await file.exists()) {
@@ -41,6 +42,12 @@ class ReaderImageProvider
         throw "Error: File not found.";
       }
     } else {
+      cacheKey = ImageDownloader.comicImageCacheKey(
+        imageKey,
+        sourceKey,
+        cid,
+        eid,
+      );
       await for (var event in ImageDownloader.loadComicImage(
         imageKey,
         sourceKey,
@@ -66,7 +73,7 @@ class ReaderImageProvider
     if (appdata.settings['enableCustomImageProcessing']) {
       var script = appdata.settings['customImageProcessing'].toString();
       if (!script.contains('function processImage')) {
-        return imageBytes;
+        return (bytes: imageBytes, cacheKey: cacheKey);
       }
       var func = JsEngine().runCode('''
         (() => {
@@ -121,7 +128,7 @@ class ReaderImageProvider
         }
       }
     }
-    return imageBytes!;
+    return (bytes: imageBytes!, cacheKey: cacheKey);
   }
 
   @override

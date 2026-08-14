@@ -156,4 +156,39 @@ void main() {
     db.dispose();
     manager.flushPendingExpiryUpdates();
   });
+
+  test('writeCache is atomic and leaves no temp files behind', () async {
+    final manager = createManager();
+    await manager.ready;
+
+    await manager.writeCache('atomic', List.filled(1024, 7));
+    final file = await manager.findCache('atomic');
+    expect(file, isNotNull);
+    expect(await file!.readAsBytes(), List.filled(1024, 7));
+    expect(
+      Directory(cacheDir.path)
+          .listSync(recursive: true)
+          .whereType<File>()
+          .where((f) => f.path.contains('.tmp-')),
+      isEmpty,
+      reason: 'temp files must be renamed away after a successful write',
+    );
+    manager.flushPendingExpiryUpdates();
+  });
+
+  test('a write during the startup scan is not deleted as an orphan', () async {
+    // The orphan scan captures its managed-set snapshot at the start; a file
+    // written while it runs must not be treated as unmanaged.
+    final manager = createManager();
+    await manager.writeCache('early', [1, 2, 3]);
+    await manager.ready;
+
+    expect(
+      await manager.findCache('early'),
+      isNotNull,
+      reason: 'an entry written before the scan finished must survive',
+    );
+    expect(manager.currentSize, 3);
+    manager.flushPendingExpiryUpdates();
+  });
 }

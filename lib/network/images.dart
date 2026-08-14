@@ -17,12 +17,35 @@ abstract class ImageDownloader {
   /// spikes, GC pauses and frame drops).
   static final _downloadSemaphore = _DownloadSemaphore(3);
 
+  /// Builds the disk cache key used by [loadThumbnail].
+  ///
+  /// Providers must report this key back through `LoadResult.cacheKey` so a
+  /// failed decode can purge the exact entry that produced the bytes.
+  static String thumbnailCacheKey(
+    String url,
+    String? sourceKey, [
+    String? cid,
+  ]) => "$url@$sourceKey${cid != null ? '@$cid' : ''}";
+
+  /// Builds the disk cache key used by [_loadComicImage].
+  static String comicImageCacheKey(
+    String imageKey,
+    String? sourceKey,
+    String cid,
+    String eid,
+  ) => "$imageKey@$sourceKey@$cid@$eid";
+
+  /// Whether [url] is a placeholder cover that must be resolved through
+  /// `loadComicInfo` before it can be downloaded.
+  static bool isCoverPlaceholder(String url) =>
+      url.startsWith('cover.') || url.startsWith('cover/');
+
   static Stream<ImageDownloadProgress> loadThumbnail(
     String url,
     String? sourceKey, [
     String? cid,
   ]) async* {
-    final cacheKey = "$url@$sourceKey${cid != null ? '@$cid' : ''}";
+    final cacheKey = thumbnailCacheKey(url, sourceKey, cid);
     final cache = await CacheManager().findCache(cacheKey);
 
     if (cache != null) {
@@ -49,12 +72,25 @@ abstract class ImageDownloader {
       configs['headers']['user-agent'] = webUA;
     }
 
-    if (((configs['url'] as String?) ?? url).startsWith('cover.') &&
+    if (isCoverPlaceholder((configs['url'] as String?) ?? url) &&
         sourceKey != null) {
       var comicSource = ComicSource.find(sourceKey);
-      if (comicSource != null) {
-        var comicInfo = await comicSource.loadComicInfo!(cid!);
-        yield* loadThumbnail(comicInfo.data.cover, sourceKey);
+      if (comicSource != null && comicSource.loadComicInfo != null) {
+        if (cid == null) {
+          throw "Error: Cannot resolve a cover placeholder without a comic id.";
+        }
+        var comicInfo = await comicSource.loadComicInfo!(cid);
+        if (comicInfo.error) {
+          throw comicInfo.errorMessage ?? "Error: Failed to load comic info.";
+        }
+        var resolved = comicInfo.data.cover;
+        if (isCoverPlaceholder(resolved)) {
+          throw "Error: Comic source returned an invalid cover: $resolved";
+        }
+        // Keep the cid in the recursive call: the resolved URL must share
+        // the same cache entry as the display path (url@source@cid), and a
+        // second-level placeholder must not be resolved again with a null id.
+        yield* loadThumbnail(resolved, sourceKey, cid);
         return;
       }
     }
@@ -162,7 +198,7 @@ abstract class ImageDownloader {
     String eid,
     CancelToken cancelToken,
   ) async* {
-    final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
+    final cacheKey = comicImageCacheKey(imageKey, sourceKey, cid, eid);
     final cache = await CacheManager().findCache(cacheKey);
 
     if (cache != null) {

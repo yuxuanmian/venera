@@ -52,6 +52,9 @@ class CacheManager {
   /// Keys whose sliding expiry was renewed in memory but not yet flushed.
   final Set<String> _dirtyExpiry = {};
 
+  /// Monotonic counter making concurrent temp-file names unique.
+  static int _writeSeq = 0;
+
   Timer? _flushTimer;
 
   final Completer<void> _ready = Completer<void>();
@@ -187,6 +190,11 @@ class CacheManager {
     List<int> data, [
     int duration = defaultDuration,
   ]) async {
+    // Wait for the startup pass: the orphan scan captures its managed-set
+    // snapshot up front, so a file written while the scan is running could
+    // be deleted as an orphan. `ready` always completes (also on scan
+    // errors), so this cannot deadlock.
+    await ready;
     // The old row (if any) is located through the in-memory index, avoiding
     // the SELECT the previous implementation needed for every write.
     final old = _index[key];
@@ -207,9 +215,14 @@ class CacheManager {
     this.dir %= 100;
     var dir = this.dir;
     var name = md5.convert(key.codeUnits).toString();
+    // Atomic write: a crash mid-write must not leave a partial file behind a
+    // valid DB row (the decode layer would fail on it forever). Temp files
+    // left by a crash are unmanaged and cleaned up by the startup scan.
+    var tmpFile = File('$_cachePath/$dir/.tmp-$name-${_writeSeq++}');
     var file = File('$_cachePath/$dir/$name');
-    await file.create(recursive: true);
-    await file.writeAsBytes(data);
+    await tmpFile.create(recursive: true);
+    await tmpFile.writeAsBytes(data);
+    await tmpFile.rename(file.path);
     var expires = DateTime.now().millisecondsSinceEpoch + duration;
     // The insert stays immediate: if the process dies right after the file
     // write, the row is already durable and the file is never orphaned.

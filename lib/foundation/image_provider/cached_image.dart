@@ -13,7 +13,8 @@ class CachedImageProvider
   /// Image provider for normal image.
   ///
   /// [url] is the url of the image. Local file path is also supported.
-  const CachedImageProvider(this.url, {
+  const CachedImageProvider(
+    this.url, {
     this.headers,
     this.sourceKey,
     this.cid,
@@ -36,30 +37,36 @@ class CachedImageProvider
   static const _kMaxLoadingCount = 8;
 
   @override
-  Future<Uint8List> load(chunkEvents, checkStop) async {
-    while(loadingCount > _kMaxLoadingCount) {
+  Future<LoadResult> load(chunkEvents, checkStop) async {
+    while (loadingCount > _kMaxLoadingCount) {
       await Future.delayed(const Duration(milliseconds: 100));
       checkStop();
     }
     loadingCount++;
     try {
-      if(url.startsWith("file://")) {
+      if (url.startsWith("file://")) {
         var file = File(url.substring(7));
-        return file.readAsBytes();
+        return (bytes: await file.readAsBytes(), cacheKey: null);
       }
-      await for (var progress in ImageDownloader.loadThumbnail(url, sourceKey, cid)) {
+      final cacheKey = ImageDownloader.thumbnailCacheKey(url, sourceKey, cid);
+      await for (var progress in ImageDownloader.loadThumbnail(
+        url,
+        sourceKey,
+        cid,
+      )) {
         checkStop();
-        chunkEvents.add(ImageChunkEvent(
-          cumulativeBytesLoaded: progress.currentBytes,
-          expectedTotalBytes: progress.totalBytes,
-        ));
-        if(progress.imageBytes != null) {
-          return progress.imageBytes!;
+        chunkEvents.add(
+          ImageChunkEvent(
+            cumulativeBytesLoaded: progress.currentBytes,
+            expectedTotalBytes: progress.totalBytes,
+          ),
+        );
+        if (progress.imageBytes != null) {
+          return (bytes: progress.imageBytes!, cacheKey: cacheKey);
         }
       }
       throw "Error: Empty response body.";
-    }
-    catch(e) {
+    } catch (e) {
       if (fallbackToLocalCover && sourceKey != null && cid != null) {
         final localComic = LocalManager().find(
           cid!,
@@ -70,14 +77,13 @@ class CachedImageProvider
           if (await file.exists()) {
             var data = await file.readAsBytes();
             if (data.isNotEmpty) {
-              return data;
+              return (bytes: data, cacheKey: null);
             }
           }
         }
       }
       rethrow;
-    }
-    finally {
+    } finally {
       loadingCount--;
     }
   }

@@ -295,7 +295,8 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
       var res = await _runWithRetry(() async {
         Uint8List? data;
         await for (var progress
-            in ImageDownloader.loadThumbnail(comic!.cover, source.key)) {
+            in ImageDownloader.loadThumbnail(
+                comic!.cover, source.key, comicId)) {
           if (progress.imageBytes != null) {
             data = progress.imageBytes;
           }
