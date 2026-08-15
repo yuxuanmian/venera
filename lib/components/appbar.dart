@@ -674,6 +674,88 @@ abstract mixin class _SearchBarMixin {
   String getText();
 }
 
+/// Detect large text insertions (e.g. paste) in a [TextField] and report the
+/// inserted text. It never modifies the editing value.
+class _PasteDetectFormatter extends TextInputFormatter {
+  _PasteDetectFormatter(this.onInsertedText);
+
+  final void Function(String text) onInsertedText;
+
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    var inserted = insertedText(oldValue.text, newValue.text);
+    if (inserted != null && inserted.isNotEmpty) {
+      onInsertedText(inserted);
+    }
+    return newValue;
+  }
+}
+
+/// Shared paste-to-id logic for search bars: when pasted text contains digits
+/// (5 or more in total), show a toast offering to extract the concatenated
+/// number into the search box.
+mixin _PasteExtractMixin<T extends StatefulWidget> on State<T> {
+  TextEditingController get editingController;
+
+  void Function(String)? get onChangedCallback;
+
+  late final _PasteDetectFormatter _pasteDetectFormatter;
+
+  late final List<TextInputFormatter> pasteInputFormatters =
+      [_pasteDetectFormatter];
+
+  String? _lastPromptedInserted;
+
+  ToastHandle? _activeToast;
+
+  void initPasteExtract() {
+    _pasteDetectFormatter = _PasteDetectFormatter(_handlePastedText);
+  }
+
+  /// Called on every user edit of the search text (TextField.onChanged).
+  /// Resets the duplicate-paste guard so the same content can trigger the
+  /// recognition prompt again after it was deleted or modified.
+  void onSearchTextEdited(String text) {
+    _lastPromptedInserted = null;
+  }
+
+  void _handlePastedText(String inserted) {
+    var number = extractIdFromText(inserted);
+    if (number == null || inserted == _lastPromptedInserted) {
+      return;
+    }
+    _lastPromptedInserted = inserted;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      _activeToast = showToast(
+        context: context,
+        message: "Detected number @a in pasted text".tlParams({'a': number}),
+        trailing: TextButton(
+          onPressed: () {
+            editingController.text = number;
+            onChangedCallback?.call(number);
+            _activeToast?.dismiss();
+          },
+          child: Text("Extract".tl),
+        ),
+        seconds: 5,
+        followTheme: true,
+      );
+    });
+  }
+
+  @override
+  void dispose() {
+    _activeToast?.dismiss();
+    super.dispose();
+  }
+}
+
 class SliverSearchBar extends StatefulWidget {
   const SliverSearchBar({
     super.key,
@@ -696,16 +778,23 @@ class SliverSearchBar extends StatefulWidget {
 }
 
 class _SliverSearchBarState extends State<SliverSearchBar>
-    with _SearchBarMixin {
+    with _SearchBarMixin, _PasteExtractMixin {
   late TextEditingController _editingController;
 
   late SearchBarController _controller;
+
+  @override
+  TextEditingController get editingController => _editingController;
+
+  @override
+  void Function(String)? get onChangedCallback => widget.onChanged;
 
   @override
   void initState() {
     _controller = widget.controller;
     _controller._state = this;
     _editingController = TextEditingController(text: _controller.currentText);
+    initPasteExtract();
     super.initState();
   }
 
@@ -727,9 +816,13 @@ class _SliverSearchBarState extends State<SliverSearchBar>
         editingController: _editingController,
         controller: _controller,
         topPadding: MediaQuery.of(context).padding.top,
-        onChanged: widget.onChanged,
+        onChanged: (text) {
+          onSearchTextEdited(text);
+          widget.onChanged?.call(text);
+        },
         action: widget.action,
         focusNode: widget.focusNode,
+        inputFormatters: pasteInputFormatters,
       ),
     );
   }
@@ -748,6 +841,8 @@ class _SliverSearchBarDelegate extends SliverPersistentHeaderDelegate {
 
   final FocusNode? focusNode;
 
+  final List<TextInputFormatter> inputFormatters;
+
   const _SliverSearchBarDelegate({
     required this.editingController,
     required this.controller,
@@ -755,6 +850,7 @@ class _SliverSearchBarDelegate extends SliverPersistentHeaderDelegate {
     this.onChanged,
     this.action,
     this.focusNode,
+    this.inputFormatters = const [],
   });
 
   static const _kAppBarHeight = 52.0;
@@ -784,6 +880,7 @@ class _SliverSearchBarDelegate extends SliverPersistentHeaderDelegate {
               child: TextField(
                 focusNode: focusNode,
                 controller: editingController,
+                inputFormatters: inputFormatters,
                 decoration: InputDecoration(
                   hintText: "Search".tl,
                   border: InputBorder.none,
@@ -828,7 +925,8 @@ class _SliverSearchBarDelegate extends SliverPersistentHeaderDelegate {
     return oldDelegate is! _SliverSearchBarDelegate ||
         editingController != oldDelegate.editingController ||
         controller != oldDelegate.controller ||
-        topPadding != oldDelegate.topPadding;
+        topPadding != oldDelegate.topPadding ||
+        inputFormatters != oldDelegate.inputFormatters;
   }
 }
 
@@ -843,10 +941,17 @@ class AppSearchBar extends StatefulWidget {
   State<AppSearchBar> createState() => _SearchBarState();
 }
 
-class _SearchBarState extends State<AppSearchBar> with _SearchBarMixin {
+class _SearchBarState extends State<AppSearchBar>
+    with _SearchBarMixin, _PasteExtractMixin {
   late TextEditingController _editingController;
 
   late SearchBarController _controller;
+
+  @override
+  TextEditingController get editingController => _editingController;
+
+  @override
+  void Function(String)? get onChangedCallback => null;
 
   @override
   void setText(String text) {
@@ -863,6 +968,7 @@ class _SearchBarState extends State<AppSearchBar> with _SearchBarMixin {
     _controller = widget.controller;
     _controller._state = this;
     _editingController = TextEditingController(text: _controller.currentText);
+    initPasteExtract();
     super.initState();
   }
 
@@ -889,6 +995,8 @@ class _SearchBarState extends State<AppSearchBar> with _SearchBarMixin {
               padding: const EdgeInsets.symmetric(horizontal: 8),
               child: TextField(
                 controller: _editingController,
+                inputFormatters: pasteInputFormatters,
+                onChanged: onSearchTextEdited,
                 decoration: InputDecoration(
                   hintText: "Search".tl,
                   border: InputBorder.none,
@@ -909,6 +1017,7 @@ class _SearchBarState extends State<AppSearchBar> with _SearchBarMixin {
                       icon: const Icon(Icons.clear),
                       onPressed: () {
                         _editingController.clear();
+                        onSearchTextEdited('');
                       },
                     );
             },

@@ -1,28 +1,62 @@
 part of "components.dart";
 
-void showToast({
+/// A handle to dismiss a toast shown by [showToast] before its auto-dismiss
+/// timer fires.
+class ToastHandle {
+  ToastHandle._(this._timer, this._state, this._entry);
+
+  final Timer _timer;
+
+  final OverlayWidgetState? _state;
+
+  final OverlayEntry _entry;
+
+  bool _closed = false;
+
+  /// Dismiss the toast immediately.
+  void dismiss() {
+    if (_closed) {
+      return;
+    }
+    _closed = true;
+    _timer.cancel();
+    _state?.remove(_entry);
+  }
+}
+
+ToastHandle? showToast({
   required String message,
   required BuildContext context,
   Widget? icon,
   Widget? trailing,
   int? seconds,
+  bool followTheme = false,
 }) {
   var newEntry = OverlayEntry(
       builder: (context) => _ToastOverlay(
             message: message,
             icon: icon,
             trailing: trailing,
+            followTheme: followTheme,
           ));
 
   var state = context.findAncestorStateOfType<OverlayWidgetState>();
 
   state?.addOverlay(newEntry);
 
-  Timer(Duration(seconds: seconds ?? 2), () => state?.remove(newEntry));
+  var timer =
+      Timer(Duration(seconds: seconds ?? 2), () => state?.remove(newEntry));
+
+  return ToastHandle._(timer, state, newEntry);
 }
 
 class _ToastOverlay extends StatelessWidget {
-  const _ToastOverlay({required this.message, this.icon, this.trailing});
+  const _ToastOverlay({
+    required this.message,
+    this.icon,
+    this.trailing,
+    this.followTheme = false,
+  });
 
   final String message;
 
@@ -30,8 +64,17 @@ class _ToastOverlay extends StatelessWidget {
 
   final Widget? trailing;
 
+  /// Use the theme surface colors instead of the inverse surface, so the
+  /// toast follows the app theme (dark on dark themes, light on light themes).
+  final bool followTheme;
+
   @override
   Widget build(BuildContext context) {
+    var scheme = Theme.of(context).colorScheme;
+    var background = followTheme
+        ? scheme.surfaceContainerHigh
+        : scheme.inverseSurface;
+    var foreground = followTheme ? scheme.onSurface : scheme.onInverseSurface;
     return Positioned(
       bottom: 24 + MediaQuery.of(context).viewInsets.bottom,
       left: 0,
@@ -39,14 +82,12 @@ class _ToastOverlay extends StatelessWidget {
       child: Align(
         alignment: Alignment.bottomCenter,
         child: Material(
-          color: Theme.of(context).colorScheme.inverseSurface,
+          color: background,
           borderRadius: BorderRadius.circular(8),
           elevation: 2,
-          textStyle:
-              ts.withColor(Theme.of(context).colorScheme.onInverseSurface),
+          textStyle: ts.withColor(foreground),
           child: IconTheme(
-            data: IconThemeData(
-                color: Theme.of(context).colorScheme.onInverseSurface),
+            data: IconThemeData(color: foreground),
             child: IntrinsicWidth(
               child: Container(
                 padding:

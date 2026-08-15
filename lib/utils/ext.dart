@@ -97,6 +97,37 @@ extension StringExt on String{
   bool get isInt => int.tryParse(this) != null;
 }
 
+/// Return the text inserted into [oldText] to get [newText],
+/// or null when nothing was inserted (deletion or replacement).
+String? insertedText(String oldText, String newText) {
+  if (newText.length <= oldText.length) {
+    return null;
+  }
+  var prefix = 0;
+  while (prefix < oldText.length && oldText[prefix] == newText[prefix]) {
+    prefix++;
+  }
+  var suffix = 0;
+  while (suffix < oldText.length - prefix &&
+      suffix < newText.length - prefix &&
+      oldText[oldText.length - 1 - suffix] ==
+          newText[newText.length - 1 - suffix]) {
+    suffix++;
+  }
+  return newText.substring(prefix, newText.length - suffix);
+}
+
+/// Concatenate all digits in [text] in order as a candidate id.
+/// Return null when the total digit count is less than [minDigits],
+/// or when [text] itself is already nothing but digits (nothing to extract).
+String? extractIdFromText(String text, {int minDigits = 5}) {
+  var nums = text.nums;
+  if (nums.length < minDigits || text == nums) {
+    return null;
+  }
+  return nums;
+}
+
 abstract class ListOrNull{
   static List<T>? from<T>(Iterable<dynamic>? i){
     return i == null ? null : List.from(i);
