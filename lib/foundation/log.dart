@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/utils/ext.dart';
@@ -104,6 +105,20 @@ class Log {
   }
 
   static void clear() => _logs.clear();
+
+  /// Exports the in-memory log list as `log.txt`.
+  ///
+  /// Android shares the file through the system share sheet: the classic
+  /// save-file dialog is painful there and forwarding is inconvenient. All
+  /// other platforms keep the save-file dialog.
+  static Future<void> exportLog() async {
+    var data = utf8.encode(Log().toString());
+    if (App.isAndroid) {
+      Share.shareFile(data: data, filename: 'log.txt', mime: 'text/plain');
+    } else {
+      await saveFile(data: data, filename: 'log.txt');
+    }
+  }
 
   @override
   String toString() {

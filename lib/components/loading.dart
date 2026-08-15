@@ -51,12 +51,7 @@ class NetworkError extends StatelessWidget {
             maxLines: 3,
           ),
           TextButton(
-            onPressed: () {
-              saveFile(
-                data: utf8.encode(Log().toString()),
-                filename: 'log.txt',
-              );
-            },
+            onPressed: () => Log.exportLog(),
             child: Text("Export logs".tl),
           ),
           const SizedBox(height: 8),

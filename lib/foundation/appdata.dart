@@ -14,6 +14,9 @@ class Appdata with Init {
 
   final Settings settings = Settings._create();
 
+  /// Whether the global developer-mode switch (Settings -> Debug) is on.
+  bool get developerMode => settings['developerMode'] == true;
+
   var searchHistory = <String>[];
 
   bool _isSavingData = false;
@@ -92,6 +95,7 @@ class Appdata with Init {
     "webdav",
     "disableSyncFields",
     "deviceId",
+    "developerMode",
   ];
 
   /// Sync data from another device
@@ -234,6 +238,7 @@ class Settings with ChangeNotifier {
     'showChapterComments': true, // show chapter comments in reader
     'showChapterCommentsAtEnd':
         false, // show chapter comments at end of chapter
+    'developerMode': false, // show debug info in comic details
   };
 
   operator [](String key) {

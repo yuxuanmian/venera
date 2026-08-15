@@ -45,7 +45,7 @@
 - 不要把镜像地址变化、Flutter 版本变化或无关的传递依赖升级混入 `pubspec.lock`。本地 Flutter 与项目固定版本不同时，先报告差异。
 - 多个依赖固定到 Git commit；升级时阅读对应 fork 的变更，并做相关平台构建验证。
 - 不手工修改 `.dart_tool/`、`build/`、`.flutter-plugins-dependencies` 等生成物，也不要提交它们。
-- 保留用户已有工作区改动。开始和结束时运行 `git status --short`，不要顺手修复或格式化任务范围外的文件。
+- 保留用户已有工作区改动。开始和结束时运行 `git status --short`，
 
 ## 修改与验证
 

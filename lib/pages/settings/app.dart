@@ -256,7 +256,7 @@ class _LogsPageState extends State<LogsPage> {
                       ),
                       PopupMenuItem(
                         child: Text("Export".tl),
-                        onTap: () => saveLog(Log().toString()),
+                        onTap: () => Log.exportLog(),
                       ),
                     ]);
                   }),
@@ -335,10 +335,6 @@ class _LogsPageState extends State<LogsPage> {
         },
       ),
     );
-  }
-
-  void saveLog(String log) async {
-    saveFile(data: utf8.encode(log), filename: 'log.txt');
   }
 }
 

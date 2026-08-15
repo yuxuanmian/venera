@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -40,6 +41,8 @@ part 'comments_preview.dart';
 part 'actions.dart';
 
 part 'cover_viewer.dart';
+
+part 'debug.dart';
 
 class ComicPage extends StatefulWidget {
   const ComicPage({

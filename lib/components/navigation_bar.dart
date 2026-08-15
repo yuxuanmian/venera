@@ -65,7 +65,7 @@ class NaviPane extends StatefulWidget {
 typedef NaviItemTapListener = void Function(int);
 
 class NaviPaneState extends State<NaviPane>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   bool _canPop = true;
 
   late int _currentPage = widget.initialPage;
@@ -104,7 +104,7 @@ class NaviPaneState extends State<NaviPane>
       _kBottomBarHeight + MediaQuery.of(context).padding.bottom;
 
   void onNavigatorStateChange() {
-    onRebuild(context);
+    onRebuild(_mediaQueryData() ?? MediaQueryData());
   }
 
   void updatePage(int index) {
@@ -132,18 +132,20 @@ class NaviPaneState extends State<NaviPane>
       vsync: this,
     );
     widget.observer.addListener(onNavigatorStateChange);
+    WidgetsBinding.instance.addObserver(this);
     super.initState();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     controller.dispose();
     widget.observer.removeListener(onNavigatorStateChange);
     super.dispose();
   }
 
-  double targetFormContext(BuildContext context) {
-    var width = MediaQuery.of(context).size.width;
+  double targetFormContext(MediaQueryData mq) {
+    var width = mq.size.width;
     double target = 0;
     if (width > changePoint) {
       target = 2;
@@ -156,8 +158,61 @@ class NaviPaneState extends State<NaviPane>
 
   double? animationTarget;
 
-  void onRebuild(BuildContext context) {
-    double target = targetFormContext(context);
+  /// Snapshot of the metrics this pane's layout depends on, read without
+  /// registering a [MediaQuery] dependency. Keyboard inset (viewInsets)
+  /// changes therefore don't rebuild the pane and its whole navigator subtree
+  /// on every animation frame; [didChangeMetrics] re-syncs the snapshot when
+  /// the metrics that matter (size / viewPadding / systemGestureInsets)
+  /// actually change, e.g. rotation or window resize.
+  ({Size size, EdgeInsets viewPadding, EdgeInsets systemGestureInsets})?
+      _layoutMetrics;
+
+  MediaQueryData? _mediaQueryData() =>
+      context.getInheritedWidgetOfExactType<MediaQuery>()?.data;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _layoutMetrics ??= _readLayoutMetrics();
+  }
+
+  @override
+  void didChangeMetrics() {
+    final metrics = _readLayoutMetrics();
+    if (metrics == null || metrics == _layoutMetrics) {
+      return;
+    }
+    _layoutMetrics = metrics;
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  ({Size size, EdgeInsets viewPadding, EdgeInsets systemGestureInsets})?
+      _readLayoutMetrics() {
+    // Read from the platform dispatcher: [didChangeMetrics] fires before the
+    // widget tree is rebuilt with the new metrics, so the inherited
+    // [MediaQuery] would still hold the stale snapshot at that point.
+    final view = WidgetsBinding.instance.platformDispatcher.views.firstOrNull;
+    if (view == null) {
+      return null;
+    }
+    final dpr = view.devicePixelRatio;
+    EdgeInsets divide(ui.ViewPadding padding) => EdgeInsets.fromLTRB(
+          padding.left / dpr,
+          padding.top / dpr,
+          padding.right / dpr,
+          padding.bottom / dpr,
+        );
+    return (
+      size: view.physicalSize / dpr,
+      viewPadding: divide(view.viewPadding),
+      systemGestureInsets: divide(view.systemGestureInsets),
+    );
+  }
+
+  void onRebuild(MediaQueryData mq) {
+    double target = targetFormContext(mq);
     if (controller.value != target || animationTarget != target) {
       if (controller.isAnimating) {
         if (animationTarget == target) {
@@ -173,8 +228,8 @@ class NaviPaneState extends State<NaviPane>
 
   @override
   Widget build(BuildContext context) {
-    onRebuild(context);
-    final mq = MediaQuery.of(context);
+    final mq = _mediaQueryData() ?? MediaQueryData();
+    onRebuild(mq);
     final sideInsets = (App.isMobile && mq.orientation == Orientation.landscape)
         ? EdgeInsets.only(
             left: math.max(mq.viewPadding.left, mq.systemGestureInsets.left),
@@ -189,7 +244,7 @@ class NaviPaneState extends State<NaviPane>
           SystemNavigator.pop();
         }
       },
-      popGesture: App.isIOS && context.width >= changePoint,
+      popGesture: App.isIOS && mq.size.width >= changePoint,
       child: AnimatedBuilder(
         animation: controller,
         builder: (context, child) {
@@ -200,7 +255,7 @@ class NaviPaneState extends State<NaviPane>
                 left: _kFoldedSideBarWidth * ((value - 2.0).clamp(-1.0, 0.0)),
                 top: 0,
                 bottom: 0,
-                child: buildLeft(),
+                child: buildLeft(mq),
               ),
               Positioned.fill(
                 left:
@@ -319,7 +374,7 @@ class NaviPaneState extends State<NaviPane>
     );
   }
 
-  Widget buildLeft() {
+  Widget buildLeft(MediaQueryData mq) {
     final value = controller.value;
     const paddingHorizontal = 12.0;
     return Material(
@@ -340,7 +395,7 @@ class NaviPaneState extends State<NaviPane>
         child: Column(
           children: [
             const SizedBox(height: 16),
-            SizedBox(height: MediaQuery.of(context).padding.top),
+            SizedBox(height: mq.padding.top),
             ...List<Widget>.generate(
               widget.paneItems.length,
               (index) => _SideNaviWidget(
@@ -673,6 +728,23 @@ class _NaviMainViewState extends State<_NaviMainView> {
   @override
   Widget build(BuildContext context) {
     var shouldShowAppBar = state.controller.value < 2;
+    Widget pageContent = state.buildMainViewContent();
+    // While another route (e.g. the search page with its keyboard) covers the
+    // tab content, the tabs are invisible: drop the bottom viewInsets from
+    // their MediaQuery so the keyboard show/hide animation does not rebuild
+    // this whole subtree on every frame. When the tabs are the top-most route
+    // (e.g. the inline search field of the favorites tab), keep the insets so
+    // the keyboard resize still applies.
+    if (state.widget.observer.routes.length > 1) {
+      pageContent = MediaQuery.removeViewInsets(
+        context: context,
+        removeLeft: true,
+        removeTop: true,
+        removeRight: true,
+        removeBottom: true,
+        child: pageContent,
+      );
+    }
     return Column(
       children: [
         if (shouldShowAppBar) state.buildTop().paddingTop(context.padding.top),
@@ -682,7 +754,7 @@ class _NaviMainViewState extends State<_NaviMainView> {
             removeTop: shouldShowAppBar,
             child: AnimatedSwitcher(
               duration: _fastAnimationDuration,
-              child: state.buildMainViewContent(),
+              child: pageContent,
             ),
           ),
         ),

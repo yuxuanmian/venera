@@ -364,6 +364,20 @@ abstract mixin class _ComicPageActions {
             launchUrlString(comic.url!);
           },
         ),
+      if (appdata.developerMode)
+        MenuEntry(
+          icon: Icons.developer_mode,
+          text: "Debug Info".tl,
+          onClick: () {
+            context.to(
+              () => ComicDebugPage(
+                sourceKey: comic.sourceKey,
+                comicId: comic.id,
+                details: comic,
+              ),
+            );
+          },
+        ),
     ]);
   }
 

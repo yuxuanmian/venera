@@ -858,7 +858,7 @@ class _SliverSearchBarDelegate extends SliverPersistentHeaderDelegate {
   @override
   Widget build(
       BuildContext context, double shrinkOffset, bool overlapsContent) {
-    return Container(
+    final header = Container(
       height: _kAppBarHeight + topPadding,
       width: double.infinity,
       padding: EdgeInsets.only(top: topPadding),
@@ -912,6 +912,9 @@ class _SliverSearchBarDelegate extends SliverPersistentHeaderDelegate {
         ],
       ),
     );
+    // The header content never changes while the keyboard is animating in;
+    // isolate it from the per-frame repaints of the shrinking viewport.
+    return RepaintBoundary(child: header);
   }
 
   @override
