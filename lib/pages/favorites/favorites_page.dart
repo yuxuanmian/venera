@@ -309,7 +309,7 @@ class _RemoteFolderListState extends State<_RemoteFolderList> {
                 final folder = _folders[index];
                 return ListTile(
                   leading: const Icon(Icons.folder),
-                  title: Text(folder.title ?? ''),
+                  title: Text(favoriteFolderDisplayTitle(folder.title ?? '')),
                   trailing:
                       widget.data.deleteFolder == null ||
                           source?.isLogged != true
@@ -525,7 +525,9 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
 
   @override
   Widget build(BuildContext context) {
-    final title = widget.folder.title ?? widget.data.title;
+    final title = favoriteFolderDisplayTitle(
+      widget.folder.title ?? widget.data.title,
+    );
     final source = ComicSource.find(widget.data.key);
     final canCacheAll =
         source?.isLogged == true &&

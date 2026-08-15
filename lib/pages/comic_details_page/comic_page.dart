@@ -332,18 +332,28 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     if (comicSource.favoriteData?.loadFolders != null && comicSource.isLogged) {
       var res = await comicSource.favoriteData!.loadFolders!(comic.id);
       if (!res.error) {
-        NetworkFavoriteCacheManager().cacheFolderSnapshot(
-          comic.sourceKey,
-          res.data,
-        );
+        cache.cacheFolderSnapshot(comic.sourceKey, res.data);
         if (res.subData is List) {
           var list = List<String>.from(res.subData);
-          NetworkFavoriteCacheManager().replaceComicMembership(
-            comic.sourceKey,
-            comic.id,
-            list,
-          );
-          isFavorite = list.isNotEmpty;
+          if (list.isNotEmpty) {
+            cache.replaceComicMembership(comic.sourceKey, comic.id, list);
+            isFavorite = true;
+          } else if (!cache.isFavoriteKnown(comic.sourceKey, comic.id)) {
+            // The server reports no membership and the device cache agrees:
+            // the comic is not favorited.
+            cache.replaceComicMembership(comic.sourceKey, comic.id, list);
+            isFavorite = false;
+          } else {
+            // The server reports no membership but the device cache knows
+            // the comic is favorited (stale report right after a successful
+            // add): keep the local knowledge instead of un-favoriting.
+            isFavorite = true;
+          }
+          update();
+        } else if (cache.isFavoriteKnown(comic.sourceKey, comic.id)) {
+          // The source did not report membership; the device cache is the
+          // more reliable source for the favorited state.
+          isFavorite = true;
           update();
         }
       }
@@ -480,8 +490,10 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
                   icon: const Icon(Icons.bookmark_outline_outlined),
                   activeIcon: const Icon(Icons.bookmark),
                   isActive: isFavorite,
+                  isLoading: isFavoriting,
                   text: 'Favorite'.tl,
-                  onPressed: openFavPanel,
+                  onPressed: toggleFavorite,
+                  onLongPress: openFavPanel,
                   iconColor: context.useTextColor(Colors.purple),
                 ),
               if (comicSource.commentsLoader != null)
@@ -865,6 +877,7 @@ class _ActionButton extends StatelessWidget {
     this.isActive,
     this.isLoading,
     this.iconColor,
+    this.onLongPress,
   });
 
   final Widget icon;
@@ -880,6 +893,8 @@ class _ActionButton extends StatelessWidget {
   final bool? isLoading;
 
   final Color? iconColor;
+
+  final void Function()? onLongPress;
 
   @override
   Widget build(BuildContext context) {
@@ -898,6 +913,7 @@ class _ActionButton extends StatelessWidget {
             onPressed();
           }
         },
+        onLongPress: onLongPress,
         borderRadius: BorderRadius.circular(18),
         child: IconTheme.merge(
           data: IconThemeData(size: 20, color: iconColor),

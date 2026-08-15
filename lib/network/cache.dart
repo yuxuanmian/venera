@@ -120,7 +120,7 @@ class NetworkCacheManager implements Interceptor {
       var dio = AppDio();
       var response = await dio.fetch(o);
       if (response.statusCode == 200 &&
-          compareHeaders(cache.responseHeaders, response.headers.map)) {
+          isHeadProbeValid(cache.responseHeaders, response.headers.map)) {
         return handler.resolve(Response(
           requestOptions: options,
           data: cache.data,
@@ -132,6 +132,36 @@ class NetworkCacheManager implements Interceptor {
     }
     removeCache(options.uri);
     handler.next(options);
+  }
+
+  /// A HEAD probe can only validate the cached copy when the probe response
+  /// carries a content fingerprint (ETag / Last-Modified / Content-Length)
+  /// that matches the cached one, and the remaining headers agree.
+  ///
+  /// Dynamic pages (favorites lists, search results, ...) have none of these
+  /// fingerprint headers, so their cache entries must be treated as stale
+  /// and refetched: comparing the remaining headers alone would always pass,
+  /// because volatile headers (date, x-varnish, cf-ray, ...) are ignored.
+  static bool isHeadProbeValid(
+    Map<String, List<String>> cachedHeaders,
+    Map<String, List<String>> headHeaders,
+  ) {
+    final fingerprint = _contentFingerprint(headHeaders);
+    if (fingerprint == null ||
+        fingerprint != _contentFingerprint(cachedHeaders)) {
+      return false;
+    }
+    return compareHeaders(cachedHeaders, headHeaders);
+  }
+
+  static String? _contentFingerprint(Map<String, List<String>> headers) {
+    for (final key in ['etag', 'last-modified', 'content-length']) {
+      final value = headers[key];
+      if (value != null && value.isNotEmpty && value.first.isNotEmpty) {
+        return '$key:${value.join(',')}';
+      }
+    }
+    return null;
   }
 
   static bool compareHeaders(Map<String, dynamic> a, Map<String, dynamic> b) {

@@ -191,6 +191,15 @@ class ScanCandidate {
   final DateTime? retryAfter;
 }
 
+/// Strips a trailing " (1234)" count that sources like ehentai embed in
+/// favorite folder titles. The number comes from the source API at folder
+/// list fetch time and drifts from the actual folder contents (especially
+/// right after adding/removing favorites), so it is not shown.
+String favoriteFolderDisplayTitle(String title) {
+  final match = RegExp(r'\s*\(\d+\)$').firstMatch(title);
+  return match == null ? title : title.substring(0, match.start);
+}
+
 class NetworkFavoriteFolderRef {
   const NetworkFavoriteFolderRef({
     required this.sourceKey,
@@ -2016,10 +2025,31 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     if (data.addOrDelFavorite == null) {
       return const Res.error('Favorites are not supported');
     }
-    final effectiveFavoriteId = isAdding
+    var effectiveFavoriteId = isAdding
         ? favoriteId
         : favoriteId ??
               _cachedFavoriteId(folder.sourceKey, folder.folderId, comicId);
+    if (!isAdding && effectiveFavoriteId == null) {
+      // Items added through the app only exist in favorite_membership; the
+      // source-side favorite id lives in favorite_items, which is populated
+      // from the server list pages. Refresh the folder's first page once (a
+      // just-added comic is the most recent one) so removal works for
+      // sources that require the favorite id. Best effort: if the refresh
+      // fails or the comic is not on the first page, removal proceeds
+      // without the id as before.
+      final refreshed = data.loadComic != null
+          ? await refreshPage(data, folder, 1)
+          : data.loadNext != null
+              ? await refreshNextPage(data, folder, null)
+              : null;
+      if (refreshed != null && refreshed.success) {
+        effectiveFavoriteId = _cachedFavoriteId(
+          folder.sourceKey,
+          folder.folderId,
+          comicId,
+        );
+      }
+    }
     final result = await data.addOrDelFavorite!(
       comicId,
       folder.folderId,

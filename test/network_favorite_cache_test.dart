@@ -1637,4 +1637,112 @@ void main() {
     cache.markComicSuspectGoneEverywhere('test-source', 'one');
     expect(cache.isComicSuspectGone('test-source', 'one'), isTrue);
   });
+
+  test('removal learns the favorite id from a refreshed first page', () async {
+    String? receivedFavoriteId;
+    final data = FavoriteData(
+      key: 'test-source',
+      title: 'Test source',
+      multiFolder: true,
+      loadComic: (page, [folder]) async => Res(<Comic>[
+        FavoriteItem(
+          id: 'one',
+          name: 'Comic',
+          coverPath: 'https://example.invalid/one.jpg',
+          author: 'Author',
+          sourceKeyValue: 'test-source',
+          tags: const ['tag'],
+          remoteFavoriteId: 'fav-1',
+        ),
+      ], subData: 1),
+      loadNext: null,
+      loadFolders: ([String? _]) async =>
+          const Res(<String, String>{'remote': 'Remote'}),
+      addOrDelFavorite: (comicId, folderId, isAdding, favoriteId) async {
+        receivedFavoriteId = favoriteId;
+        return const Res(true);
+      },
+    );
+    final source = ComicSource(
+      'Test source',
+      'test-source',
+      null,
+      null,
+      null,
+      data,
+      const [],
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      '',
+      '',
+      '1.0.0',
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
+    );
+    source.data['account'] = ['user'];
+    ComicSourceManager().add(source);
+    addTearDown(() => ComicSourceManager().remove('test-source'));
+    await cache.refreshFolders(data);
+
+    // Panel-style add: only the membership row is written, the folder page
+    // cache (favorite_items) is untouched.
+    final added = await cache.changeFavorite(
+      data: data,
+      folder: folder,
+      comicId: 'one',
+      isAdding: true,
+    );
+    expect(added.success, isTrue);
+    expect(cache.countCachedComics(folder), 0);
+    expect(cache.isFavoriteKnown('test-source', 'one'), isTrue);
+
+    // Removal without a cached favorite id refreshes the first page, learns
+    // the id from the server list and passes it to the source.
+    final removed = await cache.changeFavorite(
+      data: data,
+      folder: folder,
+      comicId: 'one',
+      isAdding: false,
+    );
+    expect(removed.success, isTrue);
+    expect(receivedFavoriteId, 'fav-1');
+    expect(cache.isFavoriteKnown('test-source', 'one'), isFalse);
+    expect(cache.countCachedComics(folder), 0);
+  });
+
+  group('favoriteFolderDisplayTitle', () {
+    test('strips a trailing numeric count in parentheses', () {
+      expect(favoriteFolderDisplayTitle('Favorites 0 (1234)'), 'Favorites 0');
+      expect(favoriteFolderDisplayTitle('Favorites 1 (42)'), 'Favorites 1');
+    });
+
+    test('keeps titles without a trailing count', () {
+      expect(favoriteFolderDisplayTitle('Favorites 0'), 'Favorites 0');
+      expect(favoriteFolderDisplayTitle(''), '');
+      expect(favoriteFolderDisplayTitle('My List (2nd)'), 'My List (2nd)');
+      expect(
+        favoriteFolderDisplayTitle('Favorites 0 (12) extra'),
+        'Favorites 0 (12) extra',
+      );
+    });
+  });
 }

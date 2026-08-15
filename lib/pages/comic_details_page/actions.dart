@@ -30,6 +30,9 @@ abstract mixin class _ComicPageActions {
   /// whether the comic is favorite on the server
   bool isFavorite = false;
 
+  /// true while a one-tap favorite toggle is in flight
+  bool isFavoriting = false;
+
   void openFavPanel() {
     showSideBar(
       App.rootContext,
@@ -43,6 +46,69 @@ abstract mixin class _ComicPageActions {
         },
       ),
     );
+  }
+
+  /// Toggle favorite with a single tap when the source allows it:
+  /// - single-folder (non multiFolder) sources: add/remove directly;
+  /// - multi-folder sources where a comic lives in exactly one folder:
+  ///   remove from that folder when already favorited.
+  /// Falls back to the folder panel whenever a folder must be chosen.
+  void toggleFavorite() async {
+    if (isFavoriting) return;
+    final data = comicSource.favoriteData;
+    if (data == null) return;
+    if (data.multiFolder) {
+      if (data.singleFolderForSingleComic && isFavorite) {
+        final folders = NetworkFavoriteCacheManager().getKnownFolderIds(
+          data.key,
+          comic.id,
+        );
+        if (folders.isEmpty) {
+          // Unknown membership: let the panel resolve it instead of
+          // guessing the folder.
+          openFavPanel();
+          return;
+        }
+        isFavoriting = true;
+        update();
+        final result = await NetworkFavoriteCacheManager().changeFavorite(
+          data: data,
+          folder: NetworkFavoriteFolderRef(
+            sourceKey: data.key,
+            folderId: folders.first,
+          ),
+          comicId: comic.id,
+          isAdding: false,
+        );
+        isFavoriting = false;
+        if (result.error) {
+          App.rootContext.showMessage(message: result.errorMessage!);
+        } else {
+          isFavorite = false;
+        }
+        update();
+        return;
+      }
+      // Adding to a multi-folder source (or ambiguous membership) requires
+      // choosing a folder.
+      openFavPanel();
+      return;
+    }
+    isFavoriting = true;
+    update();
+    final result = await NetworkFavoriteCacheManager().changeFavorite(
+      data: data,
+      folder: NetworkFavoriteFolderRef(sourceKey: data.key, folderId: ''),
+      comicId: comic.id,
+      isAdding: !isFavorite,
+    );
+    isFavoriting = false;
+    if (result.error) {
+      App.rootContext.showMessage(message: result.errorMessage!);
+    } else {
+      isFavorite = !isFavorite;
+    }
+    update();
   }
 
   void share() {

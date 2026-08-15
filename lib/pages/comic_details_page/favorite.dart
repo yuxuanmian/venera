@@ -60,11 +60,19 @@ class _FavoritePanelState extends State<_FavoritePanel> {
     }
     setState(() {
       _folders = result.data;
-      _added = result.subData is List
-          ? List<String>.from(result.subData).toSet()
-          : <String>{};
+      // Only trust the membership list when the source actually returned
+      // one; otherwise keep the device-cache value so already-favorited
+      // folders do not suddenly show as "Add". An empty report is also
+      // ignored when the device cache knows the comic is favorited: some
+      // sources report stale membership right after a successful add.
+      if (result.subData is List) {
+        final list = List<String>.from(result.subData).toSet();
+        if (list.isNotEmpty || !cache.isFavoriteKnown(_data.key, widget.cid)) {
+          _added = list;
+          cache.replaceComicMembership(_data.key, widget.cid, _added);
+        }
+      }
       cache.cacheFolderSnapshot(_data.key, result.data);
-      cache.replaceComicMembership(_data.key, widget.cid, _added);
       _loading = false;
     });
   }
@@ -117,9 +125,9 @@ class _FavoritePanelState extends State<_FavoritePanel> {
               title: Text('Network Favorites'.tl),
               subtitle: !canChange ? Text('Not login'.tl) : null,
               trailing: canChange
-                  ? Button.filled(
+                  ? _FavoriteToggleButton(
+                      isAdded: isAdded,
                       onPressed: () => _change('', !isAdded),
-                      child: Text(isAdded ? 'Remove'.tl : 'Add'.tl),
                     )
                   : Text('Not login'.tl),
             ),
@@ -127,50 +135,69 @@ class _FavoritePanelState extends State<_FavoritePanel> {
         ),
       );
     }
-    final singleFolderAdded =
-        _data.singleFolderForSingleComic &&
-        (widget.isFavorite || _added.isNotEmpty);
-    if (singleFolderAdded) {
-      final folderId = _added.isNotEmpty
-          ? _added.first
-          : (_folders == null || _folders!.isEmpty ? '' : _folders!.keys.first);
-      return Scaffold(
-        appBar: Appbar(title: Text('Favorite'.tl)),
-        body: ListView(
-          children: [
-            ListTile(
-              title: Text('Network Favorites'.tl),
-              subtitle: !canChange ? Text('Not login'.tl) : null,
-              trailing: canChange
-                  ? Button.filled(
-                      onPressed: () => _change(folderId, false),
-                      child: Text('Remove'.tl),
-                    )
-                  : Text('Not login'.tl),
-            ),
-          ],
-        ),
-      );
-    }
+    // Multi-folder sources always render the folder list; each row carries
+    // its own favorited state so toggling never jumps between views.
     return Scaffold(
       appBar: Appbar(title: Text('Favorite'.tl)),
       body: ListView(
         children: [
           for (final entry in _folders!.entries)
             ListTile(
-              title: Text(entry.value),
+              leading: Icon(
+                _added.contains(entry.key)
+                    ? Icons.folder_special
+                    : Icons.folder_outlined,
+                color: _added.contains(entry.key)
+                    ? context.colorScheme.primary
+                    : null,
+              ),
+              title: Text(
+                favoriteFolderDisplayTitle(entry.value),
+                style: _added.contains(entry.key)
+                    ? ts.withColor(context.colorScheme.primary)
+                    : null,
+              ),
               subtitle: !canChange ? Text('Not login'.tl) : null,
               trailing: canChange
-                  ? Button.filled(
+                  ? _FavoriteToggleButton(
+                      isAdded: _added.contains(entry.key),
                       onPressed: () =>
                           _change(entry.key, !_added.contains(entry.key)),
-                      child: Text(
-                        _added.contains(entry.key) ? 'Remove'.tl : 'Add'.tl,
-                      ),
                     )
                   : Text('Not login'.tl),
             ),
         ],
+      ),
+    );
+  }
+}
+
+/// Compact favorite toggle used in folder rows: an outline bookmark when the
+/// comic is not in the folder, a filled bookmark (with a Material 3 selected
+/// background) when it is. Bookmark keeps the same icon language as the
+/// favorite button on the details page.
+class _FavoriteToggleButton extends StatelessWidget {
+  const _FavoriteToggleButton({
+    required this.isAdded,
+    required this.onPressed,
+  });
+
+  final bool isAdded;
+
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: isAdded ? 'Remove'.tl : 'Add'.tl,
+      onPressed: onPressed,
+      isSelected: isAdded,
+      icon: const Icon(Icons.bookmark_outline),
+      selectedIcon: const Icon(Icons.bookmark),
+      // M3 gives the selected icon the primary color automatically; the
+      // container background makes the favorited state unmistakable.
+      style: IconButton.styleFrom(
+        backgroundColor: isAdded ? context.colorScheme.primaryContainer : null,
       ),
     );
   }
