@@ -1041,30 +1041,95 @@ class ComicListState extends State<ComicList> {
   final Map<int, bool> _loading = {};
 
   String? _nextUrl;
+  final Map<int, String?> _requestTokens = {};
+  final Map<int, String?> _nextTokens = {};
 
   late bool enablePageStorage = widget.enablePageStorage;
 
   Map<String, dynamic> get state => {
     'maxPage': _maxPage,
-    'data': _data,
+    'data': {
+      for (final entry in _data.entries)
+        entry.key: List<Comic>.from(entry.value),
+    },
     'page': _page,
     'error': _error,
-    'loading': _loading,
+    'loading': Map<int, bool>.from(_loading),
     'nextUrl': _nextUrl,
+    'requestTokens': Map<int, String?>.from(_requestTokens),
+    'nextTokens': Map<int, String?>.from(_nextTokens),
   };
+
+  int get currentPage => _page;
+
+  bool get hasCurrentRequestToken => _requestTokens.containsKey(_page);
+
+  String? get currentRequestToken => _requestTokens[_page];
 
   void restoreState(Map<String, dynamic>? state) {
     if (state == null || !enablePageStorage) {
       return;
     }
-    _maxPage = state['maxPage'];
+    _maxPage = state['maxPage'] is int ? state['maxPage'] as int : null;
     _data.clear();
-    _data.addAll(state['data']);
-    _page = state['page'];
-    _error = state['error'];
+    final rawData = state['data'];
+    if (rawData is Map) {
+      for (final entry in rawData.entries) {
+        final page = entry.key is int
+            ? entry.key as int
+            : int.tryParse(entry.key.toString());
+        final comics = entry.value;
+        if (page != null && comics is Iterable) {
+          _data[page] = comics.whereType<Comic>().toList();
+        }
+      }
+    }
+    final storedPage = state['page'];
+    _page = storedPage is int && storedPage > 0 ? storedPage : 1;
+    _error = state['error'] is String ? state['error'] as String : null;
     _loading.clear();
-    _loading.addAll(state['loading']);
-    _nextUrl = state['nextUrl'];
+    final rawLoading = state['loading'];
+    if (rawLoading is Map) {
+      for (final entry in rawLoading.entries) {
+        final page = entry.key is int
+            ? entry.key as int
+            : int.tryParse(entry.key.toString());
+        if (page != null && entry.value is bool) {
+          _loading[page] = entry.value as bool;
+        }
+      }
+    }
+    _nextUrl = state['nextUrl'] is String ? state['nextUrl'] as String : null;
+    _requestTokens.clear();
+    final rawRequestTokens = state['requestTokens'];
+    if (rawRequestTokens is Map) {
+      for (final entry in rawRequestTokens.entries) {
+        final page = entry.key is int
+            ? entry.key as int
+            : int.tryParse(entry.key.toString());
+        final token = entry.value;
+        if (page != null && (token == null || token is String)) {
+          _requestTokens[page] = token as String?;
+        }
+      }
+    }
+    _nextTokens.clear();
+    final rawNextTokens = state['nextTokens'];
+    if (rawNextTokens is Map) {
+      for (final entry in rawNextTokens.entries) {
+        final page = entry.key is int
+            ? entry.key as int
+            : int.tryParse(entry.key.toString());
+        final token = entry.value;
+        if (page != null && (token == null || token is String)) {
+          _nextTokens[page] = token as String?;
+        }
+      }
+    } else {
+      // PageStorage entries written before per-page cursor state existed only
+      // have the cursor following the currently selected page.
+      _nextTokens[_page] = _nextUrl;
+    }
   }
 
   void storeState() {
@@ -1080,6 +1145,8 @@ class ComicListState extends State<ComicList> {
     _error = null;
     _nextUrl = null;
     _loading.clear();
+    _requestTokens.clear();
+    _nextTokens.clear();
     storeState();
     setState(() {});
   }
@@ -1108,27 +1175,39 @@ class ComicListState extends State<ComicList> {
         }
       }
     }
+    storeState();
     setState(() {});
   }
 
   /// Replaces one already-visible page in place.  This is used by cache-first
   /// pages after their background remote refresh completes, preventing the
-  /// list from flashing back to an empty loading state.
+  /// list from flashing back to an empty loading state. Cursor pages record
+  /// their successor token per page so an older page cannot alter the cursor
+  /// used by the currently selected page.
   void replacePage(
     int page,
     List<Comic> comics, {
     int? maxPage,
     String? nextUrl,
+    bool isCursor = false,
     bool invalidateFollowing = false,
   }) {
     _data[page] = List<Comic>.from(comics);
-    if (invalidateFollowing) {
+    if (invalidateFollowing && !isCursor) {
       _data.removeWhere((key, _) => key > page);
+      _requestTokens.removeWhere((key, _) => key > page);
+      _nextTokens.removeWhere((key, _) => key > page);
     }
     if (maxPage != null) {
       _maxPage = maxPage;
     }
-    if (nextUrl != null || invalidateFollowing) {
+    if (isCursor) {
+      _nextTokens[page] = nextUrl;
+      if (page == _page) {
+        _nextUrl = nextUrl;
+        _maxPage = nextUrl == null ? page : null;
+      }
+    } else if (nextUrl != null || invalidateFollowing) {
       _nextUrl = nextUrl;
       if (nextUrl == null && invalidateFollowing) {
         _maxPage = page;
@@ -1144,6 +1223,21 @@ class ComicListState extends State<ComicList> {
     if (mounted) setState(() {});
   }
 
+  void _setPage(int page) {
+    setState(() {
+      _error = null;
+      _page = page;
+      if (_nextTokens.containsKey(page)) {
+        _nextUrl = _nextTokens[page];
+      } else if (page > 1 && _nextTokens.containsKey(page - 1)) {
+        _nextUrl = _nextTokens[page - 1];
+      } else {
+        _nextUrl = null;
+      }
+    });
+    storeState();
+  }
+
   List<Comic> _filterComics(Iterable<Comic> comics) {
     final filter = widget.comicFilter;
     return filter == null ? comics.toList() : comics.where(filter).toList();
@@ -1155,10 +1249,7 @@ class ComicListState extends State<ComicList> {
         FilledButton(
           onPressed: _page > 1
               ? () {
-                  setState(() {
-                    _error = null;
-                    _page--;
-                  });
+                  _setPage(_page - 1);
                 }
               : null,
           child: Text("Back".tl),
@@ -1197,10 +1288,7 @@ class ComicListState extends State<ComicList> {
                               } else {
                                 if (page > 0 &&
                                     (_maxPage == null || page <= _maxPage!)) {
-                                  setState(() {
-                                    _error = null;
-                                    _page = page;
-                                  });
+                                  _setPage(page);
                                 } else {
                                   context.showMessage(
                                     message: "Invalid page".tl,
@@ -1229,10 +1317,7 @@ class ComicListState extends State<ComicList> {
         FilledButton(
           onPressed: _page < (_maxPage ?? (_page + 1))
               ? () {
-                  setState(() {
-                    _error = null;
-                    _page++;
-                  });
+                  _setPage(_page + 1);
                 }
               : null,
           child: Text("Next".tl),
@@ -1302,14 +1387,20 @@ class ComicListState extends State<ComicList> {
   }
 
   Future<void> _fetchNext(int target) async {
-    var res = await widget.loadNext!(_nextUrl);
+    final requestToken = _nextUrl;
+    var res = await widget.loadNext!(requestToken);
+    _requestTokens[target] = requestToken;
     if (_data[target] == null) {
       _data[target] = res.data;
     }
-    if (res.subData == null) {
+    final nextToken = res.subData is String ? res.subData as String : null;
+    _nextTokens[target] = nextToken;
+    if (nextToken == null) {
+      if (target == _page) _nextUrl = null;
       _maxPage = _data.length;
     } else {
-      _nextUrl = res.subData;
+      if (target == _page) _nextUrl = nextToken;
+      _maxPage = null;
     }
   }
 

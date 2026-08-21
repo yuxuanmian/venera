@@ -407,17 +407,6 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
   void _onCacheChanged() {
     if (!mounted) return;
     _updateSearchResults();
-    final first = _usesPage
-        ? _cache.getCachedPage(widget.folder, 1)
-        : _cache.getCachedNextPage(widget.folder, null);
-    if (first != null && first.updatedAt.millisecondsSinceEpoch == 0) {
-      _refresh();
-    } else if (first == null) {
-      final data = _comicListKey.currentState?.state['data'];
-      if (data is Map && data.isNotEmpty) {
-        _comicListKey.currentState?.refresh();
-      }
-    }
   }
 
   void _updateSearchResults() {
@@ -433,15 +422,27 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
       page.comics,
       maxPage: page.maxPage,
       nextUrl: page.nextToken,
-      invalidateFollowing: !_usesPage,
+      isCursor: !_usesPage,
     );
     if (mounted) setState(() {});
   }
 
   Future<void> _refresh() async {
+    final listState = _comicListKey.currentState;
+    final page = listState?.currentPage ?? 1;
+    final requestToken = listState?.currentRequestToken;
+    if (!_usesPage &&
+        page > 1 &&
+        !(listState?.hasCurrentRequestToken ?? false)) {
+      return;
+    }
     final result = _usesPage
-        ? await _cache.refreshPage(widget.data, widget.folder, 1)
-        : await _cache.refreshNextPage(widget.data, widget.folder, null);
+        ? await _cache.refreshPage(widget.data, widget.folder, page)
+        : await _cache.refreshNextPage(
+            widget.data,
+            widget.folder,
+            requestToken,
+          );
     if (result.success) {
       _replacePage(result.data);
     } else {
@@ -539,8 +540,9 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
               _cache.searchCachedComics(widget.folder, _searchController.text))
         : null;
     final cachedComicCount = _cache.countCachedComics(widget.folder);
-    return ComicList(
+    final comicList = ComicList(
       key: _comicListKey,
+      enablePageStorage: true,
       leadingSliver: SliverMainAxisGroup(
         slivers: [
           SliverAppbar(
@@ -683,6 +685,13 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
           },
         ),
       ],
+    );
+    return KeyedSubtree(
+      key: PageStorageKey<(String, String)>((
+        widget.folder.sourceKey,
+        widget.folder.folderId,
+      )),
+      child: comicList,
     );
   }
 }
