@@ -114,13 +114,14 @@ void main() {
     );
     appdata.settings['followUpdatesEnabled'] = true;
     appdata.settings['favorites'] = ['test-source'];
-    appdata.settings['followUpdateThreads'] = 5;
+    appdata.settings['followUpdateThreads'] = 8;
     appdata.settings['followUpdateBatchDelay'] = 0.0;
     // Registered once; the service listener + periodic check are global.
     FollowUpdatesService.initChecker();
   });
 
   tearDownAll(() async {
+    FollowUpdatesService.disposeChecker();
     ComicSourceManager().remove('test-source');
     cache.close();
     await tempDir.delete(recursive: true);

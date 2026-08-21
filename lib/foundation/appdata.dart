@@ -199,7 +199,7 @@ class Settings with ChangeNotifier {
     'language': 'system', // system, zh-CN, zh-TW, en-US
     'cacheSize': 2048, // in MB
     'downloadThreads': 5,
-    'followUpdateThreads': 5,
+    'followUpdateThreads': 8,
     'followUpdateBatchDelay': 5, // in seconds
     'enableLongPressToZoom': true,
     'longPressZoomPosition': "press", // press, center

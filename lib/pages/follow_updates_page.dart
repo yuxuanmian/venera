@@ -790,13 +790,43 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
   Object? get key => 'FollowUpdatesPage';
 }
 
+class _FollowUpdatesTaskToken implements ScanCancellationToken {
+  _FollowUpdatesTaskToken(this.generation, this._isCurrent);
+
+  final int generation;
+  final bool Function() _isCurrent;
+  bool _canceled = false;
+
+  void cancel() => _canceled = true;
+
+  @override
+  bool get isCanceled => _canceled;
+
+  @override
+  bool get isCurrent => _isCurrent();
+
+  @override
+  bool get canCommit => !isCanceled && isCurrent;
+}
+
 /// Background service for checking cached remote favorites.
 abstract class FollowUpdatesService {
   static bool _isInitialized = false;
   static bool _taskRunning = false;
   static Future<void>? _activeTask;
+  static _FollowUpdatesTaskToken? _activeToken;
+  static int _generation = 0;
   static void Function()? _cancelCurrent;
   static Timer? _autoScanTimer;
+  static Timer? _checkTimer;
+  static Timer? _summaryTimer;
+  static Timer? _resumeTimer;
+  static bool _cacheListenerAttached = false;
+  static DateTime? _lastScanCompletedAt;
+  static bool _resumeCheckPending = false;
+  static bool _resumeCheckAfterTask = false;
+  static const _resumeDebounce = Duration(seconds: 2);
+  static const _resumeStaleAfter = Duration(minutes: 10);
 
   /// Latest progress of the background baseline run, or null when no baseline
   /// task is active.
@@ -813,7 +843,7 @@ abstract class FollowUpdatesService {
   /// light up like any other scan.
   static Future<void> refreshRandomComics() {
     return _startTask(
-      (isCanceled) async {
+      (token) async {
         final cache = NetworkFavoriteCacheManager();
         final folders = getFollowUpdateFolders();
         final comics =
@@ -838,6 +868,7 @@ abstract class FollowUpdatesService {
         var updated = 0;
         var errors = 0;
         var completed = 0;
+        if (!token.canCommit) return;
         baselineStatus.value = BaselineStatus(
           isRunning: true,
           total: count,
@@ -846,7 +877,7 @@ abstract class FollowUpdatesService {
           updated: 0,
         );
         for (final item in comics.take(count)) {
-          if (isCanceled()) break;
+          if (!token.canCommit) return;
           final fresh = cache.getComicUpdateInfo(
             item.sourceKey,
             item.comicId,
@@ -860,7 +891,9 @@ abstract class FollowUpdatesService {
                 folderId: item.folderId,
               ),
               cache: cache,
+              cancellationToken: token,
             );
+            if (!token.canCommit) return;
             if (result.errorMessage != null) {
               errors++;
             } else {
@@ -868,7 +901,7 @@ abstract class FollowUpdatesService {
             }
           }
           completed++;
-          if (!isCanceled()) {
+          if (token.canCommit) {
             baselineStatus.value = BaselineStatus(
               isRunning: true,
               total: count,
@@ -879,7 +912,7 @@ abstract class FollowUpdatesService {
             );
           }
         }
-        if (isCanceled()) return;
+        if (!token.canCommit) return;
         baselineStatus.value = null;
         Log.info(
           'Follow updates',
@@ -892,7 +925,7 @@ abstract class FollowUpdatesService {
   }
 
   static Future<void> _startTask(
-    Future<void> Function(bool Function() isCanceled) task, {
+    Future<void> Function(ScanCancellationToken token) task, {
     required bool cancelExisting,
     bool waitForCancelled = true,
   }) async {
@@ -903,39 +936,51 @@ abstract class FollowUpdatesService {
       // finishes later; only wait when the caller needs strict serialization.
       if (waitForCancelled) await _activeTask;
     }
-    var cancelRequested = false;
+    late final _FollowUpdatesTaskToken token;
+    token = _FollowUpdatesTaskToken(
+      ++_generation,
+      () => identical(_activeToken, token),
+    );
+    _activeToken = token;
     _taskRunning = true;
     taskRunning.value = true;
-    final current = task(() => cancelRequested);
+    final current = task(token);
     _activeTask = current;
     // Clearing the status here (instead of inside the cancelled task) keeps a
     // replacement task's fresh status from being wiped by a late frame of the
     // cancelled one.
     _cancelCurrent = () {
-      cancelRequested = true;
+      token.cancel();
       baselineStatus.value = null;
     };
+    var completedSuccessfully = false;
     try {
       await current;
+      completedSuccessfully = true;
     } catch (e, s) {
       Log.error('Follow updates task', e, s);
     } finally {
       if (identical(_activeTask, current)) {
+        final canRecordCompletion =
+            completedSuccessfully && token.canCommit;
         _activeTask = null;
+        _activeToken = null;
         _taskRunning = false;
         taskRunning.value = false;
         _cancelCurrent = null;
+        if (canRecordCompletion) _lastScanCompletedAt = DateTime.now();
+        // The cache may have changed while this task was running (for example a
+        // sync batch or folder refresh), so re-check for remaining gaps once the
+        // task has fully finished instead of waiting for a manual Retry.
+        if (!_resumeCheckPending) _scheduleAutoScan();
+        // With the queue idle again, keep cached list metadata fresh (once per
+        // staleness window) without ever delaying the scan itself.
+        _maybeRefreshSummaries();
+        // Rebuild the page so the baseline card and lists reflect the settled
+        // scan state (incomplete gap or fully checked).
+        updateFollowUpdatesUI();
+        if (_resumeCheckPending) _scheduleResumeCheck();
       }
-      // The cache may have changed while this task was running (for example a
-      // sync batch or folder refresh), so re-check for remaining gaps once the
-      // task has fully finished instead of waiting for a manual Retry.
-      _scheduleAutoScan();
-      // With the queue idle again, keep cached list metadata fresh (once per
-      // staleness window) without ever delaying the scan itself.
-      _maybeRefreshSummaries();
-      // Rebuild the page so the baseline card and lists reflect the settled
-      // scan state (incomplete gap or fully checked).
-      updateFollowUpdatesUI();
     }
   }
 
@@ -951,6 +996,7 @@ abstract class FollowUpdatesService {
   }
 
   static void _tryStartAutoScan() {
+    if (!_isInitialized) return;
     if (!followUpdatesEnabled) return;
     if (_taskRunning) {
       // A scan is still consuming. Re-check shortly after it ends so cache
@@ -972,8 +1018,8 @@ abstract class FollowUpdatesService {
   static void startBaseline() {
     unawaited(
       _startTask(
-        (isCanceled) => _runScanWithStatus(
-          isCanceled,
+        (token) => _runScanWithStatus(
+          token,
           mode: FollowUpdateMode.missing,
           ignoreRetryAfter: true,
         ),
@@ -984,8 +1030,8 @@ abstract class FollowUpdatesService {
 
   static Future<void> runCheckNow() {
     return _startTask(
-      (isCanceled) => _runScanWithStatus(
-        isCanceled,
+      (token) => _runScanWithStatus(
+        token,
         mode: FollowUpdateMode.regular,
         ignoreRetryAfter: true,
       ),
@@ -997,8 +1043,8 @@ abstract class FollowUpdatesService {
   /// the 24h window and the suspected-removed skip.
   static Future<void> forceScanAll() {
     return _startTask(
-      (isCanceled) => _runScanWithStatus(
-        isCanceled,
+      (token) => _runScanWithStatus(
+        token,
         mode: FollowUpdateMode.force,
         ignoreRetryAfter: true,
         includeSuspect: true,
@@ -1012,7 +1058,7 @@ abstract class FollowUpdatesService {
   /// After the run the status settles to null when every comic was attempted,
   /// or to a finished-but-incomplete state when unchecked comics remain.
   static Future<void> _runScanWithStatus(
-    bool Function() isCanceled, {
+    ScanCancellationToken token, {
     required FollowUpdateMode mode,
     bool ignoreRetryAfter = false,
     bool includeSuspect = false,
@@ -1026,7 +1072,7 @@ abstract class FollowUpdatesService {
       await for (final progress in scanFollowUpdates(
         effectiveFolders,
         mode,
-        isCanceled: isCanceled,
+        cancellationToken: token,
         ignoreRetryAfter: ignoreRetryAfter,
         includeSuspect: includeSuspect,
       )) {
@@ -1037,7 +1083,7 @@ abstract class FollowUpdatesService {
         // Cancellation stops publishing; the status is released by
         // [_startTask]'s cancel callback, never by a late frame here (it may
         // belong to a replacement task already).
-        if (isCanceled()) return;
+        if (!token.canCommit) return;
         baselineStatus.value = BaselineStatus(
           isRunning: true,
           total: progress.total,
@@ -1047,7 +1093,7 @@ abstract class FollowUpdatesService {
           currentComic: progress.comic?.title,
         );
       }
-      if (isCanceled()) return;
+      if (!token.canCommit) return;
       final remaining = cache.countUncheckedComicsInFolders(effectiveFolders);
       if (remaining > 0) {
         final last = baselineStatus.value;
@@ -1067,6 +1113,7 @@ abstract class FollowUpdatesService {
       }
     } catch (e, s) {
       Log.error('Follow updates scan', e, s);
+      if (!token.isCurrent || token.isCanceled) return;
       final last = baselineStatus.value;
       baselineStatus.value = BaselineStatus(
         isRunning: false,
@@ -1083,17 +1130,17 @@ abstract class FollowUpdatesService {
   /// Runs after cache changes (new sync batches, folder refresh, full-cache
   /// completion). Cooldowns are respected; manual Retry / Check Now keep their
   /// force-check semantics.
-  static Future<void> _runMissingOnly(bool Function() isCanceled) async {
+  static Future<void> _runMissingOnly(ScanCancellationToken token) async {
     final folders = getFollowUpdateFolders();
     final cache = NetworkFavoriteCacheManager();
-    if (isCanceled() ||
+    if (!token.canCommit ||
         cache.countPendingUncheckedComicsInFolders(folders) == 0) {
       return;
     }
-    await _runScanWithStatus(isCanceled, mode: FollowUpdateMode.missing);
+    await _runScanWithStatus(token, mode: FollowUpdateMode.missing);
   }
 
-  static Future<void> _check(bool Function() isCanceled) async {
+  static Future<void> _check(ScanCancellationToken token) async {
     if (!followUpdatesEnabled) return;
     // While "cache all pages" is running for a folder, its pages churn
     // constantly; the periodic scan must not fight the full-cache worker
@@ -1103,7 +1150,7 @@ abstract class FollowUpdatesService {
         .where((f) => !cache.isFullCacheRunning(f))
         .toList();
     await _runScanWithStatus(
-      isCanceled,
+      token,
       mode: FollowUpdateMode.regular,
       folders: folders,
     );
@@ -1171,6 +1218,47 @@ abstract class FollowUpdatesService {
     unawaited(_refreshSummaries());
   }
 
+  static void _scheduleResumeCheck() {
+    _resumeTimer?.cancel();
+    _resumeTimer = Timer(_resumeDebounce, _tryStartResumeCheck);
+  }
+
+  static void _tryStartResumeCheck() {
+    _resumeTimer = null;
+    if (!_resumeCheckPending) return;
+    if (!_isInitialized || !followUpdatesEnabled) {
+      _resumeCheckPending = false;
+      _resumeCheckAfterTask = false;
+      return;
+    }
+    if (_taskRunning) {
+      // Keep the request pending. The current task's finalizer schedules this
+      // callback again, so resume never silently loses its regular scan.
+      _resumeCheckAfterTask = true;
+      return;
+    }
+    final forceRegularCheck = _resumeCheckAfterTask;
+    _resumeCheckPending = false;
+    _resumeCheckAfterTask = false;
+    final last = _lastScanCompletedAt;
+    if (!forceRegularCheck &&
+        last != null &&
+        DateTime.now().difference(last) < _resumeStaleAfter) {
+      return;
+    }
+    unawaited(_startTask(_check, cancelExisting: false));
+  }
+
+  /// Schedules one debounced regular check after the app returns to the
+  /// foreground. A recent completed scan is already fresh enough, while a
+  /// resume observed during another task is retained until that task settles.
+  static void onAppResumed() {
+    if (!_isInitialized || !followUpdatesEnabled) return;
+    _resumeCheckPending = true;
+    _resumeCheckAfterTask = _resumeCheckAfterTask || _taskRunning;
+    _scheduleResumeCheck();
+  }
+
   static void initChecker() {
     if (_isInitialized) return;
     _isInitialized = true;
@@ -1182,16 +1270,47 @@ abstract class FollowUpdatesService {
     }
     unawaited(_startTask(_check, cancelExisting: false));
     NetworkFavoriteCacheManager().addListener(_onCacheChanged);
-    Timer.periodic(
+    _cacheListenerAttached = true;
+    _checkTimer = Timer.periodic(
       const Duration(minutes: 10),
       (_) => unawaited(_startTask(_check, cancelExisting: false)),
     );
     // Metadata stays fresh independently of the scan schedule; the first
     // round runs after the startup scan task settles (see _startTask).
-    Timer.periodic(
+    _summaryTimer = Timer.periodic(
       NetworkFavoriteCacheManager.backgroundSummaryRefreshAfter,
       (_) => _maybeRefreshSummaries(),
     );
+  }
+
+  /// Releases the service-owned timers/listener and invalidates the active
+  /// generation. The in-flight network request is not forcefully interrupted
+  /// here, but its result can no longer commit after disposal.
+  static void disposeChecker() {
+    _checkTimer?.cancel();
+    _checkTimer = null;
+    _summaryTimer?.cancel();
+    _summaryTimer = null;
+    _resumeTimer?.cancel();
+    _resumeTimer = null;
+    _autoScanTimer?.cancel();
+    _autoScanTimer = null;
+    _cancelCurrent?.call();
+    _activeToken?.cancel();
+    _activeToken = null;
+    _activeTask = null;
+    _cancelCurrent = null;
+    _taskRunning = false;
+    taskRunning.value = false;
+    baselineStatus.value = null;
+    _resumeCheckPending = false;
+    _resumeCheckAfterTask = false;
+    if (_cacheListenerAttached) {
+      NetworkFavoriteCacheManager().removeListener(_onCacheChanged);
+      _cacheListenerAttached = false;
+    }
+    _isInitialized = false;
+    _lastScanCompletedAt = null;
   }
 
   static void _onCacheChanged() {

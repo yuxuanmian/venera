@@ -1,16 +1,222 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:math' as math;
+
+import 'package:crypto/crypto.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/log.dart';
 
+abstract interface class ScanCancellationToken {
+  bool get isCanceled;
+
+  bool get isCurrent;
+
+  bool get canCommit => !isCanceled && isCurrent;
+}
+
+class _CallbackScanCancellationToken implements ScanCancellationToken {
+  _CallbackScanCancellationToken(this._callback);
+
+  final bool Function()? _callback;
+
+  @override
+  bool get isCanceled => _callback?.call() == true;
+
+  @override
+  bool get isCurrent => true;
+
+  @override
+  bool get canCommit => !isCanceled && isCurrent;
+}
+
+const int _defaultFollowUpdateThreads = 8;
+const int _maxConcurrentPerSource = 5;
+const int _followUpdateBatchWidth = 8;
+
+Future<void> _defaultFollowUpdateDelay(Duration duration) =>
+    Future<void>.delayed(duration);
+
+/// Converts the user-facing batch delay into the minimum interval between
+/// starts for one source. This is intentionally independent of the selected
+/// global worker count so increasing global concurrency cannot create a burst
+/// against a single source.
+Duration calculateFollowUpdateSourceInterval(
+  double batchDelay, {
+  bool slowMode = false,
+}) {
+  final safeBatchDelay = batchDelay.isFinite ? math.max(0, batchDelay) : 0.0;
+  final baseMs = (safeBatchDelay / _followUpdateBatchWidth * 1000).round();
+  final milliseconds = baseMs * (slowMode ? 2 : 1);
+  return Duration(milliseconds: math.max(0, milliseconds));
+}
+
+class _SourceLimiterState {
+  var inFlight = 0;
+  final permitWaiters = Queue<_SourcePermitWaiter>();
+  Future<void> startGate = Future<void>.value();
+  DateTime? lastStart;
+}
+
+class _SourcePermitWaiter {
+  final completer = Completer<void>();
+  var canceled = false;
+  var granted = false;
+}
+
+/// Limits requests for each source without serializing their full network
+/// actions. The permit covers the complete action lifetime while the start
+/// gate only protects reservation of the next start time.
+class _SourceRequestLimiter {
+  _SourceRequestLimiter({
+    required this.maxConcurrentPerSource,
+    DateTime Function() clock = DateTime.now,
+    Future<void> Function(Duration) delay = _defaultFollowUpdateDelay,
+  }) : _clock = clock,
+       _delay = delay,
+       assert(maxConcurrentPerSource > 0);
+
+  final int maxConcurrentPerSource;
+  final DateTime Function() _clock;
+  final Future<void> Function(Duration) _delay;
+  final _states = <String, _SourceLimiterState>{};
+
+  Future<T?> run<T>(
+    String sourceKey, {
+    required Duration Function() interval,
+    required ScanCancellationToken token,
+    required Future<T> Function() action,
+    void Function(T result)? onCompleted,
+  }) async {
+    if (!token.canCommit) return null;
+    final state = _states.putIfAbsent(sourceKey, _SourceLimiterState.new);
+    final acquired = await _acquirePermit(state, token);
+    if (!acquired) return null;
+
+    try {
+      // A token can be invalidated while a FIFO waiter is being granted. Do
+      // not enqueue a canceled request behind the source start gate; release
+      // the transferred permit through this finally block immediately.
+      if (!token.canCommit) return null;
+      final reserved = await _reserveStart(state, interval, token);
+      if (!reserved) return null;
+
+      final result = await action();
+      if (onCompleted != null && token.canCommit) onCompleted(result);
+      return result;
+    } finally {
+      _releasePermit(state);
+    }
+  }
+
+  Future<bool> _acquirePermit(
+    _SourceLimiterState state,
+    ScanCancellationToken token,
+  ) async {
+    if (state.inFlight < maxConcurrentPerSource) {
+      state.inFlight++;
+      return true;
+    }
+
+    final waiter = _SourcePermitWaiter();
+    state.permitWaiters.addLast(waiter);
+    while (true) {
+      if (!token.canCommit && !waiter.granted) {
+        waiter.canceled = true;
+        state.permitWaiters.remove(waiter);
+        return false;
+      }
+      if (waiter.granted) return true;
+      // The token has no cancellation Future, so poll while queued. This
+      // prevents a canceled scan from retaining a permit waiter indefinitely
+      // when an in-flight request is slow.
+      await Future.any<void>([
+        waiter.completer.future,
+        Future<void>.delayed(const Duration(milliseconds: 20)),
+      ]);
+    }
+  }
+
+  Future<bool> _reserveStart(
+    _SourceLimiterState state,
+    Duration Function() interval,
+    ScanCancellationToken token,
+  ) async {
+    final releaseGate = Completer<void>();
+    final previous = state.startGate;
+    state.startGate = releaseGate.future;
+    try {
+      await previous;
+      if (!token.canCommit) return false;
+      final lastStart = state.lastStart;
+      if (lastStart != null) {
+        final spacing = interval();
+        final nextAllowed = lastStart.add(
+          spacing.isNegative ? Duration.zero : spacing,
+        );
+        final wait = nextAllowed.difference(_clock());
+        if (wait > Duration.zero) await _delay(wait);
+      }
+      if (!token.canCommit) return false;
+      final start = _clock();
+      state.lastStart = start;
+      return true;
+    } finally {
+      releaseGate.complete();
+    }
+  }
+
+  void _releasePermit(_SourceLimiterState state) {
+    while (state.permitWaiters.isNotEmpty) {
+      final waiter = state.permitWaiters.removeFirst();
+      if (waiter.canceled || waiter.completer.isCompleted) continue;
+      waiter.granted = true;
+      // Transfer the existing permit directly to the FIFO waiter.
+      waiter.completer.complete();
+      return;
+    }
+    state.inFlight--;
+  }
+}
+
+/// Public test-facing facade for exercising the same limiter used by scans
+/// with a deterministic clock and delay scheduler.
+class FollowUpdateRequestLimiter {
+  FollowUpdateRequestLimiter({
+    required int maxConcurrentPerSource,
+    DateTime Function() clock = DateTime.now,
+    Future<void> Function(Duration) delay = _defaultFollowUpdateDelay,
+  }) : _limiter = _SourceRequestLimiter(
+         maxConcurrentPerSource: maxConcurrentPerSource,
+         clock: clock,
+         delay: delay,
+       );
+
+  final _SourceRequestLimiter _limiter;
+
+  Future<T?> run<T>(
+    String sourceKey, {
+    required Duration Function() interval,
+    required ScanCancellationToken token,
+    required Future<T> Function() action,
+    void Function(T result)? onCompleted,
+  }) => _limiter.run<T>(
+    sourceKey,
+    interval: interval,
+    token: token,
+    action: action,
+    onCompleted: onCompleted,
+  );
+}
+
 class ComicUpdateResult {
   final bool updated;
   final String? errorMessage;
+  final bool canceled;
 
-  ComicUpdateResult(this.updated, this.errorMessage);
+  ComicUpdateResult(this.updated, this.errorMessage, {this.canceled = false});
 }
 
 /// How credible a not-found style error is as evidence of a delisted comic.
@@ -105,7 +311,7 @@ final probeWindowHits = <String, int>{};
 
 /// Asks [sourceKey]'s list endpoints whether the site is alive.
 ///
-/// Returns `true` (alive), `false` (dead: error, timeout or empty list) or
+/// Returns `true` (alive), `false` (dead: error or timeout) or
 /// `null` when the source has no list interface to probe with, in which case
 /// the caller must keep its previous behavior (no probing).
 Future<bool?> probeSourceAlive(String sourceKey) async {
@@ -120,22 +326,55 @@ Future<bool?> probeSourceAlive(String sourceKey) async {
       final res = await data.loadFolders!().timeout(
         const Duration(seconds: 10),
       );
-      return res.success && res.data.isNotEmpty;
+      // An empty but successful list is still a successful request. It may
+      // simply mean that this account has no folders/comics on the source.
+      return res.success;
     }
     final res = await data.loadComic!(1).timeout(const Duration(seconds: 10));
-    return res.success && res.data.isNotEmpty;
+    return res.success;
   } catch (_) {
     return false;
   }
 }
 
 String? comicUpdateMarker(ComicDetails info) {
-  final values = <String>[];
   final updateTime = info.findUpdateTime();
-  if (updateTime != null) values.add('time:$updateTime');
   final chapterCount = info.chapters?.length;
-  if (chapterCount != null) values.add('chapters:$chapterCount');
-  return values.isEmpty ? null : values.join('|');
+  final recent = _recentChapterFingerprint(info.chapters);
+  if (updateTime == null && chapterCount == null && recent == null) return null;
+  return 'v2|time:${_normalizeMarkerTime(updateTime)}|'
+      'chapters:${chapterCount ?? ''}|recent:${recent ?? ''}';
+}
+
+String _normalizeMarkerTime(String? value) {
+  if (value == null || value.trim().isEmpty) return '';
+  final parts = value.trim().split('-');
+  if (parts.length != 3) return value.trim();
+  final year = int.tryParse(parts[0]);
+  final month = int.tryParse(parts[1]);
+  final day = int.tryParse(parts[2]);
+  if (year == null || month == null || day == null) return value.trim();
+  return '$year-${month.toString().padLeft(2, '0')}-'
+      '${day.toString().padLeft(2, '0')}';
+}
+
+String? _recentChapterFingerprint(ComicChapters? chapters) {
+  if (chapters == null) return null;
+  final entries = <Map<String, String>>[];
+  if (chapters.isGrouped) {
+    for (final group in chapters.groups) {
+      for (final entry in chapters.getGroup(group).entries) {
+        entries.add({'group': group, 'id': entry.key, 'title': entry.value});
+      }
+    }
+  } else {
+    for (final entry in chapters.allChapters.entries) {
+      entries.add({'group': '', 'id': entry.key, 'title': entry.value});
+    }
+  }
+  final recent = entries.take(10).toList(growable: false);
+  final payload = jsonEncode(recent);
+  return sha256.convert(utf8.encode(payload)).toString();
 }
 
 Future<ComicUpdateResult> updateComic(
@@ -143,50 +382,58 @@ Future<ComicUpdateResult> updateComic(
   NetworkFavoriteFolderRef folder, {
   NetworkFavoriteCacheManager? cache,
   bool sourceHealthy = true,
+  ScanCancellationToken? cancellationToken,
 }) async {
   final manager = cache ?? NetworkFavoriteCacheManager();
+  bool canCommit() => cancellationToken?.canCommit ?? true;
+  ComicUpdateResult canceled() =>
+      ComicUpdateResult(false, null, canceled: true);
 
   Future<ComicUpdateResult> onSuccess(ComicDetails newInfo) async {
+    if (!canCommit()) return canceled();
     final author = newInfo.subTitle?.trim();
-    // Record the check first: its "updated" verdict decides whether the
-    // (likely changed) cover URL is committed to the cache rows.
-    final updated = manager.recordComicCheckEverywhere(
-      c.sourceKey,
+    // Commit the check state and every favorite snapshot together. The
+    // (likely changed) cover URL is only included when the committed marker
+    // proves this is an actual update.
+    final updated = manager.applySuccessfulComicCheck(
+      folder,
       c.id,
       updateTime: newInfo.findUpdateTime(),
       updateMarker: comicUpdateMarker(newInfo),
-    );
-    manager.updateBasicInfoEverywhere(
-      folder,
-      c.id,
       title: newInfo.title,
       author: author?.isNotEmpty == true ? author : newInfo.findAuthor(),
       chapterCount: newInfo.chapters?.length,
-      // Only confirmed updates refresh the cover URL. Refreshing it on every
-      // successful check would invalidate the URL-keyed image cache during
-      // each 24h sweep, since many sources sign cover URLs per response.
-      cover: updated ? newInfo.cover : null,
+      // The transaction only applies this cover when the marker confirms an
+      // update; refreshing it on every successful check would invalidate the
+      // URL-keyed image cache during each 24h sweep.
+      cover: newInfo.cover,
     );
+    if (!canCommit()) return canceled();
     return ComicUpdateResult(updated, null);
   }
 
   var comicSource = c.type.comicSource;
   if (comicSource == null) {
+    if (!canCommit()) return canceled();
     manager.markComicRetryLaterEverywhere(c.sourceKey, c.id);
     return ComicUpdateResult(false, "Comic source not found");
   }
   if (comicSource.loadComicInfo == null) {
+    if (!canCommit()) return canceled();
     manager.markComicRetryLaterEverywhere(c.sourceKey, c.id);
     return ComicUpdateResult(false, 'Comic source does not load details');
   }
   int retries = 3;
   while (true) {
+    if (!canCommit()) return canceled();
     try {
       final info = await comicSource.loadComicInfo!(c.id).timeout(
         const Duration(seconds: 20),
       );
+      if (!canCommit()) return canceled();
       return await onSuccess(info.data);
     } catch (e, s) {
+      if (!canCommit()) return canceled();
       final message = e.toString();
       _logCheckError(message, e, s);
       final signal = classifyNotFoundError(message);
@@ -194,6 +441,7 @@ Future<ComicUpdateResult> updateComic(
         if (signal == NotFoundSignal.strong) {
           // A confirmed 404/410/delist response on a healthy source marks the
           // comic as suspected removed right away.
+          if (!canCommit()) return canceled();
           manager.markComicSuspectGoneEverywhere(c.sourceKey, c.id);
           return ComicUpdateResult(false, message);
         }
@@ -204,12 +452,15 @@ Future<ComicUpdateResult> updateComic(
         // is never blocked by a 400 loop; the next round accumulates another
         // hit. A transient (non-400) failure never resets the accumulated
         // count, only a successful check or a suspect mark does.
+        if (!canCommit()) return canceled();
         final hits = manager.markComicNotFoundHitEverywhere(c.sourceKey, c.id);
         if (hits >= 3) {
+          if (!canCommit()) return canceled();
           manager.markComicSuspectGoneEverywhere(c.sourceKey, c.id);
           return ComicUpdateResult(false, message);
         }
         final failures = c.checkFailures + 1;
+        if (!canCommit()) return canceled();
         manager.markComicRetryLaterEverywhere(
           c.sourceKey,
           c.id,
@@ -219,9 +470,11 @@ Future<ComicUpdateResult> updateComic(
         return ComicUpdateResult(false, message);
       }
       await Future.delayed(kTransientRetryDelay);
+      if (!canCommit()) return canceled();
       retries--;
       if (retries == 0) {
         final failures = c.checkFailures + 1;
+        if (!canCommit()) return canceled();
         manager.markComicRetryLaterEverywhere(
           c.sourceKey,
           c.id,
@@ -366,7 +619,27 @@ List<_ScanItem> _buildScanItems(
   if (skipKeys != null) {
     items.removeWhere((key, _) => skipKeys.contains(key));
   }
-  return items.values.toList();
+  return _interleaveScanItemsBySource(items.values);
+}
+
+/// Interleaves source queues in first-seen order while preserving each
+/// source's original item order. This keeps a blocked source from occupying
+/// every worker before another source gets a chance to start.
+List<_ScanItem> _interleaveScanItemsBySource(Iterable<_ScanItem> items) {
+  final grouped = <String, Queue<_ScanItem>>{};
+  for (final item in items) {
+    grouped.putIfAbsent(item.sourceKey, Queue<_ScanItem>.new).addLast(item);
+  }
+
+  final result = <_ScanItem>[];
+  while (grouped.isNotEmpty) {
+    for (final sourceKey in grouped.keys.toList(growable: false)) {
+      final queue = grouped[sourceKey]!;
+      result.add(queue.removeFirst());
+      if (queue.isEmpty) grouped.remove(sourceKey);
+    }
+  }
+  return result;
 }
 
 /// Runs a follow-up scan over every qualifying comic of [folders] with a
@@ -381,19 +654,27 @@ Stream<UpdateProgress> scanFollowUpdates(
   List<NetworkFavoriteFolderRef> folders,
   FollowUpdateMode mode, {
   bool Function()? isCanceled,
+  ScanCancellationToken? cancellationToken,
   bool ignoreRetryAfter = false,
   NetworkFavoriteCacheManager? cache,
   bool includeSuspect = false,
+  DateTime Function()? clock,
+  Future<void> Function(Duration)? delay,
 }) {
   var stream = StreamController<UpdateProgress>();
-  _runScan(
-    folders,
-    mode,
-    stream,
-    isCanceled: isCanceled,
-    ignoreRetryAfter: ignoreRetryAfter,
-    cache: cache,
-    includeSuspect: includeSuspect,
+  final token = cancellationToken ?? _CallbackScanCancellationToken(isCanceled);
+  unawaited(
+    _runScan(
+      folders,
+      mode,
+      stream,
+      token: token,
+      ignoreRetryAfter: ignoreRetryAfter,
+      cache: cache,
+      includeSuspect: includeSuspect,
+      clock: clock ?? DateTime.now,
+      delay: delay ?? _defaultFollowUpdateDelay,
+    ),
   );
   return stream.stream;
 }
@@ -402,7 +683,9 @@ Future<void> _runScan(
   List<NetworkFavoriteFolderRef> folders,
   FollowUpdateMode mode,
   StreamController<UpdateProgress> stream, {
-  bool Function()? isCanceled,
+  required ScanCancellationToken token,
+  required DateTime Function() clock,
+  required Future<void> Function(Duration) delay,
   bool ignoreRetryAfter = false,
   NetworkFavoriteCacheManager? cache,
   bool includeSuspect = false,
@@ -413,6 +696,11 @@ Future<void> _runScan(
   var checked = 0;
   var current = 0;
   final healthySources = <String>{};
+  // A successful list probe is independent evidence that the source is
+  // available. This matters when every comic in the batch returns 404: no
+  // detail check can establish health in that case.
+  final probeHealthySources = <String>{};
+  final sourceDegraded = <String>{};
   final sourceConsecutiveErrors = <String, int>{};
   final sourceConfirmedHits = <String, int>{};
   final bulkDelistSources = <String>{};
@@ -427,21 +715,24 @@ Future<void> _runScan(
   // same source in the same frame.
   final probingSources = <String, Future<bool?>>{};
 
-  // A source is healthy while it has at least one successful check in this
-  // run, has not tripped the bulk-delist detector and has no accumulated
-  // service-class errors (timeouts/5xx are evidence the source is flaky, so
-  // delist-looking responses are not trusted).
-  bool sourceHealthy(String sourceKey) =>
-      healthySources.contains(sourceKey) &&
-      !bulkDelistSources.contains(sourceKey) &&
-      (serviceErrorCounts[sourceKey] ?? 0) == 0;
-
   // Sources judged down from failure evidence (service-error accumulation or
   // a failed list probe). Unlike the ordinary consecutive-error trip, the
   // verdict is not undone by a later success in the same run: a single
   // success right after a dead probe must not re-trust the delist-looking
   // responses that preceded it. The next run re-evaluates from scratch.
   final hardDelistedSources = <String>{};
+
+  // A source is healthy while it has at least one successful detail check or
+  // probe in this run, has not tripped the bulk-delist detector and has no
+  // accumulated service-class errors (timeouts/5xx are evidence the source
+  // is flaky, so delist-looking responses are not trusted).
+  bool sourceHealthy(String sourceKey) =>
+      (healthySources.contains(sourceKey) ||
+          probeHealthySources.contains(sourceKey)) &&
+      !bulkDelistSources.contains(sourceKey) &&
+      !hardDelistedSources.contains(sourceKey) &&
+      !sourceDegraded.contains(sourceKey) &&
+      (serviceErrorCounts[sourceKey] ?? 0) == 0;
 
   // Judges the source as down for delist purposes: no more marks are made
   // this run and every mark already made for it (including earlier runs) is
@@ -459,7 +750,7 @@ Future<void> _runScan(
     }
   }
 
-  late ScanRunInfo run;
+  ScanRunInfo? run;
   try {
     // Resume an interrupted (crash) run with its stored mode and cooldown
     // policy; otherwise start a fresh run.
@@ -507,22 +798,40 @@ Future<void> _runScan(
     // The final total is emitted once, before any work starts.
     stream.add(UpdateProgress(total, 0, 0, 0));
 
+    // Keep a stable non-null id for all worker closures. The nullable [run]
+    // remains available to the finalizer so an initialization failure cannot
+    // be replaced by a LateInitializationError.
+    final initializedRun = run;
+    final runId = initializedRun.runId;
+
     final threads =
         ((appdata.settings['followUpdateThreads'] as num?)?.toInt().clamp(
                   1,
                   16,
                 ) ??
-                5)
+                _defaultFollowUpdateThreads)
             .toInt();
     final batchDelay =
         (appdata.settings['followUpdateBatchDelay'] as num?)?.toDouble() ?? 5;
-    final spacingMs = (batchDelay / 5 * 1000).round();
-    var nextAllowed = DateTime.now();
     var nextIndex = 0;
+    // One limiter per scan keeps the normal worker, probes and retry phase on
+    // the same source bounded and rate-limited. Cross-generation writes are
+    // isolated by the cancellation token; a canceled request may still
+    // finish independently.
+    final sourceLimiter = _SourceRequestLimiter(
+      maxConcurrentPerSource: math.min(_maxConcurrentPerSource, threads),
+      clock: clock,
+      delay: delay,
+    );
+    Duration sourceInterval(String sourceKey) =>
+        calculateFollowUpdateSourceInterval(
+          batchDelay,
+          slowMode: sourceSlowMode.contains(sourceKey),
+        );
 
     Future<void> worker() async {
       while (true) {
-        if (isCanceled?.call() == true) return;
+        if (!token.canCommit) return;
         final i = nextIndex++;
         if (i >= items.length) return;
         final item = items[i];
@@ -530,21 +839,7 @@ Future<void> _runScan(
           sourceKey: item.sourceKey,
           folderId: item.representativeFolderId,
         );
-        // Rate limit: keep the old effective pace (batchDelay seconds per 5
-        // comics), doubled for sources in slow mode. Approximate shared
-        // timestamp; a rare same-frame double fire is acceptable.
-        final now = DateTime.now();
-        final effectiveSpacing =
-            spacingMs * (sourceSlowMode.contains(item.sourceKey) ? 2 : 1);
-        if (effectiveSpacing > 0) {
-          final wait = nextAllowed.difference(now);
-          if (wait > Duration.zero) {
-            await Future.delayed(wait);
-          }
-          nextAllowed = DateTime.now().add(
-            Duration(milliseconds: effectiveSpacing),
-          );
-        }
+        if (!token.canCommit) return;
         // Re-read the row so the 24h hit window and retry state are current.
         final fresh = manager.getComicUpdateInfo(
           item.sourceKey,
@@ -552,8 +847,9 @@ Future<void> _runScan(
           item.representativeFolderId,
         );
         if (fresh == null) {
+          if (!token.canCommit) return;
           manager.markScanItemDone(
-            run.runId,
+            runId,
             item.sourceKey,
             item.comicId,
             result: 'skipped',
@@ -571,38 +867,114 @@ Future<void> _runScan(
               probeWindowRequests[item.sourceKey]! >= kProbeWindowSize) {
             final probe = probingSources.putIfAbsent(
               item.sourceKey,
-              () => probeSourceAlive(item.sourceKey),
+              () => sourceLimiter.run<bool?>(
+                item.sourceKey,
+                interval: () => sourceInterval(item.sourceKey),
+                token: token,
+                action: () => probeSourceAlive(item.sourceKey),
+              ),
             );
             final alive = await probe;
             probingSources.remove(item.sourceKey);
+            if (!token.canCommit) return;
             if (alive == false) {
               delistSource(item.sourceKey, reason: 're-probe failed');
             } else {
+              probeHealthySources.add(item.sourceKey);
               probeWindowRequests.remove(item.sourceKey);
               probeWindowHits.remove(item.sourceKey);
             }
           }
         }
+        final sourceKey = item.sourceKey;
         final ComicUpdateResult result;
         try {
-          result = await updateComic(
-            fresh,
-            folder,
-            cache: manager,
-            sourceHealthy: sourceHealthy(item.sourceKey),
-          );
+          result =
+              await sourceLimiter.run<ComicUpdateResult>(
+                item.sourceKey,
+                interval: () => sourceInterval(item.sourceKey),
+                token: token,
+                action: () => updateComic(
+                  fresh,
+                  folder,
+                  cache: manager,
+                  sourceHealthy: sourceHealthy(item.sourceKey),
+                  cancellationToken: token,
+                ),
+                onCompleted: (completed) {
+                  if (completed.canceled) return;
+                  final message = completed.errorMessage;
+                  if (message != null) {
+                    final signal = classifyNotFoundError(message);
+                    if (signal != NotFoundSignal.none) {
+                      notFoundRetries.add((comic: fresh, folder: folder));
+                    }
+                    sourceConsecutiveErrors[sourceKey] =
+                        (sourceConsecutiveErrors[sourceKey] ?? 0) + 1;
+                    if ((sourceConsecutiveErrors[sourceKey] ?? 0) >= 10) {
+                      bulkDelistSources.add(sourceKey);
+                      sourceSlowMode.add(sourceKey);
+                    }
+                    if (signal == NotFoundSignal.none) {
+                      sourceDegraded.add(sourceKey);
+                      serviceErrorCounts[sourceKey] =
+                          (serviceErrorCounts[sourceKey] ?? 0) + 1;
+                      if ((serviceErrorCounts[sourceKey] ?? 0) >=
+                          kServiceErrorDelistThreshold) {
+                        delistSource(
+                          sourceKey,
+                          reason:
+                              '${serviceErrorCounts[sourceKey]} service errors',
+                        );
+                      }
+                    }
+                    if (signal != NotFoundSignal.none &&
+                        manager.isComicSuspectGone(sourceKey, item.comicId)) {
+                      sourceConfirmedHits[sourceKey] =
+                          (sourceConfirmedHits[sourceKey] ?? 0) + 1;
+                      markedThisRun.add((
+                        sourceKey: sourceKey,
+                        comicId: item.comicId,
+                      ));
+                      if ((sourceConfirmedHits[sourceKey] ?? 0) >= 3) {
+                        bulkDelistSources.add(sourceKey);
+                        for (final marked in markedThisRun) {
+                          if (marked.sourceKey == sourceKey) {
+                            manager.clearComicSuspectGoneEverywhere(
+                              marked.sourceKey,
+                              marked.comicId,
+                            );
+                          }
+                        }
+                      }
+                    }
+                  } else {
+                    healthySources.add(sourceKey);
+                    sourceConsecutiveErrors[sourceKey] = 0;
+                    sourceConfirmedHits[sourceKey] = 0;
+                    serviceErrorCounts[sourceKey] = 0;
+                    sourceSlowMode.remove(sourceKey);
+                    if (!hardDelistedSources.contains(sourceKey)) {
+                      bulkDelistSources.remove(sourceKey);
+                    }
+                  }
+                },
+              ) ??
+              ComicUpdateResult(false, null, canceled: true);
         } catch (e, s) {
+          if (!token.canCommit) return;
           // Defensive: an unexpected exception must never kill the worker or
           // leave the item stuck. Back off by the accumulated failure count
           // like every other failure path.
           Log.error('Follow updates item', e, s);
+          if (!token.canCommit) return;
           manager.markComicRetryLaterEverywhere(
             item.sourceKey,
             item.comicId,
             failures: fresh.checkFailures + 1,
           );
           manager.markScanItemDone(
-            run.runId,
+            runId,
             item.sourceKey,
             item.comicId,
             result: 'retry_later',
@@ -622,58 +994,10 @@ Future<void> _runScan(
           );
           continue;
         }
+        if (result.canceled || !token.canCommit) return;
         current++;
         if (result.errorMessage != null) {
           final signal = classifyNotFoundError(result.errorMessage!);
-          if (signal != NotFoundSignal.none) {
-            notFoundRetries.add((comic: fresh, folder: folder));
-          }
-          final sourceKey = item.sourceKey;
-          sourceConsecutiveErrors[sourceKey] =
-              (sourceConsecutiveErrors[sourceKey] ?? 0) + 1;
-          if ((sourceConsecutiveErrors[sourceKey] ?? 0) >= 10) {
-            bulkDelistSources.add(sourceKey);
-            sourceSlowMode.add(sourceKey);
-          }
-          // Service-class errors (timeouts, 5xx, risk control) are evidence
-          // the source itself is failing. They accumulate across runs so
-          // small batches can still trip the detector, and any successful
-          // check resets them; a delist-looking response is never both.
-          if (signal == NotFoundSignal.none) {
-            serviceErrorCounts[sourceKey] =
-                (serviceErrorCounts[sourceKey] ?? 0) + 1;
-            if ((serviceErrorCounts[sourceKey] ?? 0) >=
-                kServiceErrorDelistThreshold) {
-              delistSource(
-                sourceKey,
-                reason: '${serviceErrorCounts[sourceKey]} service errors',
-              );
-            }
-          }
-          // A confirmed delist hit (strong 404 or a 3x400 session). Several
-          // in one run strongly suggest the source itself is rejecting
-          // requests (risk control or a full-site outage) rather than
-          // individual delists: stop marking for the source and roll back
-          // everything this run already marked for it. Rolled-back comics
-          // are re-checked by the next run and re-marked only if they are
-          // really gone.
-          if (signal != NotFoundSignal.none &&
-              manager.isComicSuspectGone(sourceKey, item.comicId)) {
-            sourceConfirmedHits[sourceKey] =
-                (sourceConfirmedHits[sourceKey] ?? 0) + 1;
-            markedThisRun.add((sourceKey: sourceKey, comicId: item.comicId));
-            if ((sourceConfirmedHits[sourceKey] ?? 0) >= 3) {
-              bulkDelistSources.add(sourceKey);
-              for (final marked in markedThisRun) {
-                if (marked.sourceKey == sourceKey) {
-                  manager.clearComicSuspectGoneEverywhere(
-                    marked.sourceKey,
-                    marked.comicId,
-                  );
-                }
-              }
-            }
-          }
           // First delist-looking hit of the run: ask the list endpoints
           // whether the site is alive before trusting further hits. A dead
           // answer trips the detector right away (the mark of this comic is
@@ -685,13 +1009,20 @@ Future<void> _runScan(
             if (!probeWindowRequests.containsKey(sourceKey)) {
               final probe = probingSources.putIfAbsent(
                 sourceKey,
-                () => probeSourceAlive(sourceKey),
+                () => sourceLimiter.run<bool?>(
+                  sourceKey,
+                  interval: () => sourceInterval(sourceKey),
+                  token: token,
+                  action: () => probeSourceAlive(sourceKey),
+                ),
               );
               final alive = await probe;
               probingSources.remove(sourceKey);
+              if (!token.canCommit) return;
               if (alive == false) {
                 delistSource(sourceKey, reason: 'probe failed');
               } else if (alive == true) {
+                probeHealthySources.add(sourceKey);
                 probeWindowRequests[sourceKey] = 0;
                 probeWindowHits[sourceKey] = 0;
               }
@@ -701,25 +1032,17 @@ Future<void> _runScan(
           }
           errors++;
           manager.markScanItemDone(
-            run.runId,
+            runId,
             item.sourceKey,
             item.comicId,
             result: signal == NotFoundSignal.none ? 'retry_later' : 'not_found',
             error: result.errorMessage,
           );
         } else {
-          healthySources.add(item.sourceKey);
-          sourceConsecutiveErrors[item.sourceKey] = 0;
-          sourceConfirmedHits[item.sourceKey] = 0;
-          serviceErrorCounts[item.sourceKey] = 0;
-          sourceSlowMode.remove(item.sourceKey);
-          if (!hardDelistedSources.contains(item.sourceKey)) {
-            bulkDelistSources.remove(item.sourceKey);
-          }
           checked++;
           if (result.updated) updated++;
           manager.markScanItemDone(
-            run.runId,
+            runId,
             item.sourceKey,
             item.comicId,
             result: 'ok',
@@ -750,16 +1073,19 @@ Future<void> _runScan(
     // cannot accumulate twice on the same day. Re-checks share the main
     // workers' rate limiter and run on a few concurrent workers instead of
     // serially.
-    if (notFoundRetries.isNotEmpty && isCanceled?.call() != true) {
+    if (notFoundRetries.isNotEmpty && token.canCommit) {
       final retryThreads = math.min(3, threads);
       var retryIndex = 0;
       Future<void> retryWorker() async {
         while (true) {
-          if (isCanceled?.call() == true) return;
+          if (!token.canCommit) return;
           final i = retryIndex++;
           if (i >= notFoundRetries.length) return;
           final retry = notFoundRetries[i];
-          if (manager.isComicSuspectGone(retry.comic.sourceKey, retry.comic.id)) {
+          if (manager.isComicSuspectGone(
+            retry.comic.sourceKey,
+            retry.comic.id,
+          )) {
             continue;
           }
           // The source tripped the bulk-delist detector; re-checking only
@@ -771,18 +1097,21 @@ Future<void> _runScan(
             retry.folder.folderId,
           );
           if (fresh == null) continue;
-          final now = DateTime.now();
-          if (spacingMs > 0) {
-            final wait = nextAllowed.difference(now);
-            if (wait > Duration.zero) await Future.delayed(wait);
-            nextAllowed = DateTime.now().add(Duration(milliseconds: spacingMs));
-          }
-          final result = await updateComic(
-            fresh,
-            retry.folder,
-            cache: manager,
-            sourceHealthy: sourceHealthy(retry.comic.sourceKey),
-          );
+          final result =
+              await sourceLimiter.run<ComicUpdateResult>(
+                retry.comic.sourceKey,
+                interval: () => sourceInterval(retry.comic.sourceKey),
+                token: token,
+                action: () => updateComic(
+                  fresh,
+                  retry.folder,
+                  cache: manager,
+                  sourceHealthy: sourceHealthy(retry.comic.sourceKey),
+                  cancellationToken: token,
+                ),
+              ) ??
+              ComicUpdateResult(false, null, canceled: true);
+          if (result.canceled || !token.canCommit) return;
           if (result.errorMessage == null) {
             checked++;
             if (result.updated) updated++;
@@ -790,23 +1119,30 @@ Future<void> _runScan(
           }
         }
       }
-      await Future.wait([
-        for (var i = 0; i < retryThreads; i++) retryWorker(),
-      ]);
+
+      await Future.wait([for (var i = 0; i < retryThreads; i++) retryWorker()]);
     }
 
-    stream.add(UpdateProgress(total, current, errors, updated));
+    if (token.canCommit) {
+      stream.add(UpdateProgress(total, current, errors, updated));
+    }
+  } catch (e, s) {
+    // _runScan is intentionally started in the background. Surface failures
+    // to the stream consumer instead of leaving them as unhandled zone errors.
+    stream.addError(e, s);
   } finally {
     try {
       // The run always reaches a terminal state; a canceled run is not
       // resumed later (the normal filters re-select its pending items).
-      manager.updateScanRunStatus(
-        run.runId,
-        isCanceled?.call() == true ? 'canceled' : 'finished',
-      );
+      if (run != null) {
+        manager.updateScanRunStatus(
+          run.runId,
+          token.isCanceled ? 'canceled' : 'finished',
+        );
+      }
     } finally {
-      if (checked > 0) manager.notifyCacheChanged();
-      stream.close();
+      if (checked > 0 && token.isCurrent) manager.notifyCacheChanged();
+      await stream.close();
     }
   }
 }

@@ -10,19 +10,21 @@ import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_updates.dart';
 import 'package:venera/foundation/res.dart';
 
-FavoriteItem _comic(String id) => FavoriteItem(
-  id: id,
-  name: 'Comic $id',
-  coverPath: 'https://example.invalid/$id.jpg',
-  author: 'Author',
-  sourceKeyValue: 'test-source',
-  tags: const ['tag'],
-);
+FavoriteItem _comic(String id, {String sourceKey = 'test-source'}) =>
+    FavoriteItem(
+      id: id,
+      name: 'Comic $id',
+      coverPath: 'https://example.invalid/$id.jpg',
+      author: 'Author',
+      sourceKeyValue: sourceKey,
+      tags: const ['tag'],
+    );
 
 FavoriteData _numericData(
-  Future<Res<List<Comic>>> Function(int page, [String? folder]) loader,
-) => FavoriteData(
-  key: 'test-source',
+  Future<Res<List<Comic>>> Function(int page, [String? folder]) loader, {
+  String sourceKey = 'test-source',
+}) => FavoriteData(
+  key: sourceKey,
   title: 'Test source',
   multiFolder: true,
   loadComic: loader,
@@ -32,11 +34,12 @@ FavoriteData _numericData(
 );
 
 ComicSource _detailSource(
-  Future<Res<ComicDetails>> Function(String id) loader,
-) {
+  Future<Res<ComicDetails>> Function(String id) loader, {
+  String sourceKey = 'test-source',
+}) {
   return ComicSource(
     'Test source',
-    'test-source',
+    sourceKey,
     null,
     null,
     null,
@@ -76,15 +79,16 @@ ComicSource _detailSource(
 ComicSource _detailSourceWithFavorite(
   Future<Res<ComicDetails>> Function(String id) loader, {
   required Future<Res<Map<String, String>>> Function([String?]) loadFolders,
+  String sourceKey = 'test-source',
 }) {
   return ComicSource(
     'Test source',
-    'test-source',
+    sourceKey,
     null,
     null,
     null,
     FavoriteData(
-      key: 'test-source',
+      key: sourceKey,
       title: 'Test source',
       multiFolder: true,
       loadComic: null,
@@ -133,6 +137,35 @@ Future<Res<ComicDetails>> _details(String id) async => Res(
   }),
 );
 
+class _TestScanToken implements ScanCancellationToken {
+  bool canceled = false;
+
+  @override
+  bool get isCanceled => canceled;
+
+  @override
+  bool get isCurrent => true;
+
+  @override
+  bool get canCommit => !isCanceled;
+}
+
+Future<List<Object>> _collectScanErrors(Stream<UpdateProgress> stream) async {
+  final errors = <Object>[];
+  final done = Completer<void>();
+  late StreamSubscription<UpdateProgress> subscription;
+  subscription = stream.listen(
+    (_) {},
+    onError: (Object error, StackTrace _) => errors.add(error),
+    onDone: () {
+      if (!done.isCompleted) done.complete();
+    },
+  );
+  await done.future.timeout(const Duration(seconds: 5));
+  await subscription.cancel();
+  return errors;
+}
+
 void main() {
   late Directory tempDir;
   late NetworkFavoriteCacheManager cache;
@@ -151,7 +184,7 @@ void main() {
     );
     // Zero the transient retry delay for fast tests.
     kTransientRetryDelay = Duration.zero;
-    appdata.settings['followUpdateThreads'] = 5;
+    appdata.settings['followUpdateThreads'] = 8;
     appdata.settings['followUpdateBatchDelay'] = 0.0;
     // Cross-run delist/probe state must not leak between tests.
     serviceErrorCounts.clear();
@@ -175,6 +208,73 @@ void main() {
     await cache.refreshFolders(data);
     await cache.refreshPage(data, folder, 1);
   }
+
+  group('scan run lifecycle', () {
+    test('forwards a run lookup failure and still closes the stream', () async {
+      final brokenDir = await Directory.systemTemp.createTemp(
+        'venera-follow-scan-broken-',
+      );
+      addTearDown(() => brokenDir.delete(recursive: true));
+      final brokenCache = NetworkFavoriteCacheManager.forTesting();
+      await brokenCache.init(
+        databasePath: '${brokenDir.path}${Platform.pathSeparator}cache.db',
+        migrateLegacy: false,
+      );
+      // Force getCurrentScanRun to fail before a ScanRunInfo can be assigned.
+      brokenCache.close();
+
+      final errors = await _collectScanErrors(
+        scanFollowUpdates([folder], FollowUpdateMode.force, cache: brokenCache),
+      );
+
+      expect(errors, hasLength(1));
+      expect(
+        errors.single.toString(),
+        isNot(contains('LateInitializationError')),
+      );
+    });
+
+    test(
+      'forwards createScanRun failures without writing a terminal run',
+      () async {
+        await cacheComics(['one']);
+        final database = sqlite3.open(
+          '${tempDir.path}${Platform.pathSeparator}cache.db',
+        );
+        try {
+          database.execute('''
+          CREATE TRIGGER fail_create_scan_run
+          BEFORE INSERT ON scan_queue
+          BEGIN
+            SELECT RAISE(ABORT, 'injected createScanRun failure');
+          END;
+        ''');
+        } finally {
+          database.dispose();
+        }
+
+        final errors = await _collectScanErrors(
+          scanFollowUpdates(
+            [folder],
+            FollowUpdateMode.force,
+            ignoreRetryAfter: true,
+            cache: cache,
+          ),
+        );
+
+        expect(errors, hasLength(1));
+        expect(
+          errors.single.toString(),
+          contains('injected createScanRun failure'),
+        );
+        expect(
+          errors.single.toString(),
+          isNot(contains('LateInitializationError')),
+        );
+        expect(cache.getCurrentScanRun(), isNull);
+      },
+    );
+  });
 
   group('classifyNotFoundError', () {
     test('status codes and wording', () {
@@ -223,37 +323,40 @@ void main() {
   });
 
   group('400 confirmation accumulation', () {
-    test('three accumulated 400 hits confirm a delist and mark suspect', () async {
-      await cacheComics(['one']);
-      var calls = 0;
-      final source = _detailSource((id) async {
-        calls++;
-        throw Exception('Invalid Status Code: 400. The Request is invalid.');
-      });
-      ComicSourceManager().add(source);
+    test(
+      'three accumulated 400 hits confirm a delist and mark suspect',
+      () async {
+        await cacheComics(['one']);
+        var calls = 0;
+        final source = _detailSource((id) async {
+          calls++;
+          throw Exception('Invalid Status Code: 400. The Request is invalid.');
+        });
+        ComicSourceManager().add(source);
 
-      // Three rounds, each reading the fresh row like a separate scan run;
-      // the worker never blocks on an inline confirmation session.
-      for (var round = 0; round < 3; round++) {
-        final item = cache.getComicsWithUpdatesInfo(folder).single;
-        final result = await updateComic(item, folder, cache: cache);
-        expect(result.errorMessage, isNotNull);
-        final fresh = cache.getComicsWithUpdatesInfo(folder).single;
-        if (round == 0) {
-          expect(fresh.checkNotFoundCount, 1);
-          expect(fresh.isSuspectGone, isFalse);
-        } else if (round == 1) {
-          expect(fresh.checkNotFoundCount, 2);
-          expect(fresh.isSuspectGone, isFalse);
-        } else {
-          expect(fresh.isSuspectGone, isTrue);
-          // The suspect mark resets the accumulated count.
-          expect(fresh.checkNotFoundCount, 0);
+        // Three rounds, each reading the fresh row like a separate scan run;
+        // the worker never blocks on an inline confirmation session.
+        for (var round = 0; round < 3; round++) {
+          final item = cache.getComicsWithUpdatesInfo(folder).single;
+          final result = await updateComic(item, folder, cache: cache);
+          expect(result.errorMessage, isNotNull);
+          final fresh = cache.getComicsWithUpdatesInfo(folder).single;
+          if (round == 0) {
+            expect(fresh.checkNotFoundCount, 1);
+            expect(fresh.isSuspectGone, isFalse);
+          } else if (round == 1) {
+            expect(fresh.checkNotFoundCount, 2);
+            expect(fresh.isSuspectGone, isFalse);
+          } else {
+            expect(fresh.isSuspectGone, isTrue);
+            // The suspect mark resets the accumulated count.
+            expect(fresh.checkNotFoundCount, 0);
+          }
         }
-      }
-      // One request per round; no inline confirmation retries anymore.
-      expect(calls, 3);
-    });
+        // One request per round; no inline confirmation retries anymore.
+        expect(calls, 3);
+      },
+    );
 
     test('a success during accumulation clears the pending state', () async {
       await cacheComics(['one']);
@@ -322,47 +425,52 @@ void main() {
       },
     );
 
-    test('400 hits accumulate across runs and confirm on the third hit', () async {
-      // Serial workers: the healthy comic sorts before the failing one, so
-      // the source is healthy when the 400 hits, keeping the per-run counting
-      // deterministic (main check records one hit, the retry phase re-check a
-      // second).
-      appdata.settings['followUpdateThreads'] = 1;
-      addTearDown(() => appdata.settings['followUpdateThreads'] = 5);
-      await cacheComics(['a-ok', 'b-bad']);
-      final source = _detailSource((id) async {
-        if (id == 'b-bad') {
-          throw Exception('Invalid Status Code: 400. The Request is invalid.');
-        }
-        return _details(id);
-      });
-      ComicSourceManager().add(source);
+    test(
+      '400 hits accumulate across runs and confirm on the third hit',
+      () async {
+        // A single worker: the healthy comic sorts before the failing one, so
+        // the source is healthy when the 400 hits, keeping the per-run counting
+        // deterministic (main check records one hit, the retry phase re-check a
+        // second).
+        appdata.settings['followUpdateThreads'] = 1;
+        addTearDown(() => appdata.settings['followUpdateThreads'] = 8);
+        await cacheComics(['a-ok', 'b-bad']);
+        final source = _detailSource((id) async {
+          if (id == 'b-bad') {
+            throw Exception(
+              'Invalid Status Code: 400. The Request is invalid.',
+            );
+          }
+          return _details(id);
+        });
+        ComicSourceManager().add(source);
 
-      // Run 1: two hits recorded, not yet confirmed.
-      await scanFollowUpdates(
-        [folder],
-        FollowUpdateMode.force,
-        ignoreRetryAfter: true,
-        cache: cache,
-      ).toList();
-      var bad = cache
-          .getComicsWithUpdatesInfo(folder)
-          .firstWhere((c) => c.id == 'b-bad');
-      expect(bad.checkNotFoundCount, 2);
-      expect(bad.isSuspectGone, isFalse);
+        // Run 1: two hits recorded, not yet confirmed.
+        await scanFollowUpdates(
+          [folder],
+          FollowUpdateMode.force,
+          ignoreRetryAfter: true,
+          cache: cache,
+        ).toList();
+        var bad = cache
+            .getComicsWithUpdatesInfo(folder)
+            .firstWhere((c) => c.id == 'b-bad');
+        expect(bad.checkNotFoundCount, 2);
+        expect(bad.isSuspectGone, isFalse);
 
-      // Run 2: the third accumulated hit confirms the delist across runs.
-      await scanFollowUpdates(
-        [folder],
-        FollowUpdateMode.force,
-        ignoreRetryAfter: true,
-        cache: cache,
-      ).toList();
-      bad = cache
-          .getComicsWithUpdatesInfo(folder)
-          .firstWhere((c) => c.id == 'b-bad');
-      expect(bad.isSuspectGone, isTrue);
-    });
+        // Run 2: the third accumulated hit confirms the delist across runs.
+        await scanFollowUpdates(
+          [folder],
+          FollowUpdateMode.force,
+          ignoreRetryAfter: true,
+          cache: cache,
+        ).toList();
+        bad = cache
+            .getComicsWithUpdatesInfo(folder)
+            .firstWhere((c) => c.id == 'b-bad');
+        expect(bad.isSuspectGone, isTrue);
+      },
+    );
   });
 
   group('comic-level check state', () {
@@ -505,6 +613,463 @@ void main() {
   });
 
   group('scan pipeline', () {
+    test('uses the new default concurrency and source interval values', () {
+      expect(appdata.settings['followUpdateThreads'], 8);
+      expect(
+        calculateFollowUpdateSourceInterval(5),
+        const Duration(milliseconds: 625),
+      );
+      expect(
+        calculateFollowUpdateSourceInterval(5, slowMode: true),
+        const Duration(milliseconds: 1250),
+      );
+      expect(calculateFollowUpdateSourceInterval(-1), Duration.zero);
+      expect(calculateFollowUpdateSourceInterval(double.nan), Duration.zero);
+    });
+
+    test(
+      'limiter enforces actual start spacing and applies queued slow mode',
+      () async {
+        await cacheComics([for (var i = 0; i < 20; i++) 'comic-$i']);
+        appdata.settings['followUpdateBatchDelay'] = 0.008;
+        var fakeNow = DateTime(2026, 8, 22);
+        final starts = <DateTime>[];
+        final firstCalls = <String>{};
+        final source = _detailSource((id) async {
+          if (firstCalls.add(id)) starts.add(fakeNow);
+          throw Exception('Invalid Status Code: 500. server-side error');
+        });
+        ComicSourceManager().add(source);
+
+        Future<void> advance(Duration duration) {
+          fakeNow = fakeNow.add(duration);
+          return Future<void>.value();
+        }
+
+        await scanFollowUpdates(
+          [folder],
+          FollowUpdateMode.force,
+          ignoreRetryAfter: true,
+          cache: cache,
+          clock: () => fakeNow,
+          delay: advance,
+        ).toList();
+
+        expect(starts, hasLength(20));
+        for (var i = 1; i < starts.length; i++) {
+          expect(
+            starts[i].difference(starts[i - 1]),
+            greaterThanOrEqualTo(const Duration(milliseconds: 1)),
+          );
+        }
+        // The tenth completed action trips sourceSlowMode. Later requests
+        // that were still queued must use the new 2ms gate interval.
+        expect([
+          for (var i = 11; i < starts.length; i++)
+            starts[i].difference(starts[i - 1]),
+        ], contains(greaterThanOrEqualTo(const Duration(milliseconds: 2))));
+      },
+    );
+
+    test(
+      'canceled FIFO permit transfer releases without entering start gate',
+      () async {
+        var fakeNow = DateTime(2026, 8, 22);
+        final delayStarted = Completer<void>();
+        final delayRelease = Completer<void>();
+        var holdFirstDelay = true;
+        Future<void> delay(Duration duration) async {
+          if (holdFirstDelay) {
+            holdFirstDelay = false;
+            delayStarted.complete();
+            await delayRelease.future;
+          }
+          fakeNow = fakeNow.add(duration);
+        }
+
+        final limiter = FollowUpdateRequestLimiter(
+          maxConcurrentPerSource: 2,
+          clock: () => fakeNow,
+          delay: delay,
+        );
+        final firstToken = _TestScanToken();
+        final canceledToken = _TestScanToken();
+        final fourthToken = _TestScanToken();
+        final firstActionGate = Completer<void>();
+        final firstStarted = Completer<void>();
+        final secondStarted = Completer<void>();
+        var canceledActionStarted = false;
+
+        final first = limiter.run<void>(
+          'test-source',
+          interval: () => const Duration(seconds: 1),
+          token: firstToken,
+          action: () async {
+            firstStarted.complete();
+            await firstActionGate.future;
+          },
+          onCompleted: (_) => canceledToken.canceled = true,
+        );
+        await firstStarted.future;
+
+        final second = limiter.run<void>(
+          'test-source',
+          interval: () => const Duration(seconds: 1),
+          token: firstToken,
+          action: () async {
+            secondStarted.complete();
+          },
+        );
+        await delayStarted.future;
+
+        final canceled = limiter.run<void>(
+          'test-source',
+          interval: () => const Duration(seconds: 1),
+          token: canceledToken,
+          action: () async {
+            canceledActionStarted = true;
+          },
+        );
+        final fourth = limiter.run<void>(
+          'test-source',
+          interval: () => const Duration(seconds: 1),
+          token: fourthToken,
+          action: () async {},
+        );
+
+        firstActionGate.complete();
+        await canceled.timeout(const Duration(seconds: 1));
+        expect(canceledActionStarted, isFalse);
+
+        // The second action was deliberately holding the start gate. The
+        // canceled request must release its transferred permit immediately,
+        // so it cannot extend this wait or block the next FIFO waiter.
+        delayRelease.complete();
+        await Future.wait([first, second, fourth]);
+        expect(secondStarted.isCompleted, isTrue);
+      },
+    );
+
+    test(
+      'probe, detail, and not-found retry share the source concurrency limit',
+      () async {
+        await cacheComics([
+          'a-not-found',
+          'b-one',
+          'c-two',
+          'd-three',
+          'e-four',
+        ]);
+        final detailGate = Completer<void>();
+        final probeStarted = Completer<void>();
+        var active = 0;
+        var maxActive = 0;
+        var notFoundDetailCalls = 0;
+
+        void enter() {
+          active++;
+          maxActive = active > maxActive ? active : maxActive;
+        }
+
+        final source = _detailSourceWithFavorite(
+          (id) async {
+            enter();
+            try {
+              if (id == 'a-not-found') {
+                notFoundDetailCalls++;
+                throw Exception('Invalid Status Code: 404. Not found.');
+              }
+              await detailGate.future;
+              return _details(id);
+            } finally {
+              active--;
+            }
+          },
+          loadFolders: ([String? _]) async {
+            enter();
+            if (!probeStarted.isCompleted) probeStarted.complete();
+            try {
+              return const Res(<String, String>{'remote': 'Remote'});
+            } finally {
+              active--;
+            }
+          },
+        );
+        ComicSourceManager().add(source);
+
+        final scan = scanFollowUpdates(
+          [folder],
+          FollowUpdateMode.force,
+          ignoreRetryAfter: true,
+          cache: cache,
+        ).toList();
+        await probeStarted.future.timeout(const Duration(seconds: 5));
+        expect(active, lessThanOrEqualTo(5));
+        expect(maxActive, 5);
+        detailGate.complete();
+
+        await scan;
+        expect(notFoundDetailCalls, greaterThanOrEqualTo(2));
+        expect(maxActive, lessThanOrEqualTo(5));
+      },
+    );
+
+    test(
+      'allows five same-source actions but never a sixth in flight',
+      () async {
+        await cacheComics([
+          'one',
+          'two',
+          'three',
+          'four',
+          'five',
+          'six',
+          'seven',
+          'eight',
+        ]);
+        final gate = Completer<void>();
+        final fiveStarted = Completer<void>();
+        var active = 0;
+        var maxActive = 0;
+        var calls = 0;
+        final source = _detailSource((id) async {
+          calls++;
+          active++;
+          maxActive = active > maxActive ? active : maxActive;
+          if (active == 5 && !fiveStarted.isCompleted) {
+            fiveStarted.complete();
+          }
+          try {
+            await gate.future;
+            return _details(id);
+          } finally {
+            active--;
+          }
+        });
+        ComicSourceManager().add(source);
+
+        final scan = scanFollowUpdates(
+          [folder],
+          FollowUpdateMode.force,
+          ignoreRetryAfter: true,
+          cache: cache,
+        ).toList();
+        await fiveStarted.future.timeout(const Duration(seconds: 5));
+        expect(active, 5);
+        expect(maxActive, 5);
+        gate.complete();
+
+        await scan;
+        expect(calls, 8);
+        expect(maxActive, 5);
+        expect(cache.getCurrentScanRun()!.status, 'finished');
+      },
+    );
+
+    test('keeps total detail actions at the configured global limit', () async {
+      final gate = Completer<void>();
+      final eightStarted = Completer<void>();
+      final folders = <NetworkFavoriteFolderRef>[];
+      var active = 0;
+      var maxActive = 0;
+
+      for (var i = 0; i < 10; i++) {
+        final sourceKey = 'global-source-$i';
+        final sourceFolder = NetworkFavoriteFolderRef(
+          sourceKey: sourceKey,
+          folderId: 'remote',
+        );
+        final data = _numericData(
+          (page, [folder]) async => Res(<Comic>[
+            _comic('comic-$i', sourceKey: sourceKey),
+          ], subData: 1),
+          sourceKey: sourceKey,
+        );
+        await cache.refreshFolders(data);
+        await cache.refreshPage(data, sourceFolder, 1);
+        folders.add(sourceFolder);
+
+        final source = _detailSource((id) async {
+          active++;
+          maxActive = active > maxActive ? active : maxActive;
+          if (active == 8 && !eightStarted.isCompleted) {
+            eightStarted.complete();
+          }
+          try {
+            await gate.future;
+            return _details(id);
+          } finally {
+            active--;
+          }
+        }, sourceKey: sourceKey);
+        ComicSourceManager().add(source);
+        addTearDown(() => ComicSourceManager().remove(sourceKey));
+      }
+
+      final scan = scanFollowUpdates(
+        folders,
+        FollowUpdateMode.force,
+        ignoreRetryAfter: true,
+        cache: cache,
+      ).toList();
+      await eightStarted.future.timeout(const Duration(seconds: 5));
+      expect(active, 8);
+      expect(maxActive, 8);
+      gate.complete();
+
+      await scan;
+      expect(maxActive, 8);
+      expect(cache.getCurrentScanRun()!.status, 'finished');
+    });
+
+    test(
+      'round-robin lets another source start behind a blocked source',
+      () async {
+        final sourceAFolder = const NetworkFavoriteFolderRef(
+          sourceKey: 'source-a',
+          folderId: 'remote',
+        );
+        final sourceBFolder = const NetworkFavoriteFolderRef(
+          sourceKey: 'source-b',
+          folderId: 'remote',
+        );
+        final sourceAData = _numericData(
+          (page, [folder]) async => Res([
+            for (var i = 0; i < 8; i++) _comic('a-$i', sourceKey: 'source-a'),
+          ], subData: 1),
+          sourceKey: 'source-a',
+        );
+        final sourceBData = _numericData(
+          (page, [folder]) async =>
+              Res(<Comic>[_comic('b-1', sourceKey: 'source-b')], subData: 1),
+          sourceKey: 'source-b',
+        );
+        await cache.refreshFolders(sourceAData);
+        await cache.refreshPage(sourceAData, sourceAFolder, 1);
+        await cache.refreshFolders(sourceBData);
+        await cache.refreshPage(sourceBData, sourceBFolder, 1);
+
+        final sourceAGate = Completer<void>();
+        final bStarted = Completer<void>();
+        var activeA = 0;
+        var maxActiveA = 0;
+        final sourceA = _detailSource((id) async {
+          activeA++;
+          maxActiveA = activeA > maxActiveA ? activeA : maxActiveA;
+          try {
+            await sourceAGate.future;
+            return _details(id);
+          } finally {
+            activeA--;
+          }
+        }, sourceKey: 'source-a');
+        final sourceB = _detailSource((id) async {
+          if (!bStarted.isCompleted) bStarted.complete();
+          return _details(id);
+        }, sourceKey: 'source-b');
+        ComicSourceManager().add(sourceA);
+        ComicSourceManager().add(sourceB);
+        addTearDown(() {
+          ComicSourceManager().remove('source-a');
+          ComicSourceManager().remove('source-b');
+        });
+
+        final scan = scanFollowUpdates(
+          [sourceAFolder, sourceBFolder],
+          FollowUpdateMode.force,
+          ignoreRetryAfter: true,
+          cache: cache,
+        ).toList();
+        await bStarted.future.timeout(const Duration(seconds: 5));
+        expect(maxActiveA, lessThanOrEqualTo(5));
+        sourceAGate.complete();
+
+        await scan;
+        expect(maxActiveA, lessThanOrEqualTo(5));
+        expect(cache.getCurrentScanRun()!.status, 'finished');
+      },
+    );
+
+    test(
+      'canceling queued same-source work releases permits and closes scan',
+      () async {
+        await cacheComics([
+          'one',
+          'two',
+          'three',
+          'four',
+          'five',
+          'six',
+          'seven',
+          'eight',
+        ]);
+        final token = _TestScanToken();
+        final gate = Completer<void>();
+        final fiveStarted = Completer<void>();
+        var calls = 0;
+        var active = 0;
+        final source = _detailSource((id) async {
+          calls++;
+          active++;
+          if (active == 5 && !fiveStarted.isCompleted) {
+            fiveStarted.complete();
+          }
+          try {
+            await gate.future;
+            return _details(id);
+          } finally {
+            active--;
+          }
+        });
+        ComicSourceManager().add(source);
+
+        final scan = scanFollowUpdates(
+          [folder],
+          FollowUpdateMode.force,
+          ignoreRetryAfter: true,
+          cancellationToken: token,
+          cache: cache,
+        ).toList();
+        await fiveStarted.future.timeout(const Duration(seconds: 5));
+        token.canceled = true;
+        gate.complete();
+
+        await scan.timeout(const Duration(seconds: 5));
+        expect(calls, 5);
+        expect(cache.getCurrentScanRun()!.status, 'canceled');
+      },
+    );
+
+    test('source action failures do not poison later work', () async {
+      await cacheComics(['bad', 'good']);
+      var badCalls = 0;
+      final source = _detailSource((id) async {
+        if (id == 'bad') {
+          badCalls++;
+          throw Exception('Invalid Status Code: 500. server-side error');
+        }
+        return _details(id);
+      });
+      ComicSourceManager().add(source);
+
+      await scanFollowUpdates(
+        [folder],
+        FollowUpdateMode.force,
+        ignoreRetryAfter: true,
+        cache: cache,
+      ).toList();
+
+      expect(badCalls, 3);
+      expect(
+        cache
+            .getComicsWithUpdatesInfo(folder)
+            .firstWhere((comic) => comic.id == 'good')
+            .lastCheckTime,
+        isNotNull,
+      );
+      expect(cache.getCurrentScanRun()!.status, 'finished');
+    });
+
     test('comics in several folders are deduplicated to one request', () async {
       const folderB = NetworkFavoriteFolderRef(
         sourceKey: 'test-source',
@@ -540,21 +1105,52 @@ void main() {
     test(
       'an interrupted scan is resumed by the next scan without re-requesting done items',
       () async {
-        await cacheComics(['one', 'two', 'three', 'four']);
         final gate = Completer<void>();
-        var calls = <String>[];
-        final source = _detailSource((id) async {
-          calls.add(id);
-          if (id == 'one' && calls.where((c) => c == 'one').length == 1) {
-            await gate.future; // simulate a crash while 'one' is in flight
-          }
-          return _details(id);
-        });
-        ComicSourceManager().add(source);
+        final calls = <String>[];
+        final sourceKeys = [
+          'test-source-one',
+          'test-source-two',
+          'test-source-three',
+          'test-source-four',
+        ];
+        final folders = <NetworkFavoriteFolderRef>[];
+        for (final entry in [
+          ('one', sourceKeys[0]),
+          ('two', sourceKeys[1]),
+          ('three', sourceKeys[2]),
+          ('four', sourceKeys[3]),
+        ]) {
+          final id = entry.$1;
+          final sourceKey = entry.$2;
+          final sourceFolder = NetworkFavoriteFolderRef(
+            sourceKey: sourceKey,
+            folderId: 'remote',
+          );
+          final data = _numericData(
+            (page, [folder]) async =>
+                Res(<Comic>[_comic(id, sourceKey: sourceKey)], subData: 1),
+            sourceKey: sourceKey,
+          );
+          await cache.refreshFolders(data);
+          await cache.refreshPage(data, sourceFolder, 1);
+          folders.add(sourceFolder);
+          final source = _detailSource((requestedId) async {
+            calls.add(requestedId);
+            if (requestedId == 'one' &&
+                calls.where((c) => c == 'one').length == 1) {
+              await gate.future; // simulate a crash while 'one' is in flight
+            }
+            return _details(requestedId);
+          }, sourceKey: sourceKey);
+          ComicSourceManager().add(source);
+          addTearDown(() => ComicSourceManager().remove(sourceKey));
+        }
 
-        // First scan: 'one' blocks forever, the rest complete.
+        // First scan: 'one' blocks, while the other sources complete in
+        // parallel. Per-source bounded concurrency must not make a slow source
+        // block unrelated sources.
         final firstScan = scanFollowUpdates(
-          [folder],
+          folders,
           FollowUpdateMode.missing,
           cache: cache,
         ).toList();
@@ -565,7 +1161,7 @@ void main() {
         // Abandon the first scan (no cancel) and start a new one: it must
         // resume the interrupted run and only request the pending comic.
         final secondScan = scanFollowUpdates(
-          [folder],
+          folders,
           FollowUpdateMode.regular,
           cache: cache,
         ).toList();
@@ -578,9 +1174,10 @@ void main() {
         expect(calls.where((c) => c == 'three').length, 1);
         expect(calls.where((c) => c == 'four').length, 1);
         expect(
-          cache
-              .getComicsWithUpdatesInfo(folder)
-              .every((c) => c.lastCheckTime != null),
+          folders.every(
+            (f) =>
+                cache.getComicsWithUpdatesInfo(f).single.lastCheckTime != null,
+          ),
           isTrue,
         );
         expect(cache.getCurrentScanRun()!.status, 'finished');
@@ -713,6 +1310,68 @@ void main() {
     );
 
     test(
+      'a successful probe lets a single strong 404 enter suspect flow',
+      () async {
+        await cacheComics(['one']);
+        var detailCalls = 0;
+        var probeCalls = 0;
+        final source = _detailSourceWithFavorite(
+          (id) async {
+            detailCalls++;
+            throw Exception('Invalid Status Code: 404. Not found.');
+          },
+          loadFolders: ([String? _]) async {
+            probeCalls++;
+            return const Res(<String, String>{'remote': 'Remote'});
+          },
+        );
+        ComicSourceManager().add(source);
+
+        await scanFollowUpdates(
+          [folder],
+          FollowUpdateMode.force,
+          ignoreRetryAfter: true,
+          cache: cache,
+        ).toList();
+
+        // The first detail attempt is made before the source has health
+        // evidence. The successful probe then authorizes the queued retry,
+        // which confirms the strong 404 and marks the comic suspect.
+        expect(probeCalls, 1);
+        expect(detailCalls, 4);
+        expect(cache.isComicSuspectGone('test-source', 'one'), isTrue);
+      },
+    );
+
+    test(
+      'an empty successful probe still proves the source is reachable',
+      () async {
+        await cacheComics(['one']);
+        var probeCalls = 0;
+        final source = _detailSourceWithFavorite(
+          (id) async {
+            throw Exception('Invalid Status Code: 404. Not found.');
+          },
+          loadFolders: ([String? _]) async {
+            probeCalls++;
+            return const Res(<String, String>{});
+          },
+        );
+        ComicSourceManager().add(source);
+
+        await scanFollowUpdates(
+          [folder],
+          FollowUpdateMode.force,
+          ignoreRetryAfter: true,
+          cache: cache,
+        ).toList();
+
+        expect(probeCalls, 1);
+        expect(cache.isComicSuspectGone('test-source', 'one'), isTrue);
+      },
+    );
+
+    test(
       'a service error gates delist marks for the rest of the run',
       () async {
         await cacheComics(['one', 'two', 'three']);
@@ -820,9 +1479,9 @@ void main() {
     test('a full re-probe window catches a source that dies mid-run', () async {
       kProbeWindowSize = 2;
       addTearDown(() => kProbeWindowSize = 20);
-      // Serial workers keep the window counting deterministic.
+      // A single worker keeps the window counting deterministic.
       appdata.settings['followUpdateThreads'] = 1;
-      addTearDown(() => appdata.settings['followUpdateThreads'] = 5);
+      addTearDown(() => appdata.settings['followUpdateThreads'] = 8);
       await cacheComics(['one', 'two', 'three', 'four']);
       var probeCalls = 0;
       final source = _detailSourceWithFavorite(
@@ -916,23 +1575,19 @@ void main() {
       );
       await cache.refreshPage(
         _numericData(
-          (page, [folder]) async => Res(
-            [
-              for (final id in ['fresh', 'old', 'unchecked', 'cooled', 'suspect'])
-                _comic(id),
-            ],
-            subData: 1,
-          ),
+          (page, [folder]) async => Res([
+            for (final id in ['fresh', 'old', 'unchecked', 'cooled', 'suspect'])
+              _comic(id),
+          ], subData: 1),
         ),
         folder,
         1,
       );
       await cache.refreshPage(
         _numericData(
-          (page, [folder]) async => Res(
-            [for (final id in ['old', 'unchecked-b', 'suspect-b']) _comic(id)],
-            subData: 1,
-          ),
+          (page, [folder]) async => Res([
+            for (final id in ['old', 'unchecked-b', 'suspect-b']) _comic(id),
+          ], subData: 1),
         ),
         folderB,
         1,
@@ -948,9 +1603,7 @@ void main() {
       final seeds = <({String id, int? lastMs, int? retryMs, int suspect})>[
         (
           id: 'fresh',
-          lastMs: now
-              .subtract(const Duration(hours: 1))
-              .millisecondsSinceEpoch,
+          lastMs: now.subtract(const Duration(hours: 1)).millisecondsSinceEpoch,
           retryMs: null,
           suspect: 0,
         ),
@@ -967,9 +1620,7 @@ void main() {
           lastMs: now
               .subtract(const Duration(hours: 25))
               .millisecondsSinceEpoch,
-          retryMs: now
-              .add(const Duration(hours: 1))
-              .millisecondsSinceEpoch,
+          retryMs: now.add(const Duration(hours: 1)).millisecondsSinceEpoch,
           suspect: 0,
         ),
         (
@@ -1047,74 +1698,110 @@ void main() {
       );
       expect(
         {for (final c in all) '${c.comicId}\u0000${c.folderId}'},
-        reference(FollowUpdateMode.force, ignoreRetryAfter: true, includeSuspect: true)
-            .map((k) => k.split('\u0000').skip(1).join('\u0000'))
-            .toSet(),
+        reference(
+          FollowUpdateMode.force,
+          ignoreRetryAfter: true,
+          includeSuspect: true,
+        ).map((k) => k.split('\u0000').skip(1).join('\u0000')).toSet(),
       );
     });
   });
 
-  test('confirmed updates refresh the cover URL; unchanged comics keep it', () async {
-    await cacheComics(['one']);
-    var updateTime = '2026-08-01';
-    var cover = 'https://example.invalid/old.jpg';
-    final source = _detailSource((id) async {
-      return Res(
-        ComicDetails.fromJson({
-          'title': 'Comic',
-          'subtitle': 'Author',
-          'cover': cover,
-          'updateTime': updateTime,
-          'tags': <String, List<String>>{},
-          'chapters': <String, String>{'1': 'Chapter 1'},
-          'sourceKey': 'test-source',
-          'comicId': id,
-        }),
+  test(
+    'confirmed updates refresh the cover URL; unchanged comics keep it',
+    () async {
+      await cacheComics(['one']);
+      var updateTime = '2026-08-01';
+      var cover = 'https://example.invalid/old.jpg';
+      final source = _detailSource((id) async {
+        return Res(
+          ComicDetails.fromJson({
+            'title': 'Comic',
+            'subtitle': 'Author',
+            'cover': cover,
+            'updateTime': updateTime,
+            'tags': <String, List<String>>{},
+            'chapters': <String, String>{'1': 'Chapter 1'},
+            'sourceKey': 'test-source',
+            'comicId': id,
+          }),
+        );
+      });
+      ComicSourceManager().add(source);
+      addTearDown(() => ComicSourceManager().remove('test-source'));
+
+      Future<void> checkOnce() => updateComic(
+        cache.getComicsWithUpdatesInfo(folder).single,
+        folder,
+        cache: cache,
       );
+
+      // Baseline: the first check establishes the marker, no "update" verdict
+      // yet, so the cached cover stays untouched.
+      await checkOnce();
+      expect(
+        cache.getCachedPage(folder, 1)!.comics.single.coverPath,
+        'https://example.invalid/one.jpg',
+      );
+
+      // A confirmed update commits the new cover URL.
+      cover = 'https://example.invalid/new.jpg';
+      updateTime = '2026-08-02';
+      await checkOnce();
+      expect(
+        cache.getCachedPage(folder, 1)!.comics.single.coverPath,
+        'https://example.invalid/new.jpg',
+      );
+
+      // URL churn without an update (signed URLs, CDN rotation): the cached
+      // cover wins so the image cache is not invalidated by every sweep.
+      cover = 'https://example.invalid/signed.jpg';
+      await checkOnce();
+      expect(
+        cache.getCachedPage(folder, 1)!.comics.single.coverPath,
+        'https://example.invalid/new.jpg',
+      );
+
+      // An update with an empty cover keeps the existing URL.
+      cover = '';
+      updateTime = '2026-08-03';
+      await checkOnce();
+      expect(
+        cache.getCachedPage(folder, 1)!.comics.single.coverPath,
+        'https://example.invalid/new.jpg',
+      );
+    },
+  );
+
+  test('a canceled detail result cannot commit follow-up state', () async {
+    await cacheComics(['late']);
+    final gate = Completer<void>();
+    final started = Completer<void>();
+    final source = _detailSource((id) async {
+      if (!started.isCompleted) started.complete();
+      await gate.future;
+      return _details(id);
     });
     ComicSourceManager().add(source);
     addTearDown(() => ComicSourceManager().remove('test-source'));
 
-    Future<void> checkOnce() => updateComic(
+    final token = _TestScanToken();
+    final future = updateComic(
       cache.getComicsWithUpdatesInfo(folder).single,
       folder,
       cache: cache,
+      cancellationToken: token,
     );
+    await started.future;
+    token.canceled = true;
+    gate.complete();
 
-    // Baseline: the first check establishes the marker, no "update" verdict
-    // yet, so the cached cover stays untouched.
-    await checkOnce();
-    expect(
-      cache.getCachedPage(folder, 1)!.comics.single.coverPath,
-      'https://example.invalid/one.jpg',
-    );
-
-    // A confirmed update commits the new cover URL.
-    cover = 'https://example.invalid/new.jpg';
-    updateTime = '2026-08-02';
-    await checkOnce();
-    expect(
-      cache.getCachedPage(folder, 1)!.comics.single.coverPath,
-      'https://example.invalid/new.jpg',
-    );
-
-    // URL churn without an update (signed URLs, CDN rotation): the cached
-    // cover wins so the image cache is not invalidated by every sweep.
-    cover = 'https://example.invalid/signed.jpg';
-    await checkOnce();
-    expect(
-      cache.getCachedPage(folder, 1)!.comics.single.coverPath,
-      'https://example.invalid/new.jpg',
-    );
-
-    // An update with an empty cover keeps the existing URL.
-    cover = '';
-    updateTime = '2026-08-03';
-    await checkOnce();
-    expect(
-      cache.getCachedPage(folder, 1)!.comics.single.coverPath,
-      'https://example.invalid/new.jpg',
-    );
+    final result = await future;
+    expect(result.canceled, isTrue);
+    final item = cache.getComicsWithUpdatesInfo(folder).single;
+    expect(item.lastCheckTime, isNull);
+    expect(item.updateMarker, isNull);
+    expect(item.name, 'Comic late');
   });
 }
 

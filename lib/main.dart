@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/pages/auth_page.dart';
+import 'package:venera/pages/follow_updates_page.dart';
 import 'package:venera/pages/main_page.dart';
 import 'package:venera/utils/io.dart';
 import 'package:window_manager/window_manager.dart';
@@ -80,7 +81,11 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      FollowUpdatesService.onAppResumed();
+    }
     if (!App.isMobile || !appdata.settings['authorizationRequired']) {
+      super.didChangeAppLifecycleState(state);
       return;
     }
     if (state == AppLifecycleState.inactive && hideContentOverlay == null) {
@@ -115,6 +120,13 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
       );
     }
     super.didChangeAppLifecycleState(state);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    FollowUpdatesService.disposeChecker();
+    super.dispose();
   }
 
   void forceRebuild() {

@@ -606,6 +606,8 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     }
     _db.execute('''CREATE INDEX IF NOT EXISTS favorite_items_search
          ON favorite_items (source_key, folder_id, search_text)''');
+    _db.execute('''CREATE INDEX IF NOT EXISTS idx_favorite_items_comic
+         ON favorite_items (source_key, folder_id, comic_id)''');
     _rebuildMissingSearchText();
     // One-time migration: check/update state moves from favorite_items rows
     // (which are page snapshots and get rebuilt) to the comic-level table.
@@ -1558,8 +1560,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
               () async {
                 final cached = getCachedPage(folder, page);
                 if (cached == null ||
-                    DateTime.now().difference(cached.updatedAt) <
-                        minimumAge) {
+                    DateTime.now().difference(cached.updatedAt) < minimumAge) {
                   return;
                 }
                 await refreshPage(
@@ -1728,7 +1729,11 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     int totalPages,
   ) async {
     var completed = startPage - 1;
-    for (var next = startPage; next <= totalPages; next += _fullCacheBatchSize) {
+    for (
+      var next = startPage;
+      next <= totalPages;
+      next += _fullCacheBatchSize
+    ) {
       if (isCanceled()) {
         stream.add(
           FavoriteFullCacheProgress(
@@ -1823,7 +1828,10 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         );
         return;
       }
-      final last = math.min(page + _fullCacheBatchSize - 1, fullCacheUnknownTotalCap);
+      final last = math.min(
+        page + _fullCacheBatchSize - 1,
+        fullCacheUnknownTotalCap,
+      );
       final results = await Future.wait([
         for (var p = page; p <= last; p++)
           refreshPage(data, folder, p, preserveExistingCover: true),
@@ -2040,8 +2048,8 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       final refreshed = data.loadComic != null
           ? await refreshPage(data, folder, 1)
           : data.loadNext != null
-              ? await refreshNextPage(data, folder, null)
-              : null;
+          ? await refreshNextPage(data, folder, null)
+          : null;
       if (refreshed != null && refreshed.success) {
         effectiveFavoriteId = _cachedFavoriteId(
           folder.sourceKey,
@@ -2376,6 +2384,92 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     }
   }
 
+  /// Atomically records a successful detail check and updates every cached
+  /// favorite snapshot for the same comic. The returned value is true only
+  /// when a same-version marker changed, so callers can decide whether to
+  /// replace a potentially signed cover URL.
+  bool applySuccessfulComicCheck(
+    NetworkFavoriteFolderRef fallback,
+    String comicId, {
+    String? updateTime,
+    String? updateMarker,
+    String? title,
+    String? author,
+    int? chapterCount,
+    String? cover,
+  }) {
+    final sourceKey = fallback.sourceKey;
+    final previousRows = _db.select(
+      '''SELECT update_marker FROM comic_check_state
+         WHERE source_key = ? AND comic_id = ? LIMIT 1''',
+      [sourceKey, comicId],
+    );
+    final previousMarker = previousRows.isEmpty
+        ? null
+        : previousRows.first['update_marker'] as String?;
+    final changed = _hasSameVersionMarkerChanged(previousMarker, updateMarker);
+    final folders = _comicFolders(fallback, comicId);
+
+    _db.execute('BEGIN');
+    try {
+      _db.execute(
+        '''INSERT INTO comic_check_state
+            (source_key, comic_id, last_update_time, update_marker,
+             last_check_time, has_new_update)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(source_key, comic_id) DO UPDATE SET
+             last_update_time = COALESCE(
+               excluded.last_update_time, comic_check_state.last_update_time),
+             update_marker = COALESCE(
+               excluded.update_marker, comic_check_state.update_marker),
+             last_check_time = excluded.last_check_time,
+             retry_after = NULL,
+             check_failures = 0,
+             check_not_found_count = 0,
+             check_suspect_gone = 0,
+             has_new_update = CASE WHEN ? THEN 1
+                                   ELSE comic_check_state.has_new_update END''',
+        [
+          sourceKey,
+          comicId,
+          updateTime,
+          updateMarker,
+          DateTime.now().millisecondsSinceEpoch,
+          changed ? 1 : 0,
+          changed ? 1 : 0,
+        ],
+      );
+      for (final folder in folders) {
+        updateBasicInfo(
+          folder,
+          comicId,
+          title: title,
+          author: author,
+          chapterCount: chapterCount,
+          cover: changed ? cover : null,
+        );
+      }
+      _db.execute('COMMIT');
+    } catch (_) {
+      _db.execute('ROLLBACK');
+      rethrow;
+    }
+    notifyListeners();
+    return changed;
+  }
+
+  static bool _hasSameVersionMarkerChanged(
+    String? previousMarker,
+    String? updateMarker,
+  ) {
+    if (previousMarker == null || updateMarker == null) return false;
+    final previousVersion = previousMarker.startsWith('v2|') ? 'v2' : 'v1';
+    final updateVersion = updateMarker.startsWith('v2|') ? 'v2' : 'v1';
+    // A marker format migration establishes a new baseline. This prevents
+    // the first v2 scan from reporting every existing comic as changed.
+    return previousVersion == updateVersion && previousMarker != updateMarker;
+  }
+
   /// Records a completed detail check in the comic-level state table. The
   /// first marker only establishes a baseline; later marker changes are
   /// actual updates. A successful check clears every delist/retry marker.
@@ -2393,10 +2487,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     final previousMarker = rows.isEmpty
         ? null
         : rows.first['update_marker'] as String?;
-    final changed =
-        previousMarker != null &&
-        updateMarker != null &&
-        previousMarker != updateMarker;
+    final changed = _hasSameVersionMarkerChanged(previousMarker, updateMarker);
     _db.execute(
       '''INSERT INTO comic_check_state
           (source_key, comic_id, last_update_time, update_marker,
