@@ -219,7 +219,7 @@ void main() {
               find.byKey(const ValueKey('favorite-hot-window-split-button')),
             )
             .width,
-        closeTo(177.2, 0.1),
+        closeTo(137.2, 0.1),
       );
       final favoriteText = tester.widget<Text>(
         find.descendant(

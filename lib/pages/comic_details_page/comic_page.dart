@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ui';
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:photo_view/photo_view.dart';
@@ -19,6 +20,7 @@ import 'package:venera/foundation/follow_updates.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/image_provider/cached_image.dart';
 import 'package:venera/foundation/local.dart';
+import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/network/download.dart';
 import 'package:venera/pages/reader/reader.dart';
@@ -64,6 +66,11 @@ bool _isAuthorNamespace(String namespace) {
     default:
       return false;
   }
+}
+
+String _briefLoadError(Object? error) {
+  final message = (error?.toString() ?? '').replaceAll(RegExp(r'\s+'), ' ');
+  return message.length <= 160 ? message : '${message.substring(0, 160)}...';
 }
 
 List<String> _collectKnownAuthorNames(ComicDetails comic) {
@@ -365,7 +372,32 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       widget.id,
       ComicType(widget.sourceKey.hashCode),
     );
-    return comicSource.loadComicInfo!(widget.id);
+    final watch = Stopwatch()..start();
+    try {
+      final res = await comicSource.loadComicInfo!(widget.id);
+      watch.stop();
+      if (kDebugMode) {
+        Log.info(
+          'ComicPage',
+          'loadComicInfo sourceKey=${widget.sourceKey} comicId=${widget.id} '
+              '${res.success ? 'success' : 'failure'} '
+              'total=${watch.elapsedMilliseconds}ms'
+              '${res.error ? ' error=${_briefLoadError(res.errorMessage)}' : ''}',
+        );
+      }
+      return res;
+    } catch (e) {
+      watch.stop();
+      if (kDebugMode) {
+        Log.info(
+          'ComicPage',
+          'loadComicInfo sourceKey=${widget.sourceKey} comicId=${widget.id} '
+              'failure total=${watch.elapsedMilliseconds}ms '
+              'error=${_briefLoadError(e)}',
+        );
+      }
+      rethrow;
+    }
   }
 
   @override
@@ -378,7 +410,13 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   }
 
   @override
-  Future<void> onDataLoaded() async {
+  @protected
+  bool shouldRetryLoad(String message, int retryCount) {
+    return classifyNotFoundError(message) != NotFoundSignal.strong;
+  }
+
+  @override
+  void onDataLoaded() {
     final cache = NetworkFavoriteCacheManager();
     if (cache.isComicSuspectGone(widget.sourceKey, widget.id)) {
       cache.clearComicSuspectGoneEverywhere(widget.sourceKey, widget.id);
@@ -392,37 +430,88 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
         );
     // For sources with multi-folder favorites, prefer querying folders to get accurate favorite status
     // Some sources may not set isFavorite reliably when multi-folder is enabled
-    if (comicSource.favoriteData?.loadFolders != null && comicSource.isLogged) {
-      var res = await comicSource.favoriteData!.loadFolders!(comic.id);
-      if (!res.error) {
-        cache.cacheFolderSnapshot(comic.sourceKey, res.data);
-        if (res.subData is List) {
-          var list = List<String>.from(res.subData);
-          if (list.isNotEmpty) {
-            cache.replaceComicMembership(comic.sourceKey, comic.id, list);
-            isFavorite = true;
-          } else if (!cache.isFavoriteKnown(comic.sourceKey, comic.id)) {
-            // The server reports no membership and the device cache agrees:
-            // the comic is not favorited.
-            cache.replaceComicMembership(comic.sourceKey, comic.id, list);
-            isFavorite = false;
-          } else {
-            // The server reports no membership but the device cache knows
-            // the comic is favorited (stale report right after a successful
-            // add): keep the local knowledge instead of un-favoriting.
-            isFavorite = true;
-          }
-          update();
-        } else if (cache.isFavoriteKnown(comic.sourceKey, comic.id)) {
-          // The source did not report membership; the device cache is the
-          // more reliable source for the favorited state.
-          isFavorite = true;
-          update();
-        }
-      }
-    }
     if (comic.chapters == null) {
       isDownloaded = LocalManager().isDownloaded(comic.id, comic.comicType, 0);
+    }
+    if (comicSource.favoriteData?.loadFolders != null && comicSource.isLogged) {
+      unawaited(_refreshFavoriteFoldersInBackground());
+    }
+  }
+
+  Future<void> _refreshFavoriteFoldersInBackground() async {
+    final source = comicSource;
+    final loadFolders = source.favoriteData?.loadFolders;
+    if (loadFolders == null || !source.isLogged) return;
+
+    final watch = Stopwatch()..start();
+    try {
+      final res = await loadFolders(comic.id);
+      watch.stop();
+      if (res.error) {
+        if (kDebugMode) {
+          Log.info(
+            'ComicPage',
+            'loadFolders sourceKey=${comic.sourceKey} comicId=${comic.id} '
+                'failure total=${watch.elapsedMilliseconds}ms '
+                'error=${_briefLoadError(res.errorMessage)}',
+          );
+        }
+        return;
+      }
+
+      final membership = res.subData is List
+          ? List<String>.from(res.subData)
+          : null;
+      if (kDebugMode) {
+        Log.info(
+          'ComicPage',
+          'loadFolders sourceKey=${comic.sourceKey} comicId=${comic.id} '
+              'success folders=${res.data.length} '
+              'membership=${membership?.length ?? 0} '
+              'total=${watch.elapsedMilliseconds}ms',
+        );
+      }
+      if (!mounted) return;
+
+      final cache = _followUpdateCache;
+      cache.cacheFolderSnapshot(comic.sourceKey, res.data);
+      final wasFavoriteKnown = cache.isFavoriteKnown(comic.sourceKey, comic.id);
+      var shouldUpdate = false;
+      if (membership != null) {
+        if (membership.isNotEmpty) {
+          cache.replaceComicMembership(comic.sourceKey, comic.id, membership);
+          isFavorite = true;
+        } else if (!wasFavoriteKnown) {
+          // The server reports no membership and the device cache agrees:
+          // the comic is not favorited.
+          cache.replaceComicMembership(comic.sourceKey, comic.id, membership);
+          isFavorite = false;
+        } else {
+          // The server reports no membership but the device cache knows the
+          // comic is favorited (stale report right after a successful add):
+          // keep the local knowledge instead of un-favoriting.
+          isFavorite = true;
+        }
+        shouldUpdate = true;
+      } else if (wasFavoriteKnown) {
+        // The source did not report membership; the device cache is the more
+        // reliable source for the favorited state.
+        isFavorite = true;
+        shouldUpdate = true;
+      }
+      if (shouldUpdate && mounted) {
+        update();
+      }
+    } catch (e) {
+      watch.stop();
+      if (kDebugMode) {
+        Log.info(
+          'ComicPage',
+          'loadFolders sourceKey=${widget.sourceKey} comicId=${widget.id} '
+              'failure total=${watch.elapsedMilliseconds}ms '
+              'error=${_briefLoadError(e)}',
+        );
+      }
     }
   }
 

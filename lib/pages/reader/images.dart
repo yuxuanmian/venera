@@ -1,5 +1,10 @@
 part of 'reader.dart';
 
+String _briefReaderLoadError(Object? error) {
+  final message = (error?.toString() ?? '').replaceAll(RegExp(r'\s+'), ' ');
+  return message.length <= 160 ? message : '${message.substring(0, 160)}...';
+}
+
 class _ReaderImages extends StatefulWidget {
   const _ReaderImages({super.key});
 
@@ -45,12 +50,23 @@ class _ReaderImagesState extends State<_ReaderImages> {
           reader.chapter,
           reader.widget.chapters,
         ))) {
+      final watch = Stopwatch()..start();
       try {
         var images = await LocalManager().getImages(
           reader.cid,
           reader.type,
           reader.chapter,
         );
+        watch.stop();
+        if (kDebugMode) {
+          Log.info(
+            'Reader',
+            'getImages comicId=${reader.cid} chapter=${reader.chapter} '
+                'success images=${images.length} '
+                'total=${watch.elapsedMilliseconds}ms',
+          );
+        }
+        if (!mounted) return;
         setState(() {
           reader.images = images;
           reader.isLoading = false;
@@ -61,6 +77,16 @@ class _ReaderImagesState extends State<_ReaderImages> {
           });
         });
       } catch (e) {
+        watch.stop();
+        if (kDebugMode) {
+          Log.info(
+            'Reader',
+            'getImages comicId=${reader.cid} chapter=${reader.chapter} '
+                'failure total=${watch.elapsedMilliseconds}ms '
+                'error=${_briefReaderLoadError(e)}',
+          );
+        }
+        if (!mounted) return;
         setState(() {
           error = e.toString();
           reader.isLoading = false;
@@ -69,29 +95,64 @@ class _ReaderImagesState extends State<_ReaderImages> {
       }
     } else {
       var cp = reader.widget.chapters?.ids.elementAtOrNull(reader.chapter - 1);
-      var res = await reader.type.comicSource!.loadComicPages!(
-        reader.widget.cid,
-        cp,
-      );
-      if (res.error) {
-        setState(() {
-          error = res.errorMessage;
-          reader.isLoading = false;
-          inProgress = false;
-        });
-      } else {
-        setState(() {
-          reader.images = res.data;
-          reader.isLoading = false;
-          inProgress = false;
-          _handleJumpToLastPage();
-          Future.microtask(() {
-            reader.updateHistory();
+      final watch = Stopwatch()..start();
+      try {
+        var res = await reader.type.comicSource!.loadComicPages!(
+          reader.widget.cid,
+          cp,
+        );
+        watch.stop();
+        if (kDebugMode) {
+          Log.info(
+            'Reader',
+            'loadComicPages sourceKey=${reader.type.sourceKey} '
+                'comicId=${reader.widget.cid} epId=$cp '
+                '${res.success ? 'success' : 'failure'} '
+                'images=${res.success ? res.data.length : 0} '
+                'total=${watch.elapsedMilliseconds}ms'
+                '${res.error ? ' error=${_briefReaderLoadError(res.errorMessage)}' : ''}',
+          );
+        }
+        if (!mounted) return;
+        if (res.error) {
+          setState(() {
+            error = res.errorMessage;
+            reader.isLoading = false;
+            inProgress = false;
           });
+        } else {
+          setState(() {
+            reader.images = res.data;
+            reader.isLoading = false;
+            inProgress = false;
+            _handleJumpToLastPage();
+            Future.microtask(() {
+              reader.updateHistory();
+            });
+          });
+        }
+      } catch (e) {
+        watch.stop();
+        if (kDebugMode) {
+          Log.info(
+            'Reader',
+            'loadComicPages sourceKey=${reader.type.sourceKey} '
+                'comicId=${reader.widget.cid} epId=$cp failure '
+                'images=0 total=${watch.elapsedMilliseconds}ms '
+                'error=${_briefReaderLoadError(e)}',
+          );
+        }
+        if (!mounted) return;
+        setState(() {
+          error = e.toString();
+          reader.isLoading = false;
+          inProgress = false;
         });
       }
     }
-    context.readerScaffold.update();
+    if (mounted) {
+      context.readerScaffold.update();
+    }
   }
 
   @override
@@ -1282,8 +1343,9 @@ class _ContinuousModeState extends State<_ContinuousMode>
 ImageProvider _createImageProviderFromKey(
   String imageKey,
   BuildContext context,
-  int page,
-) {
+  int page, {
+  ImageDownloadPriority priority = ImageDownloadPriority.foreground,
+}) {
   var reader = context.reader;
   return ReaderImageProvider(
     imageKey,
@@ -1291,13 +1353,23 @@ ImageProvider _createImageProviderFromKey(
     reader.cid,
     reader.eid,
     reader.page,
+    priority: priority,
   );
 }
 
-ImageProvider _createImageProvider(int page, BuildContext context) {
+ImageProvider _createImageProvider(
+  int page,
+  BuildContext context, {
+  ImageDownloadPriority priority = ImageDownloadPriority.foreground,
+}) {
   var reader = context.reader;
   var imageKey = reader.images![page - 1];
-  return _createImageProviderFromKey(imageKey, context, page);
+  return _createImageProviderFromKey(
+    imageKey,
+    context,
+    page,
+    priority: priority,
+  );
 }
 
 /// [_precacheImage] is used to precache the image for the given page.
@@ -1307,7 +1379,14 @@ void _precacheImage(int page, BuildContext context) {
   if (page <= 0 || page > context.reader.images!.length) {
     return;
   }
-  precacheImage(_createImageProvider(page, context), context);
+  precacheImage(
+    _createImageProvider(
+      page,
+      context,
+      priority: ImageDownloadPriority.preload,
+    ),
+    context,
+  );
 }
 
 /// [_preDownloadImage] is used to download the image for the given page.
@@ -1324,7 +1403,13 @@ void _preDownloadImage(int page, BuildContext context) {
   var cid = reader.cid;
   var eid = reader.eid;
   var sourceKey = reader.type.comicSource?.key;
-  ImageDownloader.loadComicImage(imageKey, sourceKey, cid, eid);
+  ImageDownloader.loadComicImage(
+    imageKey,
+    sourceKey,
+    cid,
+    eid,
+    priority: ImageDownloadPriority.preload,
+  );
 }
 
 class _SwipeChangeChapterProgress extends StatefulWidget {

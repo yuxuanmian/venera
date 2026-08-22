@@ -129,18 +129,27 @@ abstract class LoadingState<T extends StatefulWidget, S extends Object>
 
   Future<Res<S>> loadData();
 
+  /// Whether a failed load should be attempted again.
+  ///
+  /// [retryCount] is the number of additional attempts that have already
+  /// completed before this failure. The default keeps the existing behavior:
+  /// at most three additional attempts after the initial load.
+  @protected
+  bool shouldRetryLoad(String message, int retryCount) => true;
+
   Future<Res<S>> loadDataWithRetry() async {
-    int retry = 0;
+    int retryCount = 0;
     while (true) {
       var res = await loadData();
       if (res.success) {
         return res;
       } else {
         if (!mounted) return res;
-        if (retry >= 3) {
+        final message = res.errorMessage ?? '';
+        if (!shouldRetryLoad(message, retryCount) || retryCount >= 3) {
           return res;
         }
-        retry++;
+        retryCount++;
         await Future.delayed(const Duration(milliseconds: 200));
       }
     }
@@ -166,17 +175,21 @@ abstract class LoadingState<T extends StatefulWidget, S extends Object>
       error = null;
     });
     loadDataWithRetry().then((value) async {
+      if (!mounted) return;
       if (value.success) {
         data = value.data;
         await onDataLoaded();
+        if (!mounted) return;
         setState(() {
           isLoading = false;
         });
       } else {
-        onLoadError(value.errorMessage!);
+        final message = value.errorMessage ?? '';
+        onLoadError(message);
+        if (!mounted) return;
         setState(() {
           isLoading = false;
-          error = value.errorMessage!;
+          error = message;
         });
       }
     });
@@ -201,14 +214,17 @@ abstract class LoadingState<T extends StatefulWidget, S extends Object>
         if (value.success) {
           data = value.data;
           await onDataLoaded();
+          if (!mounted) return;
           setState(() {
             isLoading = false;
           });
         } else {
-          onLoadError(value.errorMessage!);
+          final message = value.errorMessage ?? '';
+          onLoadError(message);
+          if (!mounted) return;
           setState(() {
             isLoading = false;
-            error = value.errorMessage!;
+            error = message;
           });
         }
       });

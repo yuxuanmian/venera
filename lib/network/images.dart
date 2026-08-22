@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:flutter/foundation.dart' show kDebugMode, visibleForTesting;
 import 'package:flutter_qjs/flutter_qjs.dart';
 import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
@@ -11,11 +11,195 @@ import 'package:venera/utils/image.dart';
 
 import 'app_dio.dart';
 
+enum ImageDownloadPriority { foreground, preload }
+
+/// A small priority-aware permit scheduler for comic image downloads.
+///
+/// Foreground work is always selected before queued preload work. Preloads
+/// have their own cap so a burst of adjacent-page requests cannot consume all
+/// network slots before the currently visible page gets a chance to start.
+@visibleForTesting
+class ImageDownloadScheduler {
+  ImageDownloadScheduler({this.maxConcurrent = 3, this.maxPreload = 2}) {
+    if (maxConcurrent <= 0) {
+      throw ArgumentError.value(maxConcurrent, 'maxConcurrent');
+    }
+    if (maxPreload < 0 || maxPreload > maxConcurrent) {
+      throw ArgumentError.value(maxPreload, 'maxPreload');
+    }
+  }
+
+  final int maxConcurrent;
+
+  final int maxPreload;
+
+  final List<ImageDownloadTicket> _waiting = [];
+
+  int _active = 0;
+
+  int _activePreload = 0;
+
+  int get activeCount => _active;
+
+  int get activePreloadCount => _activePreload;
+
+  int get waitingCount => _waiting.length;
+
+  ImageDownloadTicket acquire(ImageDownloadPriority priority) {
+    final ticket = ImageDownloadTicket._(this, priority);
+    _waiting.add(ticket);
+    _drain();
+    return ticket;
+  }
+
+  void release(ImageDownloadTicket ticket) {
+    if (ticket._scheduler != this || !ticket._granted || ticket._released) {
+      return;
+    }
+    ticket._released = true;
+    _active--;
+    if (ticket._countsAsPreload) {
+      _activePreload--;
+    }
+    _drain();
+  }
+
+  void _promote(ImageDownloadTicket ticket) {
+    if (ticket._scheduler != this ||
+        ticket._cancelled ||
+        ticket._granted ||
+        ticket._priority == ImageDownloadPriority.foreground) {
+      return;
+    }
+    ticket._priority = ImageDownloadPriority.foreground;
+    _drain();
+  }
+
+  void _cancel(ImageDownloadTicket ticket) {
+    if (ticket._scheduler != this || ticket._cancelled) return;
+    ticket._cancelled = true;
+    if (!ticket._granted) {
+      _waiting.remove(ticket);
+      ticket._complete();
+      _drain();
+    }
+  }
+
+  void _drain() {
+    while (_active < maxConcurrent) {
+      ImageDownloadTicket? next;
+      for (final ticket in _waiting) {
+        if (!ticket._cancelled &&
+            ticket._priority == ImageDownloadPriority.foreground) {
+          next = ticket;
+          break;
+        }
+      }
+      if (next == null && _activePreload < maxPreload) {
+        for (final ticket in _waiting) {
+          if (!ticket._cancelled &&
+              ticket._priority == ImageDownloadPriority.preload) {
+            next = ticket;
+            break;
+          }
+        }
+      }
+      if (next == null) return;
+      _waiting.remove(next);
+      _active++;
+      next._grant();
+      if (next._countsAsPreload) {
+        _activePreload++;
+      }
+    }
+  }
+}
+
+@visibleForTesting
+class ImageDownloadTicket {
+  ImageDownloadTicket._(this._scheduler, this._priority);
+
+  final ImageDownloadScheduler _scheduler;
+
+  final Completer<void> _completer = Completer<void>();
+
+  ImageDownloadPriority _priority;
+
+  bool _granted = false;
+
+  bool _released = false;
+
+  bool _cancelled = false;
+
+  bool _countsAsPreload = false;
+
+  Future<void> get granted => _completer.future;
+
+  ImageDownloadPriority get priority => _priority;
+
+  bool get isGranted => _granted;
+
+  bool get isCancelled => _cancelled;
+
+  void promote() => _scheduler._promote(this);
+
+  void cancel() => _scheduler._cancel(this);
+
+  void _grant() {
+    if (_cancelled || _granted) return;
+    _granted = true;
+    _countsAsPreload = _priority == ImageDownloadPriority.preload;
+    _complete();
+  }
+
+  void _complete() {
+    if (!_completer.isCompleted) {
+      _completer.complete();
+    }
+  }
+}
+
+class _ComicImageLoadRequest {
+  _ComicImageLoadRequest(this.priority);
+
+  ImageDownloadPriority priority;
+
+  ImageDownloadTicket? _ticket;
+
+  bool cancelled = false;
+
+  void promote() {
+    if (priority == ImageDownloadPriority.foreground) return;
+    priority = ImageDownloadPriority.foreground;
+    _ticket?.promote();
+  }
+
+  void attach(ImageDownloadTicket ticket) {
+    _ticket = ticket;
+    if (cancelled) {
+      ticket.cancel();
+    } else if (priority == ImageDownloadPriority.foreground) {
+      ticket.promote();
+    }
+  }
+
+  void detach(ImageDownloadTicket ticket) {
+    if (identical(_ticket, ticket)) {
+      _ticket = null;
+    }
+  }
+
+  void cancel() {
+    cancelled = true;
+    _ticket?.cancel();
+  }
+}
+
 abstract class ImageDownloader {
   /// Limits concurrent comic image downloads so fast scrolling into an
   /// unbuffered region cannot start dozens of downloads at once (memory
   /// spikes, GC pauses and frame drops).
-  static final _downloadSemaphore = _DownloadSemaphore(3);
+  static final _downloadScheduler = ImageDownloadScheduler();
 
   /// Builds the disk cache key used by [loadThumbnail].
   ///
@@ -153,25 +337,52 @@ abstract class ImageDownloader {
     _loadingImages.clear();
   }
 
+  /// Promote an already loading comic image to foreground priority.
+  ///
+  /// This only consults the in-flight request registry. It never creates a
+  /// request or touches the disk/network cache when the image is not loading.
+  static bool promoteComicImage(
+    String imageKey,
+    String? sourceKey,
+    String cid,
+    String eid,
+  ) {
+    final cacheKey = comicImageCacheKey(imageKey, sourceKey, cid, eid);
+    final existing = _loadingImages[cacheKey];
+    if (existing == null) {
+      return false;
+    }
+    existing.promote();
+    return true;
+  }
+
   /// Load a comic image from the network or cache.
   /// The function will prevent multiple requests for the same image.
   static Stream<ImageDownloadProgress> loadComicImage(
     String imageKey,
     String? sourceKey,
     String cid,
-    String eid,
-  ) {
-    final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
-    if (_loadingImages.containsKey(cacheKey)) {
-      return _loadingImages[cacheKey]!.stream;
+    String eid, {
+    ImageDownloadPriority priority = ImageDownloadPriority.foreground,
+  }) {
+    final cacheKey = comicImageCacheKey(imageKey, sourceKey, cid, eid);
+    final existing = _loadingImages[cacheKey];
+    if (existing != null) {
+      if (priority == ImageDownloadPriority.foreground) {
+        existing.promote();
+      }
+      return existing.stream;
     }
     final cancelToken = CancelToken();
+    final request = _ComicImageLoadRequest(priority);
     final stream = _StreamWrapper<ImageDownloadProgress>(
-      _loadComicImage(imageKey, sourceKey, cid, eid, cancelToken),
+      _loadComicImage(imageKey, sourceKey, cid, eid, cancelToken, request),
       (wrapper) {
         _loadingImages.remove(cacheKey);
       },
+      onPromote: request.promote,
       onCancel: () {
+        request.cancel();
         // The Dio cancel token completes the adapter's cancelFuture, which
         // aborts the underlying rhttp request instead of leaving it running
         // in the background.
@@ -186,9 +397,17 @@ abstract class ImageDownloader {
     String imageKey,
     String? sourceKey,
     String cid,
-    String eid,
-  ) {
-    return _loadComicImage(imageKey, sourceKey, cid, eid, CancelToken());
+    String eid, {
+    ImageDownloadPriority priority = ImageDownloadPriority.foreground,
+  }) {
+    return _loadComicImage(
+      imageKey,
+      sourceKey,
+      cid,
+      eid,
+      CancelToken(),
+      _ComicImageLoadRequest(priority),
+    );
   }
 
   static Stream<ImageDownloadProgress> _loadComicImage(
@@ -197,6 +416,7 @@ abstract class ImageDownloader {
     String cid,
     String eid,
     CancelToken cancelToken,
+    _ComicImageLoadRequest request,
   ) async* {
     final cacheKey = comicImageCacheKey(imageKey, sourceKey, cid, eid);
     final cache = await CacheManager().findCache(cacheKey);
@@ -213,6 +433,7 @@ abstract class ImageDownloader {
       // would re-download already cached images.
       return;
     }
+    if (request.cancelled) return;
 
     // Total load time including queue wait and retries; only the network
     // download path reaches this point.
@@ -233,6 +454,7 @@ abstract class ImageDownloader {
     }
     var retryLimit = 5;
     while (true) {
+      if (request.cancelled) return;
       try {
         configs['headers'] ??= {'user-agent': webUA};
 
@@ -257,9 +479,14 @@ abstract class ImageDownloader {
         );
 
         final queueWatch = Stopwatch()..start();
-        await _downloadSemaphore.acquire();
-        queueWatch.stop();
+        final ticket = ImageDownloader._downloadScheduler.acquire(
+          request.priority,
+        );
+        request.attach(ticket);
         try {
+          await ticket.granted;
+          if (request.cancelled || ticket.isCancelled) return;
+          queueWatch.stop();
           // The request future completes when the response headers arrive,
           // so this measures connection + TLS + time to first byte.
           final connectWatch = Stopwatch()..start();
@@ -316,14 +543,14 @@ abstract class ImageDownloader {
           await CacheManager().writeCache(cacheKey, data);
           if (kDebugMode) {
             // Debug-only timing breakdown: one self-contained line per image
-            // (actual request URL first) so concurrent downloads stay
-            // greppable. queue = waiting for a download slot, connect =
+            // so concurrent downloads stay greppable. queue = waiting for a
+            // download slot, connect =
             // TCP/TLS + first byte, download = body transfer, total =
             // everything incl. retries and the cache write.
-            final requestUrl = (configs['url'] as String?) ?? imageKey;
             Log.info(
               "Image",
-              "$requestUrl${requestUrl != imageKey ? ' (key=$imageKey)' : ''} -> "
+              "sourceKey=$sourceKey comicId=$cid epId=$eid "
+                  "priority=${request.priority.name} "
                   "queue=${queueWatch.elapsedMilliseconds}ms "
                   "connect=${connectWatch.elapsedMilliseconds}ms "
                   "download=${downloadWatch.elapsedMilliseconds}ms "
@@ -337,10 +564,12 @@ abstract class ImageDownloader {
             imageBytes: data,
           );
         } finally {
-          _downloadSemaphore.release();
+          ImageDownloader._downloadScheduler.release(ticket);
+          request.detach(ticket);
         }
         return;
       } catch (e) {
+        if (request.cancelled) return;
         if (e is DioException && e.type == DioExceptionType.cancel) {
           // A cancelled image must not be retried through onLoadFailed.
           rethrow;
@@ -349,6 +578,7 @@ abstract class ImageDownloader {
           rethrow;
         }
         var newConfig = await onLoadFailed();
+        if (request.cancelled) return;
         (configs['onLoadFailed'] as JSInvokable).free();
         onLoadFailed = null;
         if (newConfig == null) {
@@ -378,11 +608,16 @@ class _StreamWrapper<T> {
   /// aborted instead of continuing in the background.
   final void Function()? onCancel;
 
+  /// Called when a foreground subscriber takes over a queued preload.
+  final void Function()? onPromote;
+
   bool isClosed = false;
 
-  _StreamWrapper(this._stream, this.onClosed, {this.onCancel}) {
+  _StreamWrapper(this._stream, this.onClosed, {this.onCancel, this.onPromote}) {
     _listen();
   }
+
+  void promote() => onPromote?.call();
 
   void _listen() async {
     try {
@@ -448,33 +683,4 @@ class ImageDownloadProgress {
     required this.totalBytes,
     this.imageBytes,
   });
-}
-
-/// A simple counting semaphore limiting concurrent image downloads.
-class _DownloadSemaphore {
-  final int max;
-
-  int _count = 0;
-
-  final List<Completer<void>> _waiters = [];
-
-  _DownloadSemaphore(this.max);
-
-  Future<void> acquire() async {
-    if (_count < max) {
-      _count++;
-      return;
-    }
-    final completer = Completer<void>();
-    _waiters.add(completer);
-    await completer.future;
-  }
-
-  void release() {
-    if (_waiters.isNotEmpty) {
-      _waiters.removeAt(0).complete();
-    } else {
-      _count--;
-    }
-  }
 }

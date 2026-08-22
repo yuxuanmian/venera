@@ -87,6 +87,12 @@ class _ReaderWithLoadingState
   }
 
   @override
+  @protected
+  bool shouldRetryLoad(String message, int retryCount) {
+    return classifyNotFoundError(message) != NotFoundSignal.strong;
+  }
+
+  @override
   FutureOr<void> onDataLoaded() {
     final cache = NetworkFavoriteCacheManager();
     if (cache.isComicSuspectGone(widget.sourceKey, widget.id)) {

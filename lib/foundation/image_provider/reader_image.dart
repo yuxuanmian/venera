@@ -17,8 +17,10 @@ class ReaderImageProvider
     this.sourceKey,
     this.cid,
     this.eid,
-    this.page,
-  );
+    this.page, {
+    this.priority = ImageDownloadPriority.foreground,
+    @visibleForTesting this.onForegroundPromotion,
+  });
 
   final String imageKey;
 
@@ -29,6 +31,13 @@ class ReaderImageProvider
   final String eid;
 
   final int page;
+
+  final ImageDownloadPriority priority;
+
+  /// Test seam for observing the resolve-time promotion without changing the
+  /// provider/cache identity.
+  @visibleForTesting
+  final VoidCallback? onForegroundPromotion;
 
   @override
   Future<LoadResult> load(chunkEvents, checkStop) async {
@@ -53,6 +62,7 @@ class ReaderImageProvider
         sourceKey,
         cid,
         eid,
+        priority: priority,
       )) {
         checkStop();
         chunkEvents.add(
@@ -133,6 +143,11 @@ class ReaderImageProvider
 
   @override
   Future<ReaderImageProvider> obtainKey(ImageConfiguration configuration) {
+    if (priority == ImageDownloadPriority.foreground &&
+        !imageKey.startsWith('file://')) {
+      ImageDownloader.promoteComicImage(imageKey, sourceKey, cid, eid);
+      onForegroundPromotion?.call();
+    }
     return SynchronousFuture(this);
   }
 
