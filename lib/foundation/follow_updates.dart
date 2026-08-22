@@ -7,7 +7,10 @@ import 'package:crypto/crypto.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
+import 'package:venera/foundation/follow_update_schedule.dart';
 import 'package:venera/foundation/log.dart';
+
+export 'follow_update_schedule.dart';
 
 abstract interface class ScanCancellationToken {
   bool get isCanceled;
@@ -358,6 +361,37 @@ String _normalizeMarkerTime(String? value) {
       '${day.toString().padLeft(2, '0')}';
 }
 
+/// Extracts the source activity time for scheduling without changing the
+/// marker/display-date semantics. Update metadata wins; malformed update
+/// metadata falls back to upload metadata.
+DateTime? comicSourceActivityAt(ComicDetails info, {DateTime? now}) {
+  final current = now ?? DateTime.now();
+  final updateValues = <String?>[info.updateTime];
+  const updateNamespaces = {'更新', '最後更新', '最后更新', 'update', 'last update'};
+  for (final entry in info.tags.entries) {
+    if (updateNamespaces.contains(entry.key.toLowerCase())) {
+      updateValues.addAll(entry.value);
+    }
+  }
+  for (final value in updateValues) {
+    final parsed = parseFollowUpdateActivityTime(value, now: current);
+    if (parsed != null) return parsed;
+  }
+
+  final uploadValues = <String?>[info.uploadTime];
+  const uploadNamespaces = {'上传', '上架', 'upload', 'uploaded'};
+  for (final entry in info.tags.entries) {
+    if (uploadNamespaces.contains(entry.key.toLowerCase())) {
+      uploadValues.addAll(entry.value);
+    }
+  }
+  for (final value in uploadValues) {
+    final parsed = parseFollowUpdateActivityTime(value, now: current);
+    if (parsed != null) return parsed;
+  }
+  return null;
+}
+
 String? _recentChapterFingerprint(ComicChapters? chapters) {
   if (chapters == null) return null;
   final entries = <Map<String, String>>[];
@@ -383,14 +417,17 @@ Future<ComicUpdateResult> updateComic(
   NetworkFavoriteCacheManager? cache,
   bool sourceHealthy = true,
   ScanCancellationToken? cancellationToken,
+  DateTime Function()? clock,
 }) async {
   final manager = cache ?? NetworkFavoriteCacheManager();
+  DateTime currentTime() => clock?.call() ?? DateTime.now();
   bool canCommit() => cancellationToken?.canCommit ?? true;
   ComicUpdateResult canceled() =>
       ComicUpdateResult(false, null, canceled: true);
 
   Future<ComicUpdateResult> onSuccess(ComicDetails newInfo) async {
     if (!canCommit()) return canceled();
+    final completedAt = currentTime();
     final author = newInfo.subTitle?.trim();
     // Commit the check state and every favorite snapshot together. The
     // (likely changed) cover URL is only included when the committed marker
@@ -399,13 +436,15 @@ Future<ComicUpdateResult> updateComic(
       folder,
       c.id,
       updateTime: newInfo.findUpdateTime(),
+      sourceActivityAt: comicSourceActivityAt(newInfo, now: completedAt),
+      completedAt: completedAt,
       updateMarker: comicUpdateMarker(newInfo),
       title: newInfo.title,
       author: author?.isNotEmpty == true ? author : newInfo.findAuthor(),
       chapterCount: newInfo.chapters?.length,
       // The transaction only applies this cover when the marker confirms an
       // update; refreshing it on every successful check would invalidate the
-      // URL-keyed image cache during each 24h sweep.
+      // URL-keyed image cache during each scheduled sweep.
       cover: newInfo.cover,
     );
     if (!canCommit()) return canceled();
@@ -415,12 +454,20 @@ Future<ComicUpdateResult> updateComic(
   var comicSource = c.type.comicSource;
   if (comicSource == null) {
     if (!canCommit()) return canceled();
-    manager.markComicRetryLaterEverywhere(c.sourceKey, c.id);
+    manager.markComicRetryLaterEverywhere(
+      c.sourceKey,
+      c.id,
+      now: currentTime(),
+    );
     return ComicUpdateResult(false, "Comic source not found");
   }
   if (comicSource.loadComicInfo == null) {
     if (!canCommit()) return canceled();
-    manager.markComicRetryLaterEverywhere(c.sourceKey, c.id);
+    manager.markComicRetryLaterEverywhere(
+      c.sourceKey,
+      c.id,
+      now: currentTime(),
+    );
     return ComicUpdateResult(false, 'Comic source does not load details');
   }
   int retries = 3;
@@ -466,6 +513,7 @@ Future<ComicUpdateResult> updateComic(
           c.id,
           delay: retryDelayForFailures(failures),
           failures: failures,
+          now: currentTime(),
         );
         return ComicUpdateResult(false, message);
       }
@@ -480,6 +528,7 @@ Future<ComicUpdateResult> updateComic(
           c.id,
           delay: retryDelayForFailures(failures),
           failures: failures,
+          now: currentTime(),
         );
         return ComicUpdateResult(false, message);
       }
@@ -545,7 +594,7 @@ enum FollowUpdateMode {
   /// Only comics that have never completed a check.
   missing,
 
-  /// Comics with no check yet plus those checked more than 24 hours ago.
+  /// Comics with no check yet plus those whose persisted schedule is due.
   regular,
 
   /// Every cached comic, regardless of previous check time.
@@ -571,7 +620,7 @@ class _ScanItem {
 /// Builds the deduplicated candidate queue for one scan run.
 ///
 /// The suspect skip, the [mode] window (missing: never checked only;
-/// regular: never checked or checked more than 24h ago; force: all) and the
+/// regular: never checked or due by the persisted schedule; force: all) and the
 /// retry-after cooldown are all applied in SQL by
 /// [NetworkFavoriteCacheManager.getScanCandidates]; this function only
 /// deduplicates comics that appear in several folders, keeping the row with
@@ -582,6 +631,7 @@ List<_ScanItem> _buildScanItems(
   List<NetworkFavoriteFolderRef> folders,
   FollowUpdateMode mode, {
   required bool ignoreRetryAfter,
+  required DateTime now,
   Set<String>? skipKeys,
   bool includeSuspect = false,
 }) {
@@ -592,6 +642,7 @@ List<_ScanItem> _buildScanItems(
     modeName: mode.name,
     ignoreRetryAfter: ignoreRetryAfter,
     includeSuspect: includeSuspect,
+    now: now,
   )) {
     final key = '${c.sourceKey}\u0000${c.comicId}';
     final previous = earliestCheck[key];
@@ -752,6 +803,9 @@ Future<void> _runScan(
 
   ScanRunInfo? run;
   try {
+    // Candidate selection and this run's initial scheduling decisions share a
+    // single captured instant, making injected-clock tests deterministic.
+    final scanNow = clock();
     // Resume an interrupted (crash) run with its stored mode and cooldown
     // policy; otherwise start a fresh run.
     final previousRun = manager.getCurrentScanRun();
@@ -764,6 +818,7 @@ Future<void> _runScan(
         folders,
         storedMode,
         ignoreRetryAfter: previousRun.ignoreRetryAfter,
+        now: scanNow,
         skipKeys: manager.getDoneScanItems(previousRun.runId),
         includeSuspect: includeSuspect,
       );
@@ -785,6 +840,7 @@ Future<void> _runScan(
         folders,
         mode,
         ignoreRetryAfter: ignoreRetryAfter,
+        now: scanNow,
         includeSuspect: includeSuspect,
       );
       run = manager.createScanRun(
@@ -840,7 +896,7 @@ Future<void> _runScan(
           folderId: item.representativeFolderId,
         );
         if (!token.canCommit) return;
-        // Re-read the row so the 24h hit window and retry state are current.
+        // Re-read the row so the persisted schedule and retry state are current.
         final fresh = manager.getComicUpdateInfo(
           item.sourceKey,
           item.comicId,
@@ -900,6 +956,7 @@ Future<void> _runScan(
                   cache: manager,
                   sourceHealthy: sourceHealthy(item.sourceKey),
                   cancellationToken: token,
+                  clock: clock,
                 ),
                 onCompleted: (completed) {
                   if (completed.canceled) return;
@@ -972,6 +1029,7 @@ Future<void> _runScan(
             item.sourceKey,
             item.comicId,
             failures: fresh.checkFailures + 1,
+            now: clock(),
           );
           manager.markScanItemDone(
             runId,
@@ -1069,8 +1127,8 @@ Future<void> _runScan(
 
     // Second opinion for not-found results: re-check each once after the
     // queue drains. A success clears the accumulated hits (recordComicCheck
-    // resets the counters); another not-found stays inside the 24h window and
-    // cannot accumulate twice on the same day. Re-checks share the main
+    // resets the counters); another not-found remains in its retry window and
+    // cannot accumulate repeatedly in one check cycle. Re-checks share the main
     // workers' rate limiter and run on a few concurrent workers instead of
     // serially.
     if (notFoundRetries.isNotEmpty && token.canCommit) {
@@ -1108,6 +1166,7 @@ Future<void> _runScan(
                   cache: manager,
                   sourceHealthy: sourceHealthy(retry.comic.sourceKey),
                   cancellationToken: token,
+                  clock: clock,
                 ),
               ) ??
               ComicUpdateResult(false, null, canceled: true);
@@ -1147,22 +1206,38 @@ Future<void> _runScan(
   }
 }
 
-Future<bool> recheckFavoriteComic(String sourceKey, String comicId) async {
-  final manager = NetworkFavoriteCacheManager();
+Future<bool> recheckFavoriteComic(
+  String sourceKey,
+  String comicId, {
+  NetworkFavoriteCacheManager? cache,
+}) async {
+  final manager = cache ?? NetworkFavoriteCacheManager();
   final folderIds = manager.getKnownFolderIds(sourceKey, comicId);
-  var succeeded = false;
+  FavoriteItemWithUpdateInfo? itemToCheck;
+  NetworkFavoriteFolderRef? folderToCheck;
   for (final folderId in folderIds) {
     final folder = NetworkFavoriteFolderRef(
       sourceKey: sourceKey,
       folderId: folderId,
     );
-    for (final item in manager.getComicsWithUpdatesInfo(folder)) {
-      if (item.id == comicId) {
-        final result = await updateComic(item, folder, cache: manager);
-        if (result.errorMessage == null) succeeded = true;
-        break;
-      }
+    final item = manager
+        .getComicsWithUpdatesInfo(folder)
+        .where((candidate) => candidate.id == comicId)
+        .firstOrNull;
+    if (item != null) {
+      itemToCheck = item;
+      folderToCheck = folder;
+      break;
     }
+  }
+  var succeeded = false;
+  if (itemToCheck != null && folderToCheck != null) {
+    final result = await updateComic(
+      itemToCheck,
+      folderToCheck,
+      cache: manager,
+    );
+    succeeded = result.errorMessage == null;
   }
   manager.notifyCacheChanged();
   return succeeded;

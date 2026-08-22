@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -738,6 +739,1059 @@ void main() {
       database.dispose();
     }
   });
+
+  test('manual hot window reuses its fixed deadline after closing', () async {
+    final data = _numericData(
+      (page, [folder]) async => Res(<Comic>[_comic('one')], subData: 1),
+    );
+    await cache.refreshFolders(data);
+    await cache.refreshPage(data, folder, 1);
+    final t0 = DateTime(2026, 8, 1, 12);
+    cache.recordComicCheckEverywhere(
+      'test-source',
+      'one',
+      completedAt: t0,
+      updateTime: '2026-08-01',
+      updateMarker: 'v2|time:2026-08-01|chapters:1',
+    );
+
+    var info = cache.toggleManualHotWindow(
+      'test-source',
+      'one',
+      enabled: true,
+      now: t0,
+    )!;
+    final deadline = info.manualHotUntil;
+    expect(deadline, t0.add(const Duration(days: 14)));
+
+    info = cache.toggleManualHotWindow(
+      'test-source',
+      'one',
+      enabled: false,
+      now: t0.add(const Duration(days: 2)),
+    )!;
+    expect(info.manualHotEnabled, isFalse);
+    expect(info.manualHotUntil, deadline);
+    expect(info.isHotActiveAt(t0.add(const Duration(days: 2))), isFalse);
+
+    info = cache.toggleManualHotWindow(
+      'test-source',
+      'one',
+      enabled: true,
+      now: t0.add(const Duration(days: 3)),
+    )!;
+    expect(info.manualHotUntil, deadline);
+
+    info = cache.toggleManualHotWindow(
+      'test-source',
+      'one',
+      enabled: true,
+      now: t0.add(const Duration(days: 15)),
+    )!;
+    expect(info.manualHotUntil, t0.add(const Duration(days: 29)));
+  });
+
+  test(
+    'current schema baseline does not gain an automatic hot window after restart',
+    () async {
+      final data = _numericData(
+        (page, [folder]) async => Res(<Comic>[_comic('restart')], subData: 1),
+      );
+      await cache.refreshFolders(data);
+      await cache.refreshPage(data, folder, 1);
+
+      final t0 = DateTime.now();
+      final sourceActivityAt = t0.subtract(const Duration(days: 1));
+      cache.recordComicCheckEverywhere(
+        'test-source',
+        'restart',
+        completedAt: t0,
+        sourceActivityAt: sourceActivityAt,
+        updateMarker: 'v1|time:${sourceActivityAt.toIso8601String()}',
+      );
+
+      final first = cache.getComicUpdateInfo(
+        'test-source',
+        'restart',
+        'remote',
+      )!;
+      expect(first.autoHotUntil, isNull);
+      expect(first.nextCheckAt, isNotNull);
+      final baselineMs = first.baselineAt!.millisecondsSinceEpoch;
+      final sourceMs = first.sourceActivityAt!.millisecondsSinceEpoch;
+      final nextCheckMs = first.nextCheckAt!.millisecondsSinceEpoch;
+      final jitterApplied = first.oldScheduleJitterApplied;
+      final manualEnabled = first.manualHotEnabled;
+
+      cache.close();
+      final metadataDb = sqlite3.open(databasePath);
+      try {
+        expect(
+          metadataDb.select('SELECT value FROM metadata WHERE key = ?', [
+            'follow_schedule_state_backfill_v1',
+          ]).single['value'],
+          'done',
+        );
+      } finally {
+        metadataDb.dispose();
+      }
+      cache = NetworkFavoriteCacheManager.forTesting();
+      await cache.init(databasePath: databasePath, migrateLegacy: false);
+      final second = cache.getComicUpdateInfo(
+        'test-source',
+        'restart',
+        'remote',
+      )!;
+      expect(second.autoHotUntil, isNull);
+      expect(second.baselineAt!.millisecondsSinceEpoch, baselineMs);
+      expect(second.sourceActivityAt!.millisecondsSinceEpoch, sourceMs);
+      expect(second.nextCheckAt!.millisecondsSinceEpoch, nextCheckMs);
+      expect(second.oldScheduleJitterApplied, jitterApplied);
+      expect(second.manualHotEnabled, manualEnabled);
+
+      cache.close();
+      cache = NetworkFavoriteCacheManager.forTesting();
+      await cache.init(databasePath: databasePath, migrateLegacy: false);
+      final third = cache.getComicUpdateInfo(
+        'test-source',
+        'restart',
+        'remote',
+      )!;
+      expect(third.autoHotUntil, isNull);
+      expect(third.baselineAt!.millisecondsSinceEpoch, baselineMs);
+      expect(third.sourceActivityAt!.millisecondsSinceEpoch, sourceMs);
+      expect(third.nextCheckAt!.millisecondsSinceEpoch, nextCheckMs);
+      expect(third.oldScheduleJitterApplied, jitterApplied);
+      expect(third.manualHotEnabled, manualEnabled);
+    },
+  );
+
+  test('complete schema without a marker only records done', () async {
+    final data = _numericData(
+      (page, [folder]) async => Res(<Comic>[_comic('no-marker')], subData: 1),
+    );
+    await cache.refreshFolders(data);
+    await cache.refreshPage(data, folder, 1);
+
+    final completedAt = DateTime.now();
+    final activity = completedAt.subtract(const Duration(days: 2));
+    cache.recordComicCheckEverywhere(
+      'test-source',
+      'no-marker',
+      completedAt: completedAt,
+      sourceActivityAt: activity,
+      updateMarker: 'v1|time:${activity.toIso8601String()}',
+    );
+    final before = cache.getComicUpdateInfo(
+      'test-source',
+      'no-marker',
+      'remote',
+    )!;
+    final beforeBaselineMs = before.baselineAt!.millisecondsSinceEpoch;
+    final beforeSourceMs = before.sourceActivityAt!.millisecondsSinceEpoch;
+    final beforeNextMs = before.nextCheckAt!.millisecondsSinceEpoch;
+
+    cache.close();
+    final database = sqlite3.open(databasePath);
+    database.execute('DELETE FROM metadata WHERE key = ?', [
+      'follow_schedule_state_backfill_v1',
+    ]);
+    expect(
+      database.select('SELECT 1 FROM metadata WHERE key = ?', [
+        'follow_schedule_state_backfill_v1',
+      ]),
+      isEmpty,
+    );
+    database.dispose();
+
+    cache = NetworkFavoriteCacheManager.forTesting();
+    await cache.init(databasePath: databasePath, migrateLegacy: false);
+    final after = cache.getComicUpdateInfo(
+      'test-source',
+      'no-marker',
+      'remote',
+    )!;
+    expect(after.autoHotUntil, isNull);
+    expect(after.baselineAt!.millisecondsSinceEpoch, beforeBaselineMs);
+    expect(after.sourceActivityAt!.millisecondsSinceEpoch, beforeSourceMs);
+    expect(after.nextCheckAt!.millisecondsSinceEpoch, beforeNextMs);
+    expect(after.oldScheduleJitterApplied, isFalse);
+
+    cache.close();
+    final markerDb = sqlite3.open(databasePath);
+    try {
+      expect(
+        markerDb.select('SELECT value FROM metadata WHERE key = ?', [
+          'follow_schedule_state_backfill_v1',
+        ]).single['value'],
+        'done',
+      );
+    } finally {
+      markerDb.dispose();
+    }
+    cache = NetworkFavoriteCacheManager.forTesting();
+    await cache.init(databasePath: databasePath, migrateLegacy: false);
+    final afterSecondInit = cache.getComicUpdateInfo(
+      'test-source',
+      'no-marker',
+      'remote',
+    )!;
+    expect(afterSecondInit.autoHotUntil, isNull);
+    expect(afterSecondInit.nextCheckAt!.millisecondsSinceEpoch, beforeNextMs);
+  });
+
+  test(
+    'pending schedule backfill resumes and becomes done after completion',
+    () async {
+      final data = _numericData(
+        (page, [folder]) async =>
+            Res(<Comic>[_comic('pending-recovery')], subData: 1),
+      );
+      await cache.refreshFolders(data);
+      await cache.refreshPage(data, folder, 1);
+
+      cache.close();
+      final migrationNow = DateTime.now();
+      final activity = migrationNow.subtract(const Duration(days: 2));
+      final lastCheck = migrationNow.subtract(const Duration(hours: 23));
+      final database = sqlite3.open(databasePath);
+      database.execute(
+        '''INSERT OR REPLACE INTO comic_check_state
+           (source_key, comic_id, last_update_time, update_marker,
+            last_check_time, has_new_update)
+           VALUES (?, ?, ?, ?, ?, 0)''',
+        [
+          'test-source',
+          'pending-recovery',
+          activity.toIso8601String(),
+          'v1|time:${activity.toIso8601String()}',
+          lastCheck.millisecondsSinceEpoch,
+        ],
+      );
+      database.execute(
+        '''INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)''',
+        ['follow_schedule_state_backfill_v1', 'pending'],
+      );
+      database.dispose();
+
+      cache = NetworkFavoriteCacheManager.forTesting();
+      await cache.init(databasePath: databasePath, migrateLegacy: false);
+      final recovered = cache.getComicUpdateInfo(
+        'test-source',
+        'pending-recovery',
+        'remote',
+      )!;
+      expect(
+        recovered.baselineAt!.millisecondsSinceEpoch,
+        lastCheck.millisecondsSinceEpoch,
+      );
+      expect(
+        recovered.sourceActivityAt!.millisecondsSinceEpoch,
+        activity.millisecondsSinceEpoch,
+      );
+      expect(
+        recovered.nextCheckAt!.millisecondsSinceEpoch,
+        lastCheck.add(const Duration(hours: 24)).millisecondsSinceEpoch,
+      );
+      expect(
+        recovered.autoHotUntil!.millisecondsSinceEpoch,
+        activity.add(kFollowUpdateHotWindow).millisecondsSinceEpoch,
+      );
+      expect(recovered.oldScheduleJitterApplied, isFalse);
+
+      final firstValues = (
+        baseline: recovered.baselineAt!.millisecondsSinceEpoch,
+        source: recovered.sourceActivityAt!.millisecondsSinceEpoch,
+        next: recovered.nextCheckAt!.millisecondsSinceEpoch,
+        auto: recovered.autoHotUntil!.millisecondsSinceEpoch,
+      );
+      cache.close();
+      final markerDb = sqlite3.open(databasePath);
+      try {
+        expect(
+          markerDb.select('SELECT value FROM metadata WHERE key = ?', [
+            'follow_schedule_state_backfill_v1',
+          ]).single['value'],
+          'done',
+        );
+      } finally {
+        markerDb.dispose();
+      }
+
+      cache = NetworkFavoriteCacheManager.forTesting();
+      await cache.init(databasePath: databasePath, migrateLegacy: false);
+      final resumed = cache.getComicUpdateInfo(
+        'test-source',
+        'pending-recovery',
+        'remote',
+      )!;
+      expect(resumed.baselineAt!.millisecondsSinceEpoch, firstValues.baseline);
+      expect(
+        resumed.sourceActivityAt!.millisecondsSinceEpoch,
+        firstValues.source,
+      );
+      expect(resumed.nextCheckAt!.millisecondsSinceEpoch, firstValues.next);
+      expect(resumed.autoHotUntil!.millisecondsSinceEpoch, firstValues.auto);
+      expect(resumed.oldScheduleJitterApplied, isFalse);
+    },
+  );
+
+  test('done current runtime gaps are not inferred as legacy state', () async {
+    final data = _numericData(
+      (page, [folder]) async => Res(<Comic>[_comic('runtime-gap')], subData: 1),
+    );
+    await cache.refreshFolders(data);
+    await cache.refreshPage(data, folder, 1);
+
+    cache.close();
+    final lastCheck = DateTime.now().subtract(const Duration(days: 1));
+    final database = sqlite3.open(databasePath);
+    database.execute(
+      '''INSERT OR REPLACE INTO comic_check_state
+           (source_key, comic_id, last_update_time, update_marker,
+            last_check_time, has_new_update)
+           VALUES (?, ?, ?, ?, ?, 0)''',
+      [
+        'test-source',
+        'runtime-gap',
+        '2026-08-01',
+        'v1|time:2026-08-01',
+        lastCheck.millisecondsSinceEpoch,
+      ],
+    );
+    database.execute(
+      '''INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)''',
+      ['follow_schedule_state_backfill_v1', 'done'],
+    );
+    database.dispose();
+
+    cache = NetworkFavoriteCacheManager.forTesting();
+    await cache.init(databasePath: databasePath, migrateLegacy: false);
+    final info = cache.getComicUpdateInfo(
+      'test-source',
+      'runtime-gap',
+      'remote',
+    )!;
+    expect(info.lastCheckTime, isNotNull);
+    expect(info.baselineAt, isNull);
+    expect(info.sourceActivityAt, isNull);
+    expect(info.nextCheckAt, isNull);
+    expect(info.autoHotUntil, isNull);
+    expect(info.oldScheduleJitterApplied, isFalse);
+  });
+
+  test(
+    'first manual hot toggle creates a missing-baseline state row',
+    () async {
+      final data = _numericData(
+        (page, [folder]) async =>
+            Res(<Comic>[_comic('never-checked')], subData: 1),
+      );
+      await cache.refreshFolders(data);
+      await cache.refreshPage(data, folder, 1);
+      final t0 = DateTime(2026, 8, 1, 12);
+
+      final enabled = cache.toggleManualHotWindow(
+        'test-source',
+        'never-checked',
+        enabled: true,
+        now: t0,
+      );
+      expect(enabled, isNotNull);
+      expect(enabled!.manualHotEnabled, isTrue);
+      expect(enabled.manualHotUntil, t0.add(const Duration(days: 14)));
+      expect(enabled.baselineAt, isNull);
+      expect(enabled.sourceActivityAt, isNull);
+      expect(enabled.nextCheckAt, isNull);
+      expect(
+        cache
+            .getScanCandidates(
+              [folder],
+              modeName: 'missing',
+              ignoreRetryAfter: true,
+              includeSuspect: false,
+              now: t0,
+            )
+            .map((candidate) => candidate.comicId),
+        contains('never-checked'),
+      );
+
+      final deadline = enabled.manualHotUntil;
+      final disabled = cache.toggleManualHotWindow(
+        'test-source',
+        'never-checked',
+        enabled: false,
+        now: t0.add(const Duration(days: 2)),
+      )!;
+      expect(disabled.manualHotUntil, deadline);
+      final reopened = cache.toggleManualHotWindow(
+        'test-source',
+        'never-checked',
+        enabled: true,
+        now: t0.add(const Duration(days: 3)),
+      )!;
+      expect(reopened.manualHotUntil, deadline);
+    },
+  );
+
+  test(
+    'closing manual hot window does not remove automatic hot window',
+    () async {
+      final data = _numericData(
+        (page, [folder]) async => Res(<Comic>[_comic('one')], subData: 1),
+      );
+      await cache.refreshFolders(data);
+      await cache.refreshPage(data, folder, 1);
+      final t0 = DateTime(2026, 8, 1, 12);
+      cache.recordComicCheckEverywhere(
+        'test-source',
+        'one',
+        completedAt: t0,
+        updateTime: '2026-08-01',
+        updateMarker: 'v2|time:2026-08-01|chapters:1',
+      );
+      final updateAt = t0.add(const Duration(days: 1));
+      cache.recordComicCheckEverywhere(
+        'test-source',
+        'one',
+        completedAt: updateAt,
+        updateTime: '2026-08-02',
+        updateMarker: 'v2|time:2026-08-02|chapters:2',
+      );
+      var info = cache.toggleManualHotWindow(
+        'test-source',
+        'one',
+        enabled: true,
+        now: updateAt,
+      )!;
+      expect(info.isAutoHotActiveAt(updateAt), isTrue);
+      info = cache.toggleManualHotWindow(
+        'test-source',
+        'one',
+        enabled: false,
+        now: updateAt.add(const Duration(hours: 1)),
+      )!;
+      expect(info.manualHotEnabled, isFalse);
+      expect(
+        info.isAutoHotActiveAt(updateAt.add(const Duration(hours: 1))),
+        isTrue,
+      );
+      expect(
+        info.isHotActiveAt(updateAt.add(const Duration(hours: 1))),
+        isTrue,
+      );
+    },
+  );
+
+  test(
+    'old database without comic_check_state backfills copied favorite state',
+    () async {
+      final oldPath =
+          '${tempDir.path}${Platform.pathSeparator}missing-check-state.db';
+      final oldDb = sqlite3.open(oldPath);
+      oldDb.execute('''
+        CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE favorite_folders (
+          source_key TEXT NOT NULL, folder_id TEXT NOT NULL, title TEXT NOT NULL,
+          updated_at INTEGER NOT NULL, PRIMARY KEY (source_key, folder_id)
+        );
+        CREATE TABLE favorite_pages (
+          source_key TEXT NOT NULL, folder_id TEXT NOT NULL,
+          page_index INTEGER NOT NULL, request_token TEXT NOT NULL,
+          next_token TEXT, max_page INTEGER, updated_at INTEGER NOT NULL,
+          PRIMARY KEY (source_key, folder_id, request_token)
+        );
+        CREATE TABLE favorite_items (
+          source_key TEXT NOT NULL, folder_id TEXT NOT NULL,
+          page_index INTEGER NOT NULL, comic_id TEXT NOT NULL,
+          display_order INTEGER NOT NULL, comic_json TEXT NOT NULL,
+          favorite_id TEXT, favorite_time TEXT NOT NULL,
+          search_text TEXT NOT NULL DEFAULT '', last_update_time TEXT,
+          last_check_time INTEGER, has_new_update INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (source_key, folder_id, page_index, comic_id)
+        );
+        CREATE TABLE favorite_membership (
+          source_key TEXT NOT NULL, folder_id TEXT NOT NULL, comic_id TEXT NOT NULL,
+          PRIMARY KEY (source_key, folder_id, comic_id)
+        );
+        CREATE TABLE scan_queue (
+          run_id INTEGER NOT NULL, source_key TEXT NOT NULL,
+          comic_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+          result TEXT, error TEXT,
+          PRIMARY KEY (run_id, source_key, comic_id)
+        );
+      ''');
+      final migrationNow = DateTime.now();
+      final activity = migrationNow.subtract(const Duration(days: 2));
+      final lastCheck = migrationNow.subtract(const Duration(hours: 23));
+      oldDb.execute(
+        '''INSERT INTO favorite_folders
+           (source_key, folder_id, title, updated_at)
+           VALUES (?, ?, ?, ?)''',
+        [
+          'test-source',
+          'remote',
+          'Remote',
+          migrationNow.millisecondsSinceEpoch,
+        ],
+      );
+      oldDb.execute(
+        '''INSERT INTO favorite_items
+           (source_key, folder_id, page_index, comic_id, display_order,
+            comic_json, favorite_time, last_update_time, last_check_time,
+            has_new_update)
+           VALUES (?, ?, 1, ?, 0, ?, ?, ?, ?, 0)''',
+        [
+          'test-source',
+          'remote',
+          'missing-state',
+          jsonEncode(_comic('missing-state').toJson()),
+          '2026-08-01 00:00:00',
+          activity.toIso8601String(),
+          lastCheck.millisecondsSinceEpoch,
+        ],
+      );
+      oldDb.execute('INSERT INTO favorite_membership VALUES (?, ?, ?)', [
+        'test-source',
+        'remote',
+        'missing-state',
+      ]);
+      expect(
+        oldDb.select(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'comic_check_state'",
+        ),
+        isEmpty,
+      );
+      oldDb.dispose();
+
+      var migrated = NetworkFavoriteCacheManager.forTesting();
+      await migrated.init(databasePath: oldPath, migrateLegacy: false);
+      final first = migrated.getComicUpdateInfo(
+        'test-source',
+        'missing-state',
+        'remote',
+      )!;
+      expect(
+        first.baselineAt!.millisecondsSinceEpoch,
+        lastCheck.millisecondsSinceEpoch,
+      );
+      expect(
+        first.sourceActivityAt!.millisecondsSinceEpoch,
+        activity.millisecondsSinceEpoch,
+      );
+      expect(
+        first.nextCheckAt!.millisecondsSinceEpoch,
+        lastCheck.add(const Duration(hours: 24)).millisecondsSinceEpoch,
+      );
+      expect(
+        first.autoHotUntil!.millisecondsSinceEpoch,
+        activity.add(kFollowUpdateHotWindow).millisecondsSinceEpoch,
+      );
+      expect(first.hasNewUpdate, isFalse);
+      final firstValues = (
+        baseline: first.baselineAt!.millisecondsSinceEpoch,
+        source: first.sourceActivityAt!.millisecondsSinceEpoch,
+        next: first.nextCheckAt!.millisecondsSinceEpoch,
+        auto: first.autoHotUntil!.millisecondsSinceEpoch,
+        hasNewUpdate: first.hasNewUpdate,
+      );
+      migrated.close();
+
+      final metadataDb = sqlite3.open(oldPath);
+      try {
+        expect(
+          metadataDb.select('SELECT value FROM metadata WHERE key = ?', [
+            'follow_schedule_state_backfill_v1',
+          ]).single['value'],
+          'done',
+        );
+      } finally {
+        metadataDb.dispose();
+      }
+
+      migrated = NetworkFavoriteCacheManager.forTesting();
+      await migrated.init(databasePath: oldPath, migrateLegacy: false);
+      final second = migrated.getComicUpdateInfo(
+        'test-source',
+        'missing-state',
+        'remote',
+      )!;
+      expect(second.baselineAt!.millisecondsSinceEpoch, firstValues.baseline);
+      expect(
+        second.sourceActivityAt!.millisecondsSinceEpoch,
+        firstValues.source,
+      );
+      expect(second.nextCheckAt!.millisecondsSinceEpoch, firstValues.next);
+      expect(second.autoHotUntil!.millisecondsSinceEpoch, firstValues.auto);
+      expect(second.hasNewUpdate, firstValues.hasNewUpdate);
+      migrated.close();
+    },
+  );
+
+  test('schedule migration is idempotent for old state tables', () async {
+    final oldPath =
+        '${tempDir.path}${Platform.pathSeparator}old-schedule-cache.db';
+    final oldDb = sqlite3.open(oldPath);
+    oldDb.execute('''
+      CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE favorite_folders (
+        source_key TEXT NOT NULL, folder_id TEXT NOT NULL, title TEXT NOT NULL,
+        updated_at INTEGER NOT NULL, PRIMARY KEY (source_key, folder_id)
+      );
+      CREATE TABLE favorite_pages (
+        source_key TEXT NOT NULL, folder_id TEXT NOT NULL,
+        page_index INTEGER NOT NULL, request_token TEXT NOT NULL,
+        next_token TEXT, max_page INTEGER, updated_at INTEGER NOT NULL,
+        PRIMARY KEY (source_key, folder_id, request_token)
+      );
+      CREATE TABLE favorite_items (
+        source_key TEXT NOT NULL, folder_id TEXT NOT NULL,
+        page_index INTEGER NOT NULL, comic_id TEXT NOT NULL,
+        display_order INTEGER NOT NULL, comic_json TEXT NOT NULL,
+        favorite_id TEXT, favorite_time TEXT NOT NULL,
+        search_text TEXT NOT NULL DEFAULT '', last_update_time TEXT,
+        last_check_time INTEGER, has_new_update INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (source_key, folder_id, page_index, comic_id)
+      );
+      CREATE TABLE favorite_membership (
+        source_key TEXT NOT NULL, folder_id TEXT NOT NULL, comic_id TEXT NOT NULL,
+        PRIMARY KEY (source_key, folder_id, comic_id)
+      );
+      CREATE TABLE scan_queue (
+        run_id INTEGER NOT NULL, source_key TEXT NOT NULL,
+        comic_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+        result TEXT, error TEXT,
+        PRIMARY KEY (run_id, source_key, comic_id)
+      );
+      CREATE TABLE comic_check_state (
+        source_key TEXT NOT NULL, comic_id TEXT NOT NULL,
+        last_update_time TEXT, update_marker TEXT, last_check_time INTEGER,
+        has_new_update INTEGER NOT NULL DEFAULT 0, retry_after INTEGER,
+        check_failures INTEGER NOT NULL DEFAULT 0,
+        check_not_found_count INTEGER NOT NULL DEFAULT 0,
+        check_suspect_gone INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (source_key, comic_id)
+      );
+    ''');
+    final migrationNow = DateTime.now();
+    final checkedAt = migrationNow.subtract(const Duration(days: 1));
+    oldDb.execute(
+      '''INSERT INTO favorite_items
+         (source_key, folder_id, page_index, comic_id, display_order,
+          comic_json, favorite_time, last_update_time, last_check_time)
+         VALUES (?, ?, 1, ?, 0, ?, ?, ?, ?)''',
+      [
+        'test-source',
+        'remote',
+        'one',
+        jsonEncode(_comic('one').toJson()),
+        '2026-08-01 00:00:00',
+        '2022-01-01',
+        checkedAt.millisecondsSinceEpoch,
+      ],
+    );
+    oldDb.execute('INSERT INTO favorite_membership VALUES (?, ?, ?)', [
+      'test-source',
+      'remote',
+      'one',
+    ]);
+    oldDb.execute(
+      '''INSERT INTO comic_check_state
+         (source_key, comic_id, last_update_time, update_marker, last_check_time)
+         VALUES (?, ?, ?, ?, ?)''',
+      [
+        'test-source',
+        'one',
+        '2022-01-01',
+        'v1|time:2022-01-01',
+        checkedAt.millisecondsSinceEpoch,
+      ],
+    );
+    final fixtures = <({String id, Duration age})>[
+      (id: 'just-over-day', age: const Duration(hours: 25)),
+      (id: 'recent', age: const Duration(hours: 23)),
+      (id: 'three-years', age: const Duration(days: 3 * 365)),
+      (id: 'five-years', age: const Duration(days: 5 * 365)),
+    ];
+    for (final fixture in fixtures) {
+      final activity = migrationNow.subtract(fixture.age);
+      oldDb.execute(
+        '''INSERT INTO favorite_items
+           (source_key, folder_id, page_index, comic_id, display_order,
+            comic_json, favorite_time, last_update_time, last_check_time)
+           VALUES (?, ?, 1, ?, 0, ?, ?, ?, ?)''',
+        [
+          'test-source',
+          'remote',
+          fixture.id,
+          jsonEncode(_comic(fixture.id).toJson()),
+          '2026-08-01 00:00:00',
+          activity.toIso8601String(),
+          activity.millisecondsSinceEpoch,
+        ],
+      );
+      oldDb.execute('INSERT INTO favorite_membership VALUES (?, ?, ?)', [
+        'test-source',
+        'remote',
+        fixture.id,
+      ]);
+      oldDb.execute(
+        '''INSERT INTO comic_check_state
+           (source_key, comic_id, last_update_time, update_marker, last_check_time)
+           VALUES (?, ?, ?, ?, ?)''',
+        [
+          'test-source',
+          fixture.id,
+          activity.toIso8601String(),
+          'v1|time:${activity.toIso8601String()}',
+          activity.millisecondsSinceEpoch,
+        ],
+      );
+    }
+    final pendingJitterActivity = migrationNow.subtract(
+      const Duration(days: 3 * 365),
+    );
+    final pendingJitterCheck = migrationNow.subtract(const Duration(hours: 23));
+    oldDb.execute(
+      '''INSERT INTO favorite_items
+         (source_key, folder_id, page_index, comic_id, display_order,
+          comic_json, favorite_time, last_update_time, last_check_time)
+         VALUES (?, ?, 1, ?, 0, ?, ?, ?, ?)''',
+      [
+        'test-source',
+        'remote',
+        'pending-jitter',
+        jsonEncode(_comic('pending-jitter').toJson()),
+        '2026-08-01 00:00:00',
+        pendingJitterActivity.toIso8601String(),
+        pendingJitterCheck.millisecondsSinceEpoch,
+      ],
+    );
+    oldDb.execute('INSERT INTO favorite_membership VALUES (?, ?, ?)', [
+      'test-source',
+      'remote',
+      'pending-jitter',
+    ]);
+    oldDb.execute(
+      '''INSERT INTO comic_check_state
+         (source_key, comic_id, last_update_time, update_marker, last_check_time)
+         VALUES (?, ?, ?, ?, ?)''',
+      [
+        'test-source',
+        'pending-jitter',
+        pendingJitterActivity.toIso8601String(),
+        'v1|time:${pendingJitterActivity.toIso8601String()}',
+        pendingJitterCheck.millisecondsSinceEpoch,
+      ],
+    );
+    oldDb.dispose();
+
+    var migrated = NetworkFavoriteCacheManager.forTesting();
+    await migrated.init(databasePath: oldPath, migrateLegacy: false);
+    final first = migrated.getComicUpdateInfo('test-source', 'one', 'remote')!;
+    expect(
+      first.baselineAt,
+      DateTime.fromMillisecondsSinceEpoch(checkedAt.millisecondsSinceEpoch),
+    );
+    expect(first.hasNewUpdate, isFalse);
+    expect(first.sourceActivityAt, DateTime(2022, 1, 1));
+    expect(first.nextCheckAt, isNull);
+    expect(first.oldScheduleJitterApplied, isFalse);
+    expect(
+      migrated
+          .getScanCandidates(
+            [
+              const NetworkFavoriteFolderRef(
+                sourceKey: 'test-source',
+                folderId: 'remote',
+              ),
+            ],
+            modeName: 'regular',
+            ignoreRetryAfter: true,
+            includeSuspect: false,
+            now: migrationNow,
+          )
+          .map((candidate) => candidate.comicId),
+      containsAll(<String>[
+        'one',
+        'just-over-day',
+        'three-years',
+        'five-years',
+      ]),
+    );
+    expect(
+      migrated
+          .getComicUpdateInfo('test-source', 'recent', 'remote')!
+          .nextCheckAt,
+      DateTime.fromMillisecondsSinceEpoch(
+        migrationNow.add(const Duration(hours: 1)).millisecondsSinceEpoch,
+      ),
+    );
+
+    final pendingAfterFirst = migrated.getComicUpdateInfo(
+      'test-source',
+      'pending-jitter',
+      'remote',
+    )!;
+    final pendingLegacyDue = DateTime.fromMillisecondsSinceEpoch(
+      pendingJitterCheck.add(const Duration(hours: 24)).millisecondsSinceEpoch,
+    );
+    expect(pendingAfterFirst.nextCheckAt, pendingLegacyDue);
+    expect(pendingAfterFirst.oldScheduleJitterApplied, isFalse);
+    migrated.close();
+
+    migrated = NetworkFavoriteCacheManager.forTesting();
+    await migrated.init(databasePath: oldPath, migrateLegacy: false);
+    final pendingAfterSecond = migrated.getComicUpdateInfo(
+      'test-source',
+      'pending-jitter',
+      'remote',
+    )!;
+    expect(pendingAfterSecond.nextCheckAt, pendingLegacyDue);
+    expect(pendingAfterSecond.oldScheduleJitterApplied, isFalse);
+
+    final successAt = migrationNow.add(const Duration(days: 1));
+    migrated.recordComicCheckEverywhere(
+      'test-source',
+      'pending-jitter',
+      completedAt: successAt,
+      sourceActivityAt: pendingJitterActivity,
+      updateMarker: 'v1|time:${pendingJitterActivity.toIso8601String()}',
+    );
+    final pendingExpected = computeNextSchedule(
+      completedAt: successAt,
+      effectiveActivityAt: pendingJitterActivity,
+      manualHotEnabled: false,
+      oldScheduleJitterApplied: false,
+      sourceKey: 'test-source',
+      comicId: 'pending-jitter',
+    );
+    var pendingAfterSuccess = migrated.getComicUpdateInfo(
+      'test-source',
+      'pending-jitter',
+      'remote',
+    )!;
+    expect(
+      pendingAfterSuccess.nextCheckAt!.millisecondsSinceEpoch,
+      pendingExpected.nextCheckAt.millisecondsSinceEpoch,
+    );
+    expect(pendingAfterSuccess.oldScheduleJitterApplied, isTrue);
+    final pendingSecondSuccessAt = successAt.add(const Duration(days: 1));
+    migrated.recordComicCheckEverywhere(
+      'test-source',
+      'pending-jitter',
+      completedAt: pendingSecondSuccessAt,
+      sourceActivityAt: pendingJitterActivity,
+      updateMarker: 'v1|time:${pendingJitterActivity.toIso8601String()}',
+    );
+    pendingAfterSuccess = migrated.getComicUpdateInfo(
+      'test-source',
+      'pending-jitter',
+      'remote',
+    )!;
+    expect(
+      pendingAfterSuccess.nextCheckAt!.millisecondsSinceEpoch,
+      pendingSecondSuccessAt
+          .add(const Duration(days: 7))
+          .millisecondsSinceEpoch,
+    );
+
+    for (final fixture in fixtures.where(
+      (fixture) => fixture.id == 'three-years' || fixture.id == 'five-years',
+    )) {
+      final activity = migrationNow.subtract(fixture.age);
+      migrated.recordComicCheckEverywhere(
+        'test-source',
+        fixture.id,
+        completedAt: successAt,
+        sourceActivityAt: activity,
+        updateMarker: 'v1|time:${activity.toIso8601String()}',
+      );
+      final expected = computeNextSchedule(
+        completedAt: successAt,
+        effectiveActivityAt: activity,
+        manualHotEnabled: false,
+        oldScheduleJitterApplied: false,
+        sourceKey: 'test-source',
+        comicId: fixture.id,
+      );
+      final afterSuccess = migrated.getComicUpdateInfo(
+        'test-source',
+        fixture.id,
+        'remote',
+      )!;
+      expect(
+        afterSuccess.nextCheckAt!.millisecondsSinceEpoch,
+        expected.nextCheckAt.millisecondsSinceEpoch,
+      );
+      expect(afterSuccess.oldScheduleJitterApplied, isTrue);
+
+      final secondSuccessAt = successAt.add(const Duration(days: 1));
+      migrated.recordComicCheckEverywhere(
+        'test-source',
+        fixture.id,
+        completedAt: secondSuccessAt,
+        sourceActivityAt: activity,
+        updateMarker: 'v1|time:${activity.toIso8601String()}',
+      );
+      final withoutSecondJitter = computeNextSchedule(
+        completedAt: secondSuccessAt,
+        effectiveActivityAt: activity,
+        manualHotEnabled: false,
+        oldScheduleJitterApplied: true,
+        sourceKey: 'test-source',
+        comicId: fixture.id,
+      );
+      expect(
+        migrated
+            .getComicUpdateInfo('test-source', fixture.id, 'remote')!
+            .nextCheckAt!
+            .millisecondsSinceEpoch,
+        withoutSecondJitter.nextCheckAt.millisecondsSinceEpoch,
+      );
+    }
+    final firstNext = first.nextCheckAt;
+    final firstJitter = first.oldScheduleJitterApplied;
+    migrated.close();
+
+    migrated = NetworkFavoriteCacheManager.forTesting();
+    await migrated.init(databasePath: oldPath, migrateLegacy: false);
+    final second = migrated.getComicUpdateInfo('test-source', 'one', 'remote')!;
+    expect(second.nextCheckAt, firstNext);
+    expect(second.oldScheduleJitterApplied, firstJitter);
+    migrated.close();
+
+    final metadataDb = sqlite3.open(oldPath);
+    try {
+      expect(
+        metadataDb.select('SELECT value FROM metadata WHERE key = ?', [
+          'follow_schedule_state_backfill_v1',
+        ]).single['value'],
+        'done',
+      );
+    } finally {
+      metadataDb.dispose();
+    }
+  });
+
+  test('automatic hot window follows only real same-version updates', () async {
+    final data = _numericData(
+      (page, [folder]) async => Res(<Comic>[_comic('one')], subData: 1),
+    );
+    await cache.refreshFolders(data);
+    await cache.refreshPage(data, folder, 1);
+    final t0 = DateTime(2026, 8, 1, 12);
+    cache.recordComicCheckEverywhere(
+      'test-source',
+      'one',
+      completedAt: t0,
+      updateTime: '2026-08-01',
+      updateMarker: 'v2|time:2026-08-01|chapters:1',
+    );
+    expect(cache.getComicsWithUpdatesInfo(folder).single.autoHotUntil, isNull);
+
+    final unchangedAt = t0.add(const Duration(days: 1));
+    cache.recordComicCheckEverywhere(
+      'test-source',
+      'one',
+      completedAt: unchangedAt,
+      updateTime: '2026-08-01',
+      updateMarker: 'v2|time:2026-08-01|chapters:1',
+    );
+    expect(cache.getComicsWithUpdatesInfo(folder).single.autoHotUntil, isNull);
+
+    final changedAt = t0.add(const Duration(days: 2));
+    cache.recordComicCheckEverywhere(
+      'test-source',
+      'one',
+      completedAt: changedAt,
+      updateTime: '2026-08-02',
+      updateMarker: 'v2|time:2026-08-02|chapters:2',
+    );
+    final hotUntil = cache.getComicsWithUpdatesInfo(folder).single.autoHotUntil;
+    expect(hotUntil, changedAt.add(const Duration(days: 14)));
+
+    cache.recordComicCheckEverywhere(
+      'test-source',
+      'one',
+      completedAt: changedAt.add(const Duration(days: 1)),
+      updateTime: '2026-08-02',
+      updateMarker: 'v2|time:2026-08-02|chapters:2',
+    );
+    expect(
+      cache.getComicsWithUpdatesInfo(folder).single.autoHotUntil,
+      hotUntil,
+    );
+  });
+
+  test(
+    'old schedule jitter resets when activity returns within two years',
+    () async {
+      final data = _numericData(
+        (page, [folder]) async =>
+            Res(<Comic>[_comic('jitter-reset')], subData: 1),
+      );
+      await cache.refreshFolders(data);
+      await cache.refreshPage(data, folder, 1);
+      final completed = DateTime(2026, 8, 1, 12);
+      cache.recordComicCheckEverywhere(
+        'test-source',
+        'jitter-reset',
+        completedAt: completed,
+        sourceActivityAt: completed.subtract(const Duration(days: 800)),
+        updateMarker: 'v1|old',
+      );
+      expect(
+        cache.getComicsWithUpdatesInfo(folder).single.oldScheduleJitterApplied,
+        isTrue,
+      );
+
+      cache.recordComicCheckEverywhere(
+        'test-source',
+        'jitter-reset',
+        completedAt: completed.add(const Duration(days: 1)),
+        sourceActivityAt: completed.subtract(const Duration(days: 700)),
+        updateMarker: 'v1|old',
+      );
+      expect(
+        cache.getComicsWithUpdatesInfo(folder).single.oldScheduleJitterApplied,
+        isFalse,
+      );
+    },
+  );
+
+  test(
+    'clearing baselines preserves the active manual hot preference',
+    () async {
+      final data = _numericData(
+        (page, [folder]) async => Res(<Comic>[_comic('one')], subData: 1),
+      );
+      await cache.refreshFolders(data);
+      await cache.refreshPage(data, folder, 1);
+      final t0 = DateTime(2026, 8, 1, 12);
+      cache.recordComicCheckEverywhere(
+        'test-source',
+        'one',
+        completedAt: t0,
+        updateTime: '2026-08-01',
+        updateMarker: 'v2|time:2026-08-01|chapters:1',
+      );
+      final enabled = cache.toggleManualHotWindow(
+        'test-source',
+        'one',
+        enabled: true,
+        now: t0,
+      )!;
+      cache.clearAllBaselines(now: t0.add(const Duration(days: 1)));
+      final cleared = cache.getComicsWithUpdatesInfo(folder).single;
+      expect(cleared.baselineAt, isNull);
+      expect(cleared.sourceActivityAt, isNull);
+      expect(cleared.nextCheckAt, isNull);
+      expect(cleared.autoHotUntil, isNull);
+      expect(cleared.manualHotEnabled, isTrue);
+      expect(cleared.manualHotUntil, enabled.manualHotUntil);
+    },
+  );
 
   test('detail checks establish a baseline and store basic metadata', () async {
     final data = _numericData(
@@ -1610,6 +2664,11 @@ void main() {
         ),
         isFalse,
         reason: 'v1 to v2 migration must establish a baseline',
+      );
+      expect(
+        cache.getComicsWithUpdatesInfo(folder).single.autoHotUntil,
+        isNull,
+        reason: 'marker migration must not create an automatic hot window',
       );
       for (final f in [folder, folderB]) {
         final item = cache.getComicsWithUpdatesInfo(f).single;

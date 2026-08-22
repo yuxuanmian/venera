@@ -46,14 +46,12 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
     return null;
   }
 
-  /// Next moment this comic becomes eligible for an automatic follow-up
-  /// check: the failure backoff deadline while retrying, or the regular 24h
-  /// window after the last check for healthy comics.
   DateTime? _nextCheckTime(FavoriteItemWithUpdateInfo info) {
-    if (info.retryAfter != null) return info.retryAfter;
-    final last = info.lastCheckTime;
-    if (last == null) return null;
-    return last.add(const Duration(hours: 24));
+    final next = info.nextCheckAt;
+    final retry = info.retryAfter;
+    if (next == null) return retry;
+    if (retry == null || retry.isBefore(next)) return next;
+    return retry;
   }
 
   String _fmt(DateTime? time) =>
@@ -153,6 +151,19 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
       else ...[
         _infoRow("Last Check Time", _fmt(info.lastCheckTime)),
         _infoRow("Next Check Time", _nextCheckText(info)),
+        _infoRow(
+          "Last Effective Activity Time",
+          _fmt(info.effectiveActivityAt),
+        ),
+        _infoRow("Baseline Time", _fmt(info.baselineAt)),
+        _infoRow("Source Activity Time", _fmt(info.sourceActivityAt)),
+        _infoRow(
+          "Hot Window Active",
+          _yesNo(info.isHotActiveAt(DateTime.now())),
+        ),
+        _infoRow("Hot Window Source", _hotSource(info)),
+        _infoRow("Hot Window Until", _fmt(info.hotUntilAt(DateTime.now()))),
+        _infoRow("Manual Hot Enabled", _yesNo(info.manualHotEnabled)),
         _infoRow("Update Marker", info.updateMarker ?? '-'),
         _infoRow("Last Update Time", info.updateTime ?? '-'),
         _infoRow("Has New Update", _yesNo(info.hasNewUpdate)),
@@ -168,6 +179,16 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
     if (next == null) return "Not checked yet".tl;
     final ready = !next.isAfter(DateTime.now());
     return '${_fmt(next)} (${ready ? "Ready".tl : "In Cooldown".tl})';
+  }
+
+  String _hotSource(FavoriteItemWithUpdateInfo info) {
+    final now = DateTime.now();
+    final automatic = info.isAutoHotActiveAt(now);
+    final manual = info.isManualHotActiveAt(now);
+    if (automatic && manual) return "Automatic + Manual".tl;
+    if (automatic) return "Automatic".tl;
+    if (manual) return "Manual".tl;
+    return "None".tl;
   }
 
   List<Widget> _buildSourceSection() {

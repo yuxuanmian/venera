@@ -7,6 +7,7 @@ import 'package:sqlite3/sqlite3.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_type.dart';
+import 'package:venera/foundation/follow_update_schedule.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/utils/io.dart';
@@ -143,6 +144,13 @@ class FavoriteItemWithUpdateInfo extends FavoriteItem {
     this.checkFailures = 0,
     this.checkNotFoundCount = 0,
     this.isSuspectGone = false,
+    this.baselineAt,
+    this.sourceActivityAt,
+    this.nextCheckAt,
+    this.autoHotUntil,
+    this.manualHotUntil,
+    this.manualHotEnabled = false,
+    this.oldScheduleJitterApplied = false,
   }) : lastCheckTime = lastCheckTime == null
            ? null
            : DateTime.fromMillisecondsSinceEpoch(lastCheckTime),
@@ -168,6 +176,38 @@ class FavoriteItemWithUpdateInfo extends FavoriteItem {
   final int checkFailures;
   final int checkNotFoundCount;
   final bool isSuspectGone;
+  final DateTime? baselineAt;
+  final DateTime? sourceActivityAt;
+  final DateTime? nextCheckAt;
+  final DateTime? autoHotUntil;
+  final DateTime? manualHotUntil;
+  final bool manualHotEnabled;
+  final bool oldScheduleJitterApplied;
+
+  DateTime? get effectiveActivityAt => sourceActivityAt ?? baselineAt;
+
+  bool isAutoHotActiveAt(DateTime now) =>
+      isAutoHotActive(now: now, autoHotUntil: autoHotUntil);
+
+  bool isManualHotActiveAt(DateTime now) => isManualHotActive(
+    now: now,
+    manualHotEnabled: manualHotEnabled,
+    manualHotUntil: manualHotUntil,
+  );
+
+  bool isHotActiveAt(DateTime now) => isHotActive(
+    now: now,
+    autoHotUntil: autoHotUntil,
+    manualHotEnabled: manualHotEnabled,
+    manualHotUntil: manualHotUntil,
+  );
+
+  DateTime? hotUntilAt(DateTime now) => effectiveHotUntil(
+    now: now,
+    autoHotUntil: autoHotUntil,
+    manualHotUntil: manualHotEnabled ? manualHotUntil : null,
+    manualHotEnabled: manualHotEnabled,
+  );
 
   @override
   String get description => '${updateTime ?? 'Unknown'} | $sourceKey';
@@ -182,6 +222,7 @@ class ScanCandidate {
     required this.folderId,
     required this.lastCheckTime,
     required this.retryAfter,
+    required this.nextCheckTime,
   });
 
   final String sourceKey;
@@ -189,6 +230,7 @@ class ScanCandidate {
   final String folderId;
   final DateTime? lastCheckTime;
   final DateTime? retryAfter;
+  final DateTime? nextCheckTime;
 }
 
 /// Strips a trailing " (1234)" count that sources like ehentai embed in
@@ -461,6 +503,16 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   final Set<String> _fullCaching = {};
   static const _backgroundRefreshAfter = Duration(minutes: 5);
   static const backgroundSummaryRefreshAfter = Duration(hours: 6);
+  static const _followScheduleBackfillKey = 'follow_schedule_state_backfill_v1';
+  static const _followScheduleCoreColumns = <String>{
+    'baseline_at',
+    'source_activity_at',
+    'next_check_at',
+    'auto_hot_until',
+    'manual_hot_until',
+    'manual_hot_enabled',
+    'old_schedule_jitter_applied',
+  };
 
   /// Pages fetched concurrently per batch by full-cache and summary sweeps.
   static const _fullCacheBatchSize = 3;
@@ -540,6 +592,23 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         PRIMARY KEY (run_id, source_key, comic_id)
       );
     ''');
+    final hadComicCheckStateTable = _db
+        .select(
+          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'comic_check_state' LIMIT 1",
+        )
+        .isNotEmpty;
+    final backfillStatusRows = _db.select(
+      'SELECT value FROM metadata WHERE key = ?',
+      [_followScheduleBackfillKey],
+    );
+    final backfillStatus = backfillStatusRows.isEmpty
+        ? null
+        : backfillStatusRows.first['value'] as String?;
+    final pendingWrittenBeforeCreate =
+        !hadComicCheckStateTable || backfillStatus == 'pending';
+    if (pendingWrittenBeforeCreate) {
+      _writeFollowScheduleBackfillStatus('pending');
+    }
     _db.execute('''
       CREATE TABLE IF NOT EXISTS comic_check_state (
         source_key TEXT NOT NULL,
@@ -552,9 +621,51 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         check_failures INTEGER NOT NULL DEFAULT 0,
         check_not_found_count INTEGER NOT NULL DEFAULT 0,
         check_suspect_gone INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (source_key, comic_id)
+        baseline_at INTEGER,
+        source_activity_at INTEGER,
+        next_check_at INTEGER,
+        auto_hot_until INTEGER,
+        manual_hot_until INTEGER,
+        manual_hot_enabled INTEGER NOT NULL DEFAULT 0,
+        old_schedule_jitter_applied INTEGER NOT NULL DEFAULT 0,
+         PRIMARY KEY (source_key, comic_id)
       );
     ''');
+    // Read the actual post-CREATE schema. A brand-new table already contains
+    // every current column; do not reuse a pre-CREATE empty set and attempt to
+    // add those columns again.
+    final checkStateColumns = _db
+        .select('PRAGMA table_info(comic_check_state)')
+        .map((row) => row['name'] as String)
+        .toSet();
+    final hasMissingFollowScheduleColumn = _followScheduleCoreColumns.any(
+      (column) => !checkStateColumns.contains(column),
+    );
+    final applyLegacyFollowScheduleBackfill =
+        !hadComicCheckStateTable ||
+        backfillStatus == 'pending' ||
+        (backfillStatus != 'done' && hasMissingFollowScheduleColumn);
+    if (applyLegacyFollowScheduleBackfill && !pendingWrittenBeforeCreate) {
+      _writeFollowScheduleBackfillStatus('pending');
+    }
+    final checkStateAdditions = <String, String>{
+      'baseline_at': 'INTEGER',
+      'source_activity_at': 'INTEGER',
+      'next_check_at': 'INTEGER',
+      'auto_hot_until': 'INTEGER',
+      'manual_hot_until': 'INTEGER',
+      'manual_hot_enabled': 'INTEGER NOT NULL DEFAULT 0',
+      'old_schedule_jitter_applied': 'INTEGER NOT NULL DEFAULT 0',
+    };
+    for (final entry in checkStateAdditions.entries) {
+      if (!checkStateColumns.contains(entry.key)) {
+        _db.execute(
+          'ALTER TABLE comic_check_state ADD COLUMN ${entry.key} ${entry.value}',
+        );
+      }
+    }
+    _db.execute('''CREATE INDEX IF NOT EXISTS idx_comic_check_state_next_check
+         ON comic_check_state(next_check_at)''');
     final folderColumns = _db
         .select('PRAGMA table_info(favorite_folders)')
         .map((row) => row['name'] as String)
@@ -647,9 +758,108 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         GROUP BY source_key, comic_id
       ''');
     }
+    _migrateFollowScheduleState(
+      applyLegacyBackfill: applyLegacyFollowScheduleBackfill,
+    );
+    if (applyLegacyFollowScheduleBackfill || backfillStatus != 'done') {
+      _writeFollowScheduleBackfillStatus('done');
+    }
     if (migrateLegacy) {
       await appdata.ensureInit();
       await _migrateLegacyLocalFavorites();
+    }
+  }
+
+  void _writeFollowScheduleBackfillStatus(String status) {
+    _db.execute('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)', [
+      _followScheduleBackfillKey,
+      status,
+    ]);
+  }
+
+  void _migrateFollowScheduleState({required bool applyLegacyBackfill}) {
+    final now = DateTime.now();
+    final rows = _db.select('SELECT * FROM comic_check_state');
+    for (final row in rows) {
+      final sourceKey = row['source_key'] as String;
+      final comicId = row['comic_id'] as String;
+      final oldBaseline = row['baseline_at'] as int?;
+      final oldSource = row['source_activity_at'] as int?;
+      final oldNext = row['next_check_at'] as int?;
+      final oldAuto = row['auto_hot_until'] as int?;
+      final oldManualEnabled = (row['manual_hot_enabled'] as int? ?? 0) != 0;
+      final oldJitter = (row['old_schedule_jitter_applied'] as int? ?? 0) != 0;
+      final manualHotMs = row['manual_hot_until'] as int?;
+      final manualEnabled =
+          manualHotMs != null &&
+          manualHotMs > now.millisecondsSinceEpoch &&
+          oldManualEnabled;
+
+      if (!applyLegacyBackfill) {
+        if (manualEnabled == oldManualEnabled) continue;
+        _db.execute(
+          '''UPDATE comic_check_state SET manual_hot_enabled = ?
+             WHERE source_key = ? AND comic_id = ?''',
+          [manualEnabled ? 1 : 0, sourceKey, comicId],
+        );
+        continue;
+      }
+
+      final lastCheckMs = row['last_check_time'] as int?;
+      final baselineMs = oldBaseline ?? lastCheckMs;
+      final sourceActivityMs =
+          oldSource ??
+          parseFollowUpdateActivityTime(
+            row['last_update_time'] as String?,
+            now: now,
+          )?.millisecondsSinceEpoch;
+      var autoHotMs = oldAuto;
+      if (autoHotMs == null && sourceActivityMs != null) {
+        final candidate = DateTime.fromMillisecondsSinceEpoch(
+          sourceActivityMs,
+        ).add(kFollowUpdateHotWindow);
+        if (candidate.isAfter(now)) {
+          autoHotMs = candidate.millisecondsSinceEpoch;
+        }
+      }
+      var nextCheckMs = oldNext;
+      if (nextCheckMs == null && lastCheckMs != null) {
+        // The legacy scheduler considered a row due after 24 hours. Preserve
+        // that due point during migration instead of pushing an old row out
+        // by a new 7/14-day interval. A due legacy row stays NULL so the SQL
+        // candidate query continues to select it immediately. The first
+        // successful check will establish the new schedule and apply jitter.
+        final legacyDue = DateTime.fromMillisecondsSinceEpoch(
+          lastCheckMs,
+        ).add(const Duration(hours: 24));
+        if (legacyDue.isAfter(now)) {
+          nextCheckMs = legacyDue.millisecondsSinceEpoch;
+        }
+      }
+      if (oldBaseline == baselineMs &&
+          oldSource == sourceActivityMs &&
+          oldNext == nextCheckMs &&
+          oldAuto == autoHotMs &&
+          oldManualEnabled == manualEnabled) {
+        continue;
+      }
+      _db.execute(
+        '''UPDATE comic_check_state
+           SET baseline_at = ?, source_activity_at = ?, next_check_at = ?,
+               auto_hot_until = ?, manual_hot_enabled = ?,
+               old_schedule_jitter_applied = ?
+           WHERE source_key = ? AND comic_id = ?''',
+        [
+          baselineMs,
+          sourceActivityMs,
+          nextCheckMs,
+          autoHotMs,
+          manualEnabled ? 1 : 0,
+          oldJitter ? 1 : 0,
+          sourceKey,
+          comicId,
+        ],
+      );
     }
   }
 
@@ -2169,10 +2379,10 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
 
   /// Scan-eligible comics across [folders], filtered in SQL exactly like the
   /// old Dart-side filtering: suspect skip (unless [includeSuspect]), the
-  /// [modeName] time window ('missing' = never checked, 'regular' = never
-  /// checked or checked more than 24h ago, 'force' = everything) and the
-  /// retry-after cooldown. The mode is passed as a string so this library
-  /// never needs to import follow_updates.dart, which imports it.
+  /// [modeName] time window ('missing' = never checked, 'regular' = due by
+  /// schedule, 'force' = everything) and the retry-after cooldown. The mode
+  /// is passed as a string so this library never needs to import the scan
+  /// runner.
   ///
   /// One row per (source, comic, folder); comics appearing in several
   /// folders are deduplicated by the queue builder, not here.
@@ -2181,11 +2391,11 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     required String modeName,
     required bool ignoreRetryAfter,
     required bool includeSuspect,
+    DateTime? now,
   }) {
     if (folders.isEmpty) return const [];
-    final now = DateTime.now();
-    final dayAgo = now.subtract(const Duration(days: 1)).millisecondsSinceEpoch;
-    final nowMs = now.millisecondsSinceEpoch;
+    final current = now ?? DateTime.now();
+    final nowMs = current.millisecondsSinceEpoch;
     final where = <String>[_folderWhereClause(folders)];
     final args = <Object>[
       for (final f in folders) ...[f.sourceKey, f.folderId],
@@ -2196,8 +2406,11 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     if (modeName == 'missing') {
       where.add('cs.last_check_time IS NULL');
     } else if (modeName == 'regular') {
-      where.add('(cs.last_check_time IS NULL OR cs.last_check_time <= ?)');
-      args.add(dayAgo);
+      where.add(
+        '(cs.last_check_time IS NULL OR cs.next_check_at IS NULL '
+        'OR cs.next_check_at <= ?)',
+      );
+      args.add(nowMs);
     }
     if (!ignoreRetryAfter) {
       where.add('(cs.retry_after IS NULL OR cs.retry_after <= ?)');
@@ -2205,7 +2418,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     }
     final rows = _db.select(
       '''SELECT fi.source_key, fi.comic_id, fi.folder_id,
-                cs.last_check_time, cs.retry_after
+                cs.last_check_time, cs.retry_after, cs.next_check_at
          FROM favorite_items fi
          LEFT JOIN comic_check_state cs
            ON cs.source_key = fi.source_key AND cs.comic_id = fi.comic_id
@@ -2228,6 +2441,11 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
           retryAfter: row['retry_after'] == null
               ? null
               : DateTime.fromMillisecondsSinceEpoch(row['retry_after'] as int),
+          nextCheckTime: row['next_check_at'] == null
+              ? null
+              : DateTime.fromMillisecondsSinceEpoch(
+                  row['next_check_at'] as int,
+                ),
         ),
     ];
   }
@@ -2253,7 +2471,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   }
 
   /// Fresh single-row update info for one comic, re-read right before it is
-  /// checked so the 24h hit window and retry state reflect current data.
+  /// checked so the persisted schedule and retry state reflect current data.
   FavoriteItemWithUpdateInfo? getComicUpdateInfo(
     String sourceKey,
     String comicId,
@@ -2270,6 +2488,102 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       rows.first,
       _checkStateForRows(rows)['$sourceKey\u0000$comicId'],
     );
+  }
+
+  /// Toggles only the user-controlled hot-window flag. The transaction reads
+  /// the latest deadline so repeated taps or two pages toggling at once cannot
+  /// append multiple 14-day periods.
+  FavoriteItemWithUpdateInfo? toggleManualHotWindow(
+    String sourceKey,
+    String comicId, {
+    required bool enabled,
+    DateTime? now,
+  }) {
+    final completedAt = now ?? DateTime.now();
+    _db.execute('BEGIN');
+    try {
+      // A cached favorite can legitimately predate comic_check_state. Create
+      // only the comic-level row here, inside the same transaction as the
+      // toggle, so it remains a missing-baseline candidate.
+      _db.execute(
+        '''INSERT OR IGNORE INTO comic_check_state (source_key, comic_id)
+           VALUES (?, ?)''',
+        [sourceKey, comicId],
+      );
+      final rows = _db.select(
+        '''SELECT * FROM comic_check_state
+           WHERE source_key = ? AND comic_id = ? LIMIT 1''',
+        [sourceKey, comicId],
+      );
+      if (rows.isEmpty) {
+        throw StateError('Unable to create comic check state');
+      }
+      final state = rows.first;
+      final existingUntil = _dateTimeFromRow(state['manual_hot_until']);
+      final activeExisting =
+          existingUntil != null && existingUntil.isAfter(completedAt);
+      var manualUntil = existingUntil;
+      if (enabled) {
+        manualUntil = activeExisting
+            ? existingUntil
+            : completedAt.add(kFollowUpdateHotWindow);
+      }
+      final effectiveActivity =
+          _dateTimeFromRow(state['source_activity_at']) ??
+          _dateTimeFromRow(state['baseline_at']);
+      final oldJitter =
+          (state['old_schedule_jitter_applied'] as int? ?? 0) != 0;
+      final autoUntil = _dateTimeFromRow(state['auto_hot_until']);
+      final nextBefore = _dateTimeFromRow(state['next_check_at']);
+      var jitterApplied = oldJitter;
+      DateTime? nextCheck = nextBefore;
+      if (effectiveActivity != null) {
+        final decision = computeNextSchedule(
+          completedAt: completedAt,
+          effectiveActivityAt: effectiveActivity,
+          autoHotUntil: autoUntil,
+          manualHotEnabled: enabled,
+          manualHotUntil: manualUntil,
+          oldScheduleJitterApplied: oldJitter,
+          sourceKey: sourceKey,
+          comicId: comicId,
+        );
+        jitterApplied = decision.appliedOldScheduleJitter;
+        if (!enabled) {
+          nextCheck = decision.nextCheckAt;
+        } else {
+          final hotDeadline = completedAt.add(kFollowUpdateHotInterval);
+          if (nextCheck == null || nextCheck.isAfter(hotDeadline)) {
+            nextCheck = hotDeadline;
+          }
+        }
+      }
+      _db.execute(
+        '''UPDATE comic_check_state
+           SET manual_hot_enabled = ?, manual_hot_until = ?, next_check_at = ?,
+               old_schedule_jitter_applied = ?
+           WHERE source_key = ? AND comic_id = ?''',
+        [
+          enabled ? 1 : 0,
+          manualUntil?.millisecondsSinceEpoch,
+          nextCheck?.millisecondsSinceEpoch,
+          jitterApplied ? 1 : 0,
+          sourceKey,
+          comicId,
+        ],
+      );
+      _db.execute('COMMIT');
+    } catch (_) {
+      _db.execute('ROLLBACK');
+      rethrow;
+    }
+    notifyListeners();
+    final folderIds = getKnownFolderIds(sourceKey, comicId);
+    for (final folderId in folderIds) {
+      final result = getComicUpdateInfo(sourceKey, comicId, folderId);
+      if (result != null) return result;
+    }
+    return null;
   }
 
   int countComicsWithUpdatesInfo(NetworkFavoriteFolderRef folder) {
@@ -2320,8 +2634,19 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       checkFailures: state?['check_failures'] as int? ?? 0,
       checkNotFoundCount: state?['check_not_found_count'] as int? ?? 0,
       isSuspectGone: (state?['check_suspect_gone'] as int? ?? 0) != 0,
+      baselineAt: _dateTimeFromRow(state?['baseline_at']),
+      sourceActivityAt: _dateTimeFromRow(state?['source_activity_at']),
+      nextCheckAt: _dateTimeFromRow(state?['next_check_at']),
+      autoHotUntil: _dateTimeFromRow(state?['auto_hot_until']),
+      manualHotUntil: _dateTimeFromRow(state?['manual_hot_until']),
+      manualHotEnabled: (state?['manual_hot_enabled'] as int? ?? 0) != 0,
+      oldScheduleJitterApplied:
+          (state?['old_schedule_jitter_applied'] as int? ?? 0) != 0,
     );
   }
+
+  static DateTime? _dateTimeFromRow(Object? value) =>
+      value is int ? DateTime.fromMillisecondsSinceEpoch(value) : null;
 
   /// Updates fields from a comic-detail JSON response without changing tags
   /// or other list metadata already in the device cache. The cover is only
@@ -2392,6 +2717,8 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     NetworkFavoriteFolderRef fallback,
     String comicId, {
     String? updateTime,
+    DateTime? sourceActivityAt,
+    DateTime? completedAt,
     String? updateMarker,
     String? title,
     String? author,
@@ -2399,24 +2726,69 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     String? cover,
   }) {
     final sourceKey = fallback.sourceKey;
-    final previousRows = _db.select(
-      '''SELECT update_marker FROM comic_check_state
-         WHERE source_key = ? AND comic_id = ? LIMIT 1''',
-      [sourceKey, comicId],
-    );
-    final previousMarker = previousRows.isEmpty
-        ? null
-        : previousRows.first['update_marker'] as String?;
-    final changed = _hasSameVersionMarkerChanged(previousMarker, updateMarker);
+    final finishedAt = completedAt ?? DateTime.now();
+    final candidateActivity =
+        sourceActivityAt ??
+        parseFollowUpdateActivityTime(updateTime, now: finishedAt);
     final folders = _comicFolders(fallback, comicId);
-
+    var changed = false;
     _db.execute('BEGIN');
     try {
+      final previousRows = _db.select(
+        '''SELECT * FROM comic_check_state
+           WHERE source_key = ? AND comic_id = ? LIMIT 1''',
+        [sourceKey, comicId],
+      );
+      final previous = previousRows.isEmpty ? null : previousRows.first;
+      final previousMarker = previous?['update_marker'] as String?;
+      changed = _hasSameVersionMarkerChanged(previousMarker, updateMarker);
+      final previousActivity = _dateTimeFromRow(
+        previous?['source_activity_at'],
+      );
+      final acceptedActivity = candidateActivity == null
+          ? previousActivity
+          : previousActivity == null ||
+                candidateActivity.isAfter(previousActivity)
+          ? candidateActivity
+          : previousActivity;
+      final baseline = _dateTimeFromRow(previous?['baseline_at']) ?? finishedAt;
+      var autoUntil = _dateTimeFromRow(previous?['auto_hot_until']);
+      if (changed) {
+        final candidateUntil = finishedAt.add(kFollowUpdateHotWindow);
+        if (autoUntil == null || candidateUntil.isAfter(autoUntil)) {
+          autoUntil = candidateUntil;
+        }
+      }
+      final manualUntil = _dateTimeFromRow(previous?['manual_hot_until']);
+      final manualEnabled =
+          (previous?['manual_hot_enabled'] as int? ?? 0) != 0 &&
+          manualUntil != null &&
+          manualUntil.isAfter(finishedAt);
+      var jitterApplied =
+          (previous?['old_schedule_jitter_applied'] as int? ?? 0) != 0;
+      final effectiveActivity = acceptedActivity ?? baseline;
+      if (finishedAt.difference(effectiveActivity) <
+          kFollowUpdateOldScheduleJitterAge) {
+        jitterApplied = false;
+      }
+      final decision = computeNextSchedule(
+        completedAt: finishedAt,
+        effectiveActivityAt: effectiveActivity,
+        autoHotUntil: autoUntil,
+        manualHotEnabled: manualEnabled,
+        manualHotUntil: manualUntil,
+        oldScheduleJitterApplied: jitterApplied,
+        sourceKey: sourceKey,
+        comicId: comicId,
+      );
+      jitterApplied = decision.appliedOldScheduleJitter;
       _db.execute(
         '''INSERT INTO comic_check_state
             (source_key, comic_id, last_update_time, update_marker,
-             last_check_time, has_new_update)
-           VALUES (?, ?, ?, ?, ?, ?)
+             last_check_time, has_new_update, baseline_at, source_activity_at,
+             next_check_at, auto_hot_until, manual_hot_until,
+             manual_hot_enabled, old_schedule_jitter_applied)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(source_key, comic_id) DO UPDATE SET
              last_update_time = COALESCE(
                excluded.last_update_time, comic_check_state.last_update_time),
@@ -2428,14 +2800,29 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
              check_not_found_count = 0,
              check_suspect_gone = 0,
              has_new_update = CASE WHEN ? THEN 1
-                                   ELSE comic_check_state.has_new_update END''',
+                                   ELSE comic_check_state.has_new_update END,
+             baseline_at = excluded.baseline_at,
+             source_activity_at = COALESCE(
+               excluded.source_activity_at, comic_check_state.source_activity_at),
+             next_check_at = excluded.next_check_at,
+             auto_hot_until = excluded.auto_hot_until,
+             manual_hot_until = excluded.manual_hot_until,
+             manual_hot_enabled = excluded.manual_hot_enabled,
+             old_schedule_jitter_applied = excluded.old_schedule_jitter_applied''',
         [
           sourceKey,
           comicId,
           updateTime,
           updateMarker,
-          DateTime.now().millisecondsSinceEpoch,
+          finishedAt.millisecondsSinceEpoch,
           changed ? 1 : 0,
+          baseline.millisecondsSinceEpoch,
+          acceptedActivity?.millisecondsSinceEpoch,
+          decision.nextCheckAt.millisecondsSinceEpoch,
+          autoUntil?.millisecondsSinceEpoch,
+          manualUntil?.millisecondsSinceEpoch,
+          manualEnabled ? 1 : 0,
+          jitterApplied ? 1 : 0,
           changed ? 1 : 0,
         ],
       );
@@ -2477,45 +2864,115 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     String sourceKey,
     String comicId, {
     String? updateTime,
+    DateTime? sourceActivityAt,
+    DateTime? completedAt,
     String? updateMarker,
   }) {
-    final rows = _db.select(
-      '''SELECT update_marker FROM comic_check_state
-         WHERE source_key = ? AND comic_id = ? LIMIT 1''',
-      [sourceKey, comicId],
-    );
-    final previousMarker = rows.isEmpty
-        ? null
-        : rows.first['update_marker'] as String?;
-    final changed = _hasSameVersionMarkerChanged(previousMarker, updateMarker);
-    _db.execute(
-      '''INSERT INTO comic_check_state
-          (source_key, comic_id, last_update_time, update_marker,
-           last_check_time, has_new_update)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(source_key, comic_id) DO UPDATE SET
-           last_update_time = COALESCE(
-             excluded.last_update_time, comic_check_state.last_update_time),
-           update_marker = COALESCE(
-             excluded.update_marker, comic_check_state.update_marker),
-           last_check_time = excluded.last_check_time,
-           retry_after = NULL,
-           check_failures = 0,
-           check_not_found_count = 0,
-           check_suspect_gone = 0,
-           has_new_update = CASE WHEN ? THEN 1
-                                 ELSE comic_check_state.has_new_update END''',
-      [
-        sourceKey,
-        comicId,
-        updateTime,
+    final finishedAt = completedAt ?? DateTime.now();
+    final candidateActivity =
+        sourceActivityAt ??
+        parseFollowUpdateActivityTime(updateTime, now: finishedAt);
+    _db.execute('BEGIN');
+    try {
+      final rows = _db.select(
+        '''SELECT * FROM comic_check_state
+           WHERE source_key = ? AND comic_id = ? LIMIT 1''',
+        [sourceKey, comicId],
+      );
+      final previous = rows.isEmpty ? null : rows.first;
+      final changed = _hasSameVersionMarkerChanged(
+        previous?['update_marker'] as String?,
         updateMarker,
-        DateTime.now().millisecondsSinceEpoch,
-        changed ? 1 : 0,
-        changed ? 1 : 0,
-      ],
-    );
-    return changed;
+      );
+      final previousActivity = _dateTimeFromRow(
+        previous?['source_activity_at'],
+      );
+      final acceptedActivity = candidateActivity == null
+          ? previousActivity
+          : previousActivity == null ||
+                candidateActivity.isAfter(previousActivity)
+          ? candidateActivity
+          : previousActivity;
+      final baseline = _dateTimeFromRow(previous?['baseline_at']) ?? finishedAt;
+      var autoUntil = _dateTimeFromRow(previous?['auto_hot_until']);
+      if (changed) {
+        final candidateUntil = finishedAt.add(kFollowUpdateHotWindow);
+        if (autoUntil == null || candidateUntil.isAfter(autoUntil)) {
+          autoUntil = candidateUntil;
+        }
+      }
+      final manualUntil = _dateTimeFromRow(previous?['manual_hot_until']);
+      final manualEnabled =
+          (previous?['manual_hot_enabled'] as int? ?? 0) != 0 &&
+          manualUntil != null &&
+          manualUntil.isAfter(finishedAt);
+      var jitterApplied =
+          (previous?['old_schedule_jitter_applied'] as int? ?? 0) != 0;
+      final effectiveActivity = acceptedActivity ?? baseline;
+      if (finishedAt.difference(effectiveActivity) <
+          kFollowUpdateOldScheduleJitterAge) {
+        jitterApplied = false;
+      }
+      final decision = computeNextSchedule(
+        completedAt: finishedAt,
+        effectiveActivityAt: effectiveActivity,
+        autoHotUntil: autoUntil,
+        manualHotEnabled: manualEnabled,
+        manualHotUntil: manualUntil,
+        oldScheduleJitterApplied: jitterApplied,
+        sourceKey: sourceKey,
+        comicId: comicId,
+      );
+      _db.execute(
+        '''INSERT INTO comic_check_state
+            (source_key, comic_id, last_update_time, update_marker,
+             last_check_time, has_new_update, baseline_at, source_activity_at,
+             next_check_at, auto_hot_until, manual_hot_until,
+             manual_hot_enabled, old_schedule_jitter_applied)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(source_key, comic_id) DO UPDATE SET
+             last_update_time = COALESCE(
+               excluded.last_update_time, comic_check_state.last_update_time),
+             update_marker = COALESCE(
+               excluded.update_marker, comic_check_state.update_marker),
+             last_check_time = excluded.last_check_time,
+             retry_after = NULL,
+             check_failures = 0,
+             check_not_found_count = 0,
+             check_suspect_gone = 0,
+             has_new_update = CASE WHEN ? THEN 1
+                                   ELSE comic_check_state.has_new_update END,
+             baseline_at = excluded.baseline_at,
+             source_activity_at = COALESCE(
+               excluded.source_activity_at, comic_check_state.source_activity_at),
+             next_check_at = excluded.next_check_at,
+             auto_hot_until = excluded.auto_hot_until,
+             manual_hot_until = excluded.manual_hot_until,
+             manual_hot_enabled = excluded.manual_hot_enabled,
+             old_schedule_jitter_applied = excluded.old_schedule_jitter_applied''',
+        [
+          sourceKey,
+          comicId,
+          updateTime,
+          updateMarker,
+          finishedAt.millisecondsSinceEpoch,
+          changed ? 1 : 0,
+          baseline.millisecondsSinceEpoch,
+          acceptedActivity?.millisecondsSinceEpoch,
+          decision.nextCheckAt.millisecondsSinceEpoch,
+          autoUntil?.millisecondsSinceEpoch,
+          manualUntil?.millisecondsSinceEpoch,
+          manualEnabled ? 1 : 0,
+          decision.appliedOldScheduleJitter ? 1 : 0,
+          changed ? 1 : 0,
+        ],
+      );
+      _db.execute('COMMIT');
+      return changed;
+    } catch (_) {
+      _db.execute('ROLLBACK');
+      rethrow;
+    }
   }
 
   /// Marks [comicId] as temporarily skipped by automatic scans after it
@@ -2526,6 +2983,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     String comicId, {
     Duration delay = const Duration(hours: 1),
     int failures = 0,
+    DateTime? now,
   }) {
     _db.execute(
       '''INSERT INTO comic_check_state
@@ -2537,7 +2995,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       [
         sourceKey,
         comicId,
-        DateTime.now().add(delay).millisecondsSinceEpoch,
+        (now ?? DateTime.now()).add(delay).millisecondsSinceEpoch,
         failures,
       ],
     );
@@ -2729,7 +3187,8 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   /// Retry cooldowns and failure counters are part of the baseline: without
   /// clearing them the never-checked semantics would count cooled comics as
   /// checked and the next scan would never retry them.
-  void clearAllBaselines() {
+  void clearAllBaselines({DateTime? now}) {
+    final currentMs = (now ?? DateTime.now()).millisecondsSinceEpoch;
     _db.execute('''
       UPDATE comic_check_state
       SET last_check_time = NULL,
@@ -2737,7 +3196,16 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
           update_marker = NULL,
           has_new_update = 0,
           retry_after = NULL,
-          check_failures = 0
+          check_failures = 0,
+          baseline_at = NULL,
+          source_activity_at = NULL,
+          next_check_at = NULL,
+          auto_hot_until = NULL,
+          old_schedule_jitter_applied = 0,
+          manual_hot_enabled = CASE
+            WHEN manual_hot_until IS NOT NULL
+             AND manual_hot_until > $currentMs
+            THEN manual_hot_enabled ELSE 0 END
     ''');
     notifyListeners();
   }

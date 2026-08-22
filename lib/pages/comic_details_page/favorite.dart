@@ -177,10 +177,7 @@ class _FavoritePanelState extends State<_FavoritePanel> {
 /// background) when it is. Bookmark keeps the same icon language as the
 /// favorite button on the details page.
 class _FavoriteToggleButton extends StatelessWidget {
-  const _FavoriteToggleButton({
-    required this.isAdded,
-    required this.onPressed,
-  });
+  const _FavoriteToggleButton({required this.isAdded, required this.onPressed});
 
   final bool isAdded;
 
@@ -198,6 +195,170 @@ class _FavoriteToggleButton extends StatelessWidget {
       // container background makes the favorited state unmistakable.
       style: IconButton.styleFrom(
         backgroundColor: isAdded ? context.colorScheme.primaryContainer : null,
+      ),
+    );
+  }
+}
+
+/// Favorite and manual hot-window actions presented as one split button.
+///
+/// The two segments intentionally use separate [InkWell]s so their pointer,
+/// keyboard, splash, tooltip and semantics behavior cannot cross-trigger.
+const double _favoriteHotWindowButtonWidth = 128;
+const double _favoriteHotWindowSegmentWidth = 38;
+const double _favoriteHotWindowDividerWidth = 0.8;
+
+class FavoriteHotWindowActionButton extends StatelessWidget {
+  const FavoriteHotWindowActionButton({
+    super.key,
+    required this.isLoading,
+    required this.onFavorite,
+    required this.onFavoriteLongPress,
+    required this.info,
+    required this.onToggleHotWindow,
+    this.clock,
+  });
+
+  final bool isLoading;
+  final VoidCallback onFavorite;
+  final VoidCallback onFavoriteLongPress;
+  final FavoriteItemWithUpdateInfo info;
+  final VoidCallback onToggleHotWindow;
+  final DateTime Function()? clock;
+
+  @override
+  Widget build(BuildContext context) {
+    final now = clock?.call() ?? DateTime.now();
+    final manual = info.isManualHotActiveAt(now);
+    final active = info.isHotActiveAt(now);
+    final hotLabel = manual
+        ? 'Disable 14-day hot window'.tl
+        : 'Enable 14-day hot window'.tl;
+    final fireBase = context.isDarkMode
+        ? Colors.deepOrange.shade300
+        : Colors.deepOrange.shade700;
+    final fireColor = active
+        ? manual
+              ? fireBase
+              : fireBase.withValues(alpha: 0.68)
+        : context.colorScheme.onSurfaceVariant;
+    final favoriteLabel = 'Favorite'.tl;
+    return SizedBox(
+      height: 48,
+      child: Container(
+        key: const ValueKey('favorite-hot-window-split-button'),
+        margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+        clipBehavior: Clip.antiAlias,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(
+            color: context.colorScheme.outlineVariant,
+            width: 0.6,
+          ),
+        ),
+        child: Material(
+          color: Colors.transparent,
+          child: SizedBox(
+            width: _favoriteHotWindowButtonWidth,
+            child: Row(
+              mainAxisSize: MainAxisSize.max,
+              children: [
+                Semantics(
+                  button: true,
+                  enabled: !isLoading,
+                  label: favoriteLabel,
+                  child: InkWell(
+                    key: const ValueKey('favorite-hot-window-favorite-segment'),
+                    onTap: isLoading ? null : onFavorite,
+                    onLongPress: isLoading ? null : onFavoriteLongPress,
+                    borderRadius: const BorderRadius.only(
+                      topLeft: Radius.circular(18),
+                      bottomLeft: Radius.circular(18),
+                    ),
+                    child: SizedBox(
+                      width:
+                          _favoriteHotWindowButtonWidth -
+                          _favoriteHotWindowSegmentWidth -
+                          _favoriteHotWindowDividerWidth,
+                      height: 36,
+                      child: IconTheme.merge(
+                        data: IconThemeData(
+                          size: 20,
+                          color: context.useTextColor(Colors.purple),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.max,
+                          children: [
+                            if (isLoading)
+                              const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 1.8,
+                                ),
+                              )
+                            else
+                              const Icon(Icons.bookmark),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                favoriteLabel,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ).paddingHorizontal(16),
+                      ),
+                    ),
+                  ),
+                ),
+                ExcludeSemantics(
+                  child: SizedBox(
+                    key: const ValueKey('favorite-hot-window-divider'),
+                    width: _favoriteHotWindowDividerWidth,
+                    height: 24,
+                    child: ColoredBox(
+                      color: context.colorScheme.outlineVariant,
+                    ),
+                  ),
+                ),
+                Semantics(
+                  button: true,
+                  enabled: !isLoading,
+                  label: hotLabel,
+                  child: Tooltip(
+                    message: hotLabel,
+                    child: InkWell(
+                      key: const ValueKey('favorite-hot-window-hot-segment'),
+                      onTap: isLoading ? null : onToggleHotWindow,
+                      borderRadius: const BorderRadius.only(
+                        topRight: Radius.circular(18),
+                        bottomRight: Radius.circular(18),
+                      ),
+                      child: SizedBox(
+                        width: _favoriteHotWindowSegmentWidth,
+                        height: 36,
+                        child: Center(
+                          child: Icon(
+                            key: const ValueKey(
+                              'favorite-hot-window-fire-icon',
+                            ),
+                            manual
+                                ? Icons.local_fire_department
+                                : Icons.local_fire_department_outlined,
+                            size: 20,
+                            color: fireColor,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

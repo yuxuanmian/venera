@@ -276,6 +276,36 @@ void main() {
     );
   });
 
+  test(
+    'single favorite recheck requests once across multiple folders',
+    () async {
+      const folderB = NetworkFavoriteFolderRef(
+        sourceKey: 'test-source',
+        folderId: 'remote-b',
+        title: 'Remote B',
+      );
+      final data = _numericData(
+        (page, [folder]) async => Res(<Comic>[_comic('shared')], subData: 1),
+      );
+      await cache.refreshFolders(data);
+      await cache.refreshPage(data, folder, 1);
+      await cache.refreshPage(data, folderB, 1);
+      var calls = 0;
+      ComicSourceManager().add(
+        _detailSource((id) async {
+          calls++;
+          return _details(id);
+        }),
+      );
+
+      expect(
+        await recheckFavoriteComic('test-source', 'shared', cache: cache),
+        isTrue,
+      );
+      expect(calls, 1);
+    },
+  );
+
   group('classifyNotFoundError', () {
     test('status codes and wording', () {
       expect(
@@ -1561,6 +1591,45 @@ void main() {
     );
   });
 
+  test('scan candidate due checks use the supplied clock instant', () async {
+    await cacheComics(['clocked']);
+    final initial = DateTime(2026, 8, 22, 12);
+    final database = sqlite3.open(
+      '${tempDir.path}${Platform.pathSeparator}cache.db',
+    );
+    database.execute(
+      '''INSERT INTO comic_check_state
+         (source_key, comic_id, last_check_time, next_check_at)
+         VALUES (?, ?, ?, ?)''',
+      [
+        'test-source',
+        'clocked',
+        initial.millisecondsSinceEpoch,
+        initial.add(const Duration(hours: 1)).millisecondsSinceEpoch,
+      ],
+    );
+    database.dispose();
+
+    List<ScanCandidate> candidatesAt(DateTime now) => cache.getScanCandidates(
+      [folder],
+      modeName: 'regular',
+      ignoreRetryAfter: true,
+      includeSuspect: false,
+      now: now,
+    );
+
+    expect(
+      candidatesAt(initial).map((candidate) => candidate.comicId),
+      isNot(contains('clocked')),
+    );
+    expect(
+      candidatesAt(
+        initial.add(const Duration(hours: 2)),
+      ).map((candidate) => candidate.comicId),
+      contains('clocked'),
+    );
+  });
+
   group('scan candidate SQL', () {
     test('getScanCandidates matches the full-scan manual filter', () async {
       const folderB = NetworkFavoriteFolderRef(
@@ -1593,8 +1662,8 @@ void main() {
         1,
       );
 
-      // Seed mixed check states directly in SQL: checked within the 24h
-      // window, checked long ago, never checked (no row at all), cooling
+      // Seed mixed check states directly in SQL: checked within the current
+      // schedule, checked long ago, never checked (no row at all), cooling
       // down, and suspected-removed. 'old' lives in both folders.
       final db = sqlite3.open(
         '${tempDir.path}${Platform.pathSeparator}cache.db',
@@ -1644,7 +1713,9 @@ void main() {
       }
       db.dispose();
 
-      // Reference implementation: every row plus the old Dart-side filters.
+      // Reference implementation: every row plus the persisted schedule
+      // filters. A missing next_check_at is intentionally due for migration
+      // safety, even when an old last_check_time is recent.
       Set<String> reference(
         FollowUpdateMode mode, {
         required bool ignoreRetryAfter,
@@ -1659,7 +1730,8 @@ void main() {
             if (mode == FollowUpdateMode.missing) {
               if (lct != null) continue;
             } else if (mode == FollowUpdateMode.regular) {
-              if (lct != null && refNow.difference(lct).inDays < 1) continue;
+              final next = comic.nextCheckAt;
+              if (next != null && next.isAfter(refNow)) continue;
             }
             final ra = comic.retryAfter;
             if (!ignoreRetryAfter && ra != null && ra.isAfter(refNow)) {

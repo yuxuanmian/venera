@@ -45,6 +45,13 @@ part 'cover_viewer.dart';
 
 part 'debug.dart';
 
+@visibleForTesting
+bool shouldShowFavoriteHotWindowAction({
+  required bool followUpdatesEnabled,
+  required bool isFavorite,
+  required bool hasTrackedInfo,
+}) => followUpdatesEnabled && isFavorite && hasTrackedInfo;
+
 bool _isAuthorNamespace(String namespace) {
   switch (namespace.trim().toLowerCase()) {
     case 'author':
@@ -104,9 +111,31 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
 
   var scrollController = ScrollController();
 
+  final _followUpdateCache = NetworkFavoriteCacheManager();
+
   bool isDownloaded = false;
 
   bool showFAB = false;
+
+  void _onFollowUpdateCacheChanged() {
+    if (mounted) setState(() {});
+  }
+
+  FavoriteItemWithUpdateInfo? _followUpdateInfo() {
+    if (!followUpdatesEnabled || !isFavorite) return null;
+    for (final folderId in _followUpdateCache.getKnownFolderIds(
+      widget.sourceKey,
+      widget.id,
+    )) {
+      final info = _followUpdateCache.getComicUpdateInfo(
+        widget.sourceKey,
+        widget.id,
+        folderId,
+      );
+      if (info != null) return info;
+    }
+    return null;
+  }
 
   @override
   void onReadEnd() {
@@ -211,12 +240,14 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   @override
   void initState() {
     scrollController.addListener(onScroll);
+    _followUpdateCache.addListener(_onFollowUpdateCacheChanged);
     super.initState();
   }
 
   @override
   void dispose() {
     scrollController.removeListener(onScroll);
+    _followUpdateCache.removeListener(_onFollowUpdateCacheChanged);
     super.dispose();
   }
 
@@ -493,6 +524,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   Widget buildActions() {
     bool isMobile = context.width < changePoint;
     bool hasHistory = history != null && (history!.ep > 1 || history!.page > 1);
+    final followInfo = _followUpdateInfo();
     return SliverLazyToBoxAdapter(
       child: Column(
         children: [
@@ -536,16 +568,37 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
                   iconColor: context.useTextColor(Colors.red),
                 ),
               if (comicSource.favoriteData != null)
-                _ActionButton(
-                  icon: const Icon(Icons.bookmark_outline_outlined),
-                  activeIcon: const Icon(Icons.bookmark),
-                  isActive: isFavorite,
-                  isLoading: isFavoriting,
-                  text: 'Favorite'.tl,
-                  onPressed: toggleFavorite,
-                  onLongPress: openFavPanel,
-                  iconColor: context.useTextColor(Colors.purple),
-                ),
+                if (shouldShowFavoriteHotWindowAction(
+                  followUpdatesEnabled: followUpdatesEnabled,
+                  isFavorite: isFavorite,
+                  hasTrackedInfo: followInfo != null,
+                ))
+                  FavoriteHotWindowActionButton(
+                    isLoading: isFavoriting,
+                    onFavorite: toggleFavorite,
+                    onFavoriteLongPress: openFavPanel,
+                    info: followInfo!,
+                    onToggleHotWindow: () {
+                      _followUpdateCache.toggleManualHotWindow(
+                        widget.sourceKey,
+                        widget.id,
+                        enabled: !followInfo.isManualHotActiveAt(
+                          DateTime.now(),
+                        ),
+                      );
+                    },
+                  )
+                else
+                  _ActionButton(
+                    icon: const Icon(Icons.bookmark_outline_outlined),
+                    activeIcon: const Icon(Icons.bookmark),
+                    isActive: isFavorite,
+                    isLoading: isFavoriting,
+                    text: 'Favorite'.tl,
+                    onPressed: toggleFavorite,
+                    onLongPress: openFavPanel,
+                    iconColor: context.useTextColor(Colors.purple),
+                  ),
               if (comicSource.commentsLoader != null)
                 _ActionButton(
                   icon: const Icon(Icons.comment),
