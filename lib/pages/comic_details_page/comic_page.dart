@@ -460,14 +460,27 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
                     text: comic.subTitle!,
                     style: ts.s14,
                   ).paddingVertical(4),
-                ComicTitleCopyButton(
-                  title: comic.title,
-                  subtitle: comic.subTitle,
-                  knownAuthors: _knownAuthorNames,
-                ),
-                Text(
-                  (ComicSource.find(comic.sourceKey)?.name) ?? '',
-                  style: ts.s12,
+                Row(
+                  key: const ValueKey('comic-source-copy-row'),
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Flexible(
+                      fit: FlexFit.loose,
+                      child: Text(
+                        (ComicSource.find(comic.sourceKey)?.name) ?? '',
+                        key: const ValueKey('comic-source-name'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: ts.s12,
+                      ),
+                    ),
+                    const SizedBox(width: 2),
+                    ComicTitleCopyButton(
+                      title: comic.title,
+                      subtitle: comic.subTitle,
+                      knownAuthors: _knownAuthorNames,
+                    ),
+                  ],
                 ),
               ],
             ),

@@ -262,22 +262,27 @@ class ComicTitleCopyButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final label = ''.tl;
-    return Tooltip(
-      message: label,
-      child: TextButton.icon(
-        onPressed: () => showComicTitleCopyMenu(
-          context,
-          title: title,
-          subtitle: subtitle,
-          knownAuthors: knownAuthors,
-        ),
-        icon: const Icon(Icons.copy_outlined, size: 16),
-        label: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
-        style: TextButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
-          minimumSize: const Size(48, 48),
-          tapTargetSize: MaterialTapTargetSize.padded,
+    final label = 'Copy Original Title'.tl;
+    return Semantics(
+      button: true,
+      label: label,
+      child: Tooltip(
+        message: label,
+        child: IconButton(
+          key: const ValueKey('comic-title-copy-button'),
+          icon: Icon(
+            Icons.copy_outlined,
+            color: Theme.of(context).colorScheme.primary,
+          ),
+          iconSize: 14,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+          onPressed: () => showComicTitleCopyMenu(
+            context,
+            title: title,
+            subtitle: subtitle,
+            knownAuthors: knownAuthors,
+          ),
         ),
       ),
     );

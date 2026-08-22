@@ -317,12 +317,15 @@ void main() {
       ),
     );
 
-    final buttonRect = tester.getRect(find.byType(TextButton));
+    final buttonFinder = find.byKey(const ValueKey('comic-title-copy-button'));
+    final buttonRect = tester.getRect(buttonFinder);
     expect(buttonRect.height, greaterThanOrEqualTo(48));
     expect(find.byTooltip('Copy Original Title'.tl), findsOneWidget);
+    expect(find.text('Copy Original Title'.tl), findsNothing);
+    expect(tester.widget<IconButton>(buttonFinder).iconSize, 14);
     expect(tester.takeException(), isNull);
 
-    await tester.tap(find.byType(TextButton));
+    await tester.tap(buttonFinder);
     await tester.pumpAndSettle();
     expect(find.text('Choose a title to copy'.tl), findsOneWidget);
     tester.state<NavigatorState>(find.byType(Navigator)).pop();
