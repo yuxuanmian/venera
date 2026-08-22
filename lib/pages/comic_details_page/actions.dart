@@ -340,6 +340,18 @@ abstract mixin class _ComicPageActions {
         },
       ),
       MenuEntry(
+        icon: Icons.copy,
+        text: "Copy Original Title".tl,
+        onClick: () {
+          showComicTitleCopyMenu(
+            context,
+            title: comic.title,
+            subtitle: comic.subTitle,
+            knownAuthors: _collectKnownAuthorNames(comic),
+          );
+        },
+      ),
+      MenuEntry(
         icon: Icons.copy_rounded,
         text: "Copy ID".tl,
         onClick: () {

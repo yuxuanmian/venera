@@ -24,6 +24,7 @@ import 'package:venera/network/download.dart';
 import 'package:venera/pages/reader/reader.dart';
 import 'package:venera/utils/file_type.dart';
 import 'package:venera/utils/io.dart';
+import 'package:venera/utils/comic_author_copy.dart';
 import 'package:venera/utils/tags_translation.dart';
 import 'package:venera/utils/translations.dart';
 import 'dart:math' as math;
@@ -43,6 +44,32 @@ part 'actions.dart';
 part 'cover_viewer.dart';
 
 part 'debug.dart';
+
+bool _isAuthorNamespace(String namespace) {
+  switch (namespace.trim().toLowerCase()) {
+    case 'author':
+    case 'authors':
+    case 'artist':
+    case 'artists':
+    case '作者':
+    case '画师':
+      return true;
+    default:
+      return false;
+  }
+}
+
+List<String> _collectKnownAuthorNames(ComicDetails comic) {
+  final names = <String>[];
+  for (final entry in comic.tags.entries) {
+    if (_isAuthorNamespace(entry.key)) {
+      names.addAll(entry.value);
+    }
+  }
+  final author = comic.findAuthor();
+  if (author != null) names.add(author);
+  return names;
+}
 
 class ComicPage extends StatefulWidget {
   const ComicPage({
@@ -227,6 +254,8 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   }
 
   var isFirst = true;
+
+  List<String> get _knownAuthorNames => _collectKnownAuthorNames(comic);
 
   @override
   Widget buildContent(BuildContext context, ComicDetails data) {
@@ -425,12 +454,17 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                SelectableText(comic.title, style: ts.s18),
+                ComicTitleSelectableText(text: comic.title, style: ts.s18),
                 if (comic.subTitle != null)
-                  SelectableText(
-                    comic.subTitle!,
+                  ComicTitleSelectableText(
+                    text: comic.subTitle!,
                     style: ts.s14,
                   ).paddingVertical(4),
+                ComicTitleCopyButton(
+                  title: comic.title,
+                  subtitle: comic.subTitle,
+                  knownAuthors: _knownAuthorNames,
+                ),
                 Text(
                   (ComicSource.find(comic.sourceKey)?.name) ?? '',
                   style: ts.s12,
@@ -627,6 +661,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       required String text,
       VoidCallback? onTap,
       bool isTitle = false,
+      ComicAuthorCopyResolution? authorCopyResolution,
     }) {
       Color color;
       if (isTitle) {
@@ -655,30 +690,11 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
         return Material(
           color: color,
           borderRadius: borderRadius,
-          child: InkWell(
-            borderRadius: borderRadius,
+          child: ComicAuthorCopyTarget(
+            text: text,
+            resolution: authorCopyResolution,
             onTap: onTap,
-            onLongPress: () {
-              Clipboard.setData(ClipboardData(text: text));
-              context.showMessage(message: "Copied".tl);
-            },
-            onSecondaryTapDown: (details) {
-              showMenuX(context, details.globalPosition, [
-                MenuEntry(
-                  icon: Icons.remove_red_eye,
-                  text: "View".tl,
-                  onClick: onTap,
-                ),
-                MenuEntry(
-                  icon: Icons.copy,
-                  text: "Copy".tl,
-                  onClick: () {
-                    Clipboard.setData(ClipboardData(text: text));
-                    context.showMessage(message: "Copied".tl);
-                  },
-                ),
-              ]);
-            },
+            borderRadius: borderRadius,
             child: Text(text).padding(padding),
           ),
         );
@@ -740,14 +756,22 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
                 if (e.value.isNotEmpty)
                   buildTag(text: e.key.ts(comicSource.key), isTitle: true),
                 for (var tag in e.value)
-                  buildTag(
-                    text: enableTranslation
-                        ? TagsTranslation.translationTagWithNamespace(
-                            tag,
-                            e.key.toLowerCase(),
-                          )
-                        : tag,
-                    onTap: () => onTapTag(tag, e.key),
+                  Builder(
+                    builder: (context) {
+                      final text = enableTranslation
+                          ? TagsTranslation.translationTagWithNamespace(
+                              tag,
+                              e.key.toLowerCase(),
+                            )
+                          : tag;
+                      return buildTag(
+                        text: text,
+                        onTap: () => onTapTag(tag, e.key),
+                        authorCopyResolution: _isAuthorNamespace(e.key)
+                            ? resolveComicAuthorCopyCandidates(text)
+                            : null,
+                      );
+                    },
                   ),
               ],
             ),

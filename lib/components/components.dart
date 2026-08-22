@@ -25,6 +25,8 @@ import 'package:venera/foundation/res.dart';
 import 'package:venera/network/cloudflare.dart';
 import 'package:venera/pages/comic_details_page/comic_page.dart';
 import 'package:venera/utils/ext.dart';
+import 'package:venera/utils/comic_title_copy.dart';
+import 'package:venera/utils/comic_author_copy.dart';
 import 'package:venera/utils/tags_translation.dart';
 import 'package:venera/utils/translations.dart';
 
@@ -43,6 +45,8 @@ part 'scroll.dart';
 part 'select.dart';
 part 'side_bar.dart';
 part 'comic.dart';
+part 'comic_title_copy.dart';
+part 'comic_author_copy.dart';
 part 'effects.dart';
 part 'gesture.dart';
 part 'code.dart';

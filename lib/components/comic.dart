@@ -113,6 +113,17 @@ class ComicTile extends StatelessWidget {
         },
       ),
       MenuEntry(
+        icon: Icons.copy,
+        text: 'Copy Original Title'.tl,
+        onClick: () {
+          showComicTitleCopyMenu(
+            context,
+            title: comic.title,
+            subtitle: comic.subtitle,
+          );
+        },
+      ),
+      MenuEntry(
         icon: Icons.block,
         text: 'Block'.tl,
         onClick: () => block(context),
