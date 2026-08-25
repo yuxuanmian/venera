@@ -111,10 +111,17 @@ void main() {
     for (final id in ['one', 'two', 'three']) {
       db.execute(
         '''INSERT INTO comic_check_state
-           (source_key, comic_id, last_check_time, retry_after,
-            check_suspect_gone)
-           VALUES (?, ?, ?, ?, ?)''',
-        ['test-source', id, 1, null, 0],
+           (source_key, comic_id, last_check_time, next_check_at,
+            retry_after, check_suspect_gone)
+           VALUES (?, ?, ?, ?, ?, ?)''',
+        [
+          'test-source',
+          id,
+          1,
+          DateTime.now().add(const Duration(days: 1)).millisecondsSinceEpoch,
+          null,
+          0,
+        ],
       );
     }
     db.dispose();

@@ -156,13 +156,22 @@ void main() {
     await cache.refreshPage(data, folder, 1);
     expect(cache.getCachedPage(folder, 1), isNotNull);
 
+    final beforeEpoch = cache.captureFavoriteSessionEpoch('test-source');
+    final beforeGeneration = cache.cacheGeneration;
+    cache.recordFavoriteUpdateScanAttempt(
+      folder,
+      attemptedAt: DateTime(2026, 8, 24),
+    );
     cache.clearAllCache();
 
+    expect(cache.captureFavoriteSessionEpoch('test-source'), beforeEpoch + 1);
+    expect(cache.cacheGeneration, beforeGeneration + 1);
     expect(cache.getCachedFolders('test-source'), isEmpty);
     expect(cache.getCachedPage(folder, 1), isNull);
     expect(cache.countCachedComics(folder), 0);
     expect(cache.isFavoriteKnown('test-source', 'one'), isFalse);
     expect(cache.getFullCacheStatus(folder).isComplete, isFalse);
+    expect(cache.getFavoriteUpdateScanState(folder), isNull);
   });
 
   test('removing a favorite falls back to the cached favorite id', () async {

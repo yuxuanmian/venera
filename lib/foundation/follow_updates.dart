@@ -9,8 +9,10 @@ import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_update_schedule.dart';
 import 'package:venera/foundation/log.dart';
+import 'package:venera/foundation/res.dart';
 
 export 'follow_update_schedule.dart';
+export 'follow_update_marker.dart';
 
 abstract interface class ScanCancellationToken {
   bool get isCanceled;
@@ -461,6 +463,11 @@ Future<ComicUpdateResult> updateComic(
     );
     return ComicUpdateResult(false, "Comic source not found");
   }
+  if (comicSource.favoriteData?.updateCheck != null) {
+    // List-strategy sources are checked by a complete favorite snapshot. Do
+    // not fall back to a detail request for an individual comic.
+    return ComicUpdateResult(false, 'Favorite source uses list update checks');
+  }
   if (comicSource.loadComicInfo == null) {
     if (!canCommit()) return canceled();
     manager.markComicRetryLaterEverywhere(
@@ -543,6 +550,9 @@ class UpdateProgress {
   final int updated;
   final FavoriteItemWithUpdateInfo? comic;
   final String? errorMessage;
+  final bool isBatchWork;
+  final String? currentLabel;
+  final bool containsBatchWork;
 
   UpdateProgress(
     this.total,
@@ -551,6 +561,9 @@ class UpdateProgress {
     this.updated, [
     this.comic,
     this.errorMessage,
+    this.isBatchWork = false,
+    this.currentLabel,
+    this.containsBatchWork = false,
   ]);
 }
 
@@ -570,6 +583,41 @@ List<NetworkFavoriteFolderRef> getFollowUpdateFolders() {
   }).toList();
 }
 
+bool hasPendingFollowUpdateWork({
+  required FollowUpdateMode mode,
+  Iterable<NetworkFavoriteFolderRef>? folders,
+  DateTime? now,
+}) {
+  final manager = NetworkFavoriteCacheManager();
+  final selected = (folders ?? getFollowUpdateFolders()).toList();
+  if (selected.isEmpty) return false;
+  final detailFolders = [
+    for (final folder in selected)
+      if (ComicSource.find(folder.sourceKey)?.favoriteData?.updateCheck == null)
+        folder,
+  ];
+  if (detailFolders.isNotEmpty &&
+      manager
+          .getScanCandidates(
+            detailFolders,
+            modeName: mode.name,
+            ignoreRetryAfter: false,
+            includeSuspect: false,
+            now: now,
+          )
+          .isNotEmpty) {
+    return true;
+  }
+  return _buildFavoriteListScanJobs(
+    manager,
+    selected,
+    mode,
+    forceListSnapshots: false,
+    ignoreRetryAfter: false,
+    now: now ?? DateTime.now(),
+  ).isNotEmpty;
+}
+
 /// Progress of a background follow-up scan run.
 class BaselineStatus {
   const BaselineStatus({
@@ -579,6 +627,9 @@ class BaselineStatus {
     required this.errors,
     required this.updated,
     this.currentComic,
+    this.isBatchWork = false,
+    this.currentLabel,
+    this.containsBatchWork = false,
   });
 
   final bool isRunning;
@@ -587,6 +638,9 @@ class BaselineStatus {
   final int errors;
   final int updated;
   final String? currentComic;
+  final bool isBatchWork;
+  final String? currentLabel;
+  final bool containsBatchWork;
 }
 
 /// Selection rule used when checking a remote favorite folder.
@@ -615,6 +669,195 @@ class _ScanItem {
   /// Folder of the row with the earliest last check; used for the fresh
   /// re-read before checking and as the fallback for everywhere writes.
   final String representativeFolderId;
+}
+
+class _FavoriteListScanJob {
+  const _FavoriteListScanJob({required this.folder});
+
+  final NetworkFavoriteFolderRef folder;
+}
+
+List<_FavoriteListScanJob> _buildFavoriteListScanJobs(
+  NetworkFavoriteCacheManager manager,
+  List<NetworkFavoriteFolderRef> folders,
+  FollowUpdateMode mode, {
+  required bool forceListSnapshots,
+  required bool ignoreRetryAfter,
+  required DateTime now,
+}) {
+  final jobs = <_FavoriteListScanJob>[];
+  final seen = <String>{};
+  for (final folder in folders) {
+    final key = '${folder.sourceKey}\u0000${folder.folderId}';
+    if (!seen.add(key)) continue;
+    final data = ComicSource.find(folder.sourceKey)?.favoriteData;
+    final updateCheck = data?.updateCheck;
+    if (updateCheck == null) continue;
+    final state = manager.getFavoriteUpdateScanState(folder);
+    final retryReady =
+        state?.retryAfter == null || !state!.retryAfter!.isAfter(now);
+    final schemeChanged = state?.markerScheme != updateCheck.markerScheme;
+    final due = forceListSnapshots || mode == FollowUpdateMode.force
+        ? true
+        : mode == FollowUpdateMode.missing
+        ? state?.lastSuccessAt == null || schemeChanged
+        : schemeChanged ||
+              state?.lastSuccessAt == null ||
+              !now.isBefore(
+                state!.lastSuccessAt!.add(updateCheck.scanInterval),
+              );
+    if (due && (forceListSnapshots || ignoreRetryAfter || retryReady)) {
+      jobs.add(_FavoriteListScanJob(folder: folder));
+    }
+  }
+  return jobs;
+}
+
+Future<({bool success, bool canceled, int updated, String? error})>
+_runFavoriteListScanJob(
+  NetworkFavoriteCacheManager manager,
+  _FavoriteListScanJob job, {
+  required ScanCancellationToken token,
+  required DateTime Function() clock,
+  required int expectedEpoch,
+}) async {
+  if (!token.canCommit) {
+    return (success: false, canceled: true, updated: 0, error: null);
+  }
+  if (!manager.tryAcquireFullCacheLock(job.folder)) {
+    return (success: true, canceled: false, updated: 0, error: null);
+  }
+  try {
+    final source = ComicSource.find(job.folder.sourceKey);
+    final data = source?.favoriteData;
+    final updateCheck = data?.updateCheck;
+    if (source == null || data == null || updateCheck == null) {
+      return (
+        success: false,
+        canceled: false,
+        updated: 0,
+        error: 'Favorite list update capability is unavailable',
+      );
+    }
+    final attemptedAt = clock();
+    manager.recordFavoriteUpdateScanAttempt(
+      job.folder,
+      attemptedAt: attemptedAt,
+    );
+    Res<FavoriteUpdateSnapshot> result;
+    try {
+      result = await updateCheck.load(job.folder.folderId);
+    } catch (e, s) {
+      Log.error('Favorite list update', e.toString(), s);
+      if (!token.canCommit ||
+          !manager.isFavoriteSessionEpochCurrent(
+            job.folder.sourceKey,
+            expectedEpoch,
+          )) {
+        return (success: false, canceled: true, updated: 0, error: null);
+      }
+      manager.recordFavoriteUpdateScanFailure(job.folder, failedAt: clock());
+      return (success: false, canceled: false, updated: 0, error: e.toString());
+    }
+    if (!token.canCommit ||
+        !manager.isFavoriteSessionEpochCurrent(
+          job.folder.sourceKey,
+          expectedEpoch,
+        )) {
+      return (success: false, canceled: true, updated: 0, error: null);
+    }
+    if (result.error) {
+      manager.recordFavoriteUpdateScanFailure(job.folder, failedAt: clock());
+      return (
+        success: false,
+        canceled: false,
+        updated: 0,
+        error: result.errorMessage,
+      );
+    }
+    try {
+      if (!token.canCommit ||
+          !manager.isFavoriteSessionEpochCurrent(
+            job.folder.sourceKey,
+            expectedEpoch,
+          )) {
+        return (success: false, canceled: true, updated: 0, error: null);
+      }
+      final applied = manager.applyCompleteFavoriteUpdateSnapshot(
+        data,
+        job.folder,
+        result.data,
+        completedAt: clock(),
+      );
+      return (
+        success: true,
+        canceled: false,
+        updated: applied.updatedComicCount,
+        error: null,
+      );
+    } catch (e, s) {
+      Log.error('Favorite list update', e.toString(), s);
+      if (!token.canCommit ||
+          !manager.isFavoriteSessionEpochCurrent(
+            job.folder.sourceKey,
+            expectedEpoch,
+          )) {
+        return (success: false, canceled: true, updated: 0, error: null);
+      }
+      manager.recordFavoriteUpdateScanFailure(job.folder, failedAt: clock());
+      return (success: false, canceled: false, updated: 0, error: e.toString());
+    }
+  } finally {
+    manager.releaseFullCacheLock(job.folder);
+  }
+}
+
+Future<void> _runFavoriteListScanJobs(
+  NetworkFavoriteCacheManager manager,
+  List<_FavoriteListScanJob> jobs, {
+  required ScanCancellationToken token,
+  required DateTime Function() clock,
+  required void Function(
+    _FavoriteListScanJob job,
+    ({bool success, bool canceled, int updated, String? error}) result,
+  )
+  onResult,
+}) async {
+  final grouped = <String, Queue<_FavoriteListScanJob>>{};
+  for (final job in jobs) {
+    grouped
+        .putIfAbsent(job.folder.sourceKey, Queue<_FavoriteListScanJob>.new)
+        .addLast(job);
+  }
+  final sourceKeys = grouped.keys.toList();
+  final expectedEpochs = <String, int>{
+    for (final sourceKey in sourceKeys)
+      sourceKey: manager.captureFavoriteSessionEpoch(sourceKey),
+  };
+  var nextSource = 0;
+  Future<void> worker() async {
+    while (token.canCommit) {
+      final index = nextSource++;
+      if (index >= sourceKeys.length) return;
+      final queue = grouped[sourceKeys[index]]!;
+      while (queue.isNotEmpty && token.canCommit) {
+        final job = queue.removeFirst();
+        final result = await _runFavoriteListScanJob(
+          manager,
+          job,
+          token: token,
+          clock: clock,
+          expectedEpoch: expectedEpochs[job.folder.sourceKey]!,
+        );
+        onResult(job, result);
+        if (result.canceled) return;
+      }
+    }
+  }
+
+  await Future.wait([
+    for (var i = 0; i < math.min(3, sourceKeys.length); i++) worker(),
+  ]);
 }
 
 /// Builds the deduplicated candidate queue for one scan run.
@@ -709,6 +952,7 @@ Stream<UpdateProgress> scanFollowUpdates(
   bool ignoreRetryAfter = false,
   NetworkFavoriteCacheManager? cache,
   bool includeSuspect = false,
+  bool forceListSnapshots = false,
   DateTime Function()? clock,
   Future<void> Function(Duration)? delay,
 }) {
@@ -723,6 +967,7 @@ Stream<UpdateProgress> scanFollowUpdates(
       ignoreRetryAfter: ignoreRetryAfter,
       cache: cache,
       includeSuspect: includeSuspect,
+      forceListSnapshots: forceListSnapshots,
       clock: clock ?? DateTime.now,
       delay: delay ?? _defaultFollowUpdateDelay,
     ),
@@ -740,6 +985,7 @@ Future<void> _runScan(
   bool ignoreRetryAfter = false,
   NetworkFavoriteCacheManager? cache,
   bool includeSuspect = false,
+  bool forceListSnapshots = false,
 }) async {
   final manager = cache ?? NetworkFavoriteCacheManager();
   var errors = 0;
@@ -809,10 +1055,38 @@ Future<void> _runScan(
     // Resume an interrupted (crash) run with its stored mode and cooldown
     // policy; otherwise start a fresh run.
     final previousRun = manager.getCurrentScanRun();
+    final listMode = previousRun != null && previousRun.status == 'running'
+        ? FollowUpdateMode.values.asNameMap()[previousRun.mode] ?? mode
+        : mode;
+    final listIgnoreRetryAfter =
+        previousRun != null && previousRun.status == 'running'
+        ? previousRun.ignoreRetryAfter
+        : ignoreRetryAfter;
+    final listJobs = _buildFavoriteListScanJobs(
+      manager,
+      folders,
+      listMode,
+      forceListSnapshots:
+          forceListSnapshots || listMode == FollowUpdateMode.force,
+      ignoreRetryAfter: listIgnoreRetryAfter,
+      now: scanNow,
+    );
     final List<_ScanItem> items;
     if (previousRun != null && previousRun.status == 'running') {
       final storedMode =
           FollowUpdateMode.values.asNameMap()[previousRun.mode] ?? mode;
+      manager.markListStrategyScanItemsSkipped(
+        previousRun.runId,
+        folders
+            .where(
+              (folder) =>
+                  ComicSource.find(
+                    folder.sourceKey,
+                  )?.favoriteData?.updateCheck !=
+                  null,
+            )
+            .map((folder) => folder.sourceKey),
+      );
       items = _buildScanItems(
         manager,
         folders,
@@ -846,13 +1120,25 @@ Future<void> _runScan(
       run = manager.createScanRun(
         mode: mode.name,
         ignoreRetryAfter: ignoreRetryAfter,
-        total: items.length,
+        total: listJobs.length + items.length,
         items: [for (final item in items) (item.sourceKey, item.comicId)],
       );
     }
-    final total = items.length;
+    final total = listJobs.length + items.length;
     // The final total is emitted once, before any work starts.
-    stream.add(UpdateProgress(total, 0, 0, 0));
+    stream.add(
+      UpdateProgress(
+        total,
+        0,
+        0,
+        0,
+        null,
+        null,
+        false,
+        null,
+        listJobs.isNotEmpty,
+      ),
+    );
 
     // Keep a stable non-null id for all worker closures. The nullable [run]
     // remains available to the finalizer so an initialization failure cannot
@@ -884,6 +1170,36 @@ Future<void> _runScan(
           batchDelay,
           slowMode: sourceSlowMode.contains(sourceKey),
         );
+
+    // List-strategy work is one complete snapshot per folder. It is kept out
+    // of scan_queue and runs before detail work; folders of the same source
+    // are serial while up to three different sources can run in parallel.
+    await _runFavoriteListScanJobs(
+      manager,
+      listJobs,
+      token: token,
+      clock: clock,
+      onResult: (job, result) {
+        if (result.canceled || !token.canCommit) return;
+        current++;
+        updated += result.updated;
+        if (!result.success) errors++;
+        stream.add(
+          UpdateProgress(
+            total,
+            current,
+            errors,
+            updated,
+            null,
+            result.error,
+            true,
+            '${job.folder.sourceKey}/${job.folder.folderId}',
+            listJobs.isNotEmpty,
+          ),
+        );
+      },
+    );
+    if (!token.canCommit) return;
 
     Future<void> worker() async {
       while (true) {
@@ -1048,6 +1364,9 @@ Future<void> _runScan(
               updated,
               fresh,
               e.toString(),
+              false,
+              null,
+              listJobs.isNotEmpty,
             ),
           );
           continue;
@@ -1114,6 +1433,9 @@ Future<void> _runScan(
             updated,
             fresh,
             result.errorMessage,
+            false,
+            null,
+            listJobs.isNotEmpty,
           ),
         );
       }
@@ -1183,7 +1505,19 @@ Future<void> _runScan(
     }
 
     if (token.canCommit) {
-      stream.add(UpdateProgress(total, current, errors, updated));
+      stream.add(
+        UpdateProgress(
+          total,
+          current,
+          errors,
+          updated,
+          null,
+          null,
+          false,
+          null,
+          listJobs.isNotEmpty,
+        ),
+      );
     }
   } catch (e, s) {
     // _runScan is intentionally started in the background. Surface failures
@@ -1206,12 +1540,92 @@ Future<void> _runScan(
   }
 }
 
-Future<bool> recheckFavoriteComic(
+class FavoriteRecheckResult {
+  const FavoriteRecheckResult({
+    required this.succeeded,
+    this.found,
+    this.errorMessage,
+  });
+
+  final bool succeeded;
+  final bool? found;
+  final String? errorMessage;
+}
+
+Future<FavoriteRecheckResult> recheckFavoriteComicDetailed(
   String sourceKey,
   String comicId, {
   NetworkFavoriteCacheManager? cache,
 }) async {
   final manager = cache ?? NetworkFavoriteCacheManager();
+  final source = ComicSource.find(sourceKey);
+  final updateCheck = source?.favoriteData?.updateCheck;
+  if (updateCheck != null) {
+    final known = manager.getKnownFolderIds(sourceKey, comicId);
+    final folders = manager
+        .getAllCachedFolders()
+        .where((folder) => folder.sourceKey == sourceKey)
+        .where((folder) => known.isEmpty || known.contains(folder.folderId))
+        .toList();
+    if (folders.isEmpty) {
+      return const FavoriteRecheckResult(succeeded: false);
+    }
+    final folder = folders.first;
+    if (!manager.tryAcquireFullCacheLock(folder)) {
+      return const FavoriteRecheckResult(
+        succeeded: false,
+        errorMessage: 'A full favorite snapshot is already running',
+      );
+    }
+    final expectedEpoch = manager.captureFavoriteSessionEpoch(sourceKey);
+    try {
+      manager.recordFavoriteUpdateScanAttempt(folder);
+      final result = await updateCheck.load(folder.folderId);
+      if (!manager.isFavoriteSessionEpochCurrent(sourceKey, expectedEpoch)) {
+        return const FavoriteRecheckResult(
+          succeeded: false,
+          errorMessage: 'Favorite session changed',
+        );
+      }
+      if (result.error) {
+        manager.recordFavoriteUpdateScanFailure(folder);
+        return FavoriteRecheckResult(
+          succeeded: false,
+          errorMessage: result.errorMessage,
+        );
+      }
+      final found = result.data.comics.any((comic) => comic.id == comicId);
+      if (!manager.isFavoriteSessionEpochCurrent(sourceKey, expectedEpoch)) {
+        return const FavoriteRecheckResult(
+          succeeded: false,
+          errorMessage: 'Favorite session changed',
+        );
+      }
+      manager.applyCompleteFavoriteUpdateSnapshot(
+        source!.favoriteData!,
+        folder,
+        result.data,
+        completedAt: DateTime.now(),
+      );
+      manager.notifyCacheChanged();
+      return FavoriteRecheckResult(succeeded: true, found: found);
+    } catch (e, s) {
+      Log.error('Favorite list recheck', e.toString(), s);
+      if (!manager.isFavoriteSessionEpochCurrent(sourceKey, expectedEpoch)) {
+        return const FavoriteRecheckResult(
+          succeeded: false,
+          errorMessage: 'Favorite session changed',
+        );
+      }
+      manager.recordFavoriteUpdateScanFailure(folder);
+      return FavoriteRecheckResult(
+        succeeded: false,
+        errorMessage: e.toString(),
+      );
+    } finally {
+      manager.releaseFullCacheLock(folder);
+    }
+  }
   final folderIds = manager.getKnownFolderIds(sourceKey, comicId);
   FavoriteItemWithUpdateInfo? itemToCheck;
   NetworkFavoriteFolderRef? folderToCheck;
@@ -1240,7 +1654,20 @@ Future<bool> recheckFavoriteComic(
     succeeded = result.errorMessage == null;
   }
   manager.notifyCacheChanged();
-  return succeeded;
+  return FavoriteRecheckResult(succeeded: succeeded, found: succeeded);
+}
+
+Future<bool> recheckFavoriteComic(
+  String sourceKey,
+  String comicId, {
+  NetworkFavoriteCacheManager? cache,
+}) async {
+  final result = await recheckFavoriteComicDetailed(
+    sourceKey,
+    comicId,
+    cache: cache,
+  );
+  return result.succeeded;
 }
 
 Future<String> getUpdatedComicsAsJsonInFolders(

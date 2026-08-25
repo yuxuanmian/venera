@@ -257,6 +257,7 @@ void main() {
               followUpdatesEnabled: enabled,
               isFavorite: favorite,
               hasTrackedInfo: tracked,
+              usesListUpdateStrategy: false,
             ),
             enabled && favorite && tracked,
           );
@@ -279,6 +280,7 @@ void main() {
                 followUpdatesEnabled: true,
                 isFavorite: isFavorite,
                 hasTrackedInfo: true,
+                usesListUpdateStrategy: false,
               );
               return SingleChildScrollView(
                 scrollDirection: Axis.horizontal,

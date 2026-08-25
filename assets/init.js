@@ -1013,9 +1013,10 @@ let console = {
  * @param language {string?}
  * @param favoriteId {string?} - Only set this field if the comic is from favorites page
  * @param stars {number?} - 0-5, double
+ * @param favoriteUpdate {{marker: string, updateTime?: string, isNew?: boolean | null, metadata?: object}?}
  * @constructor
  */
-function Comic({id, title, subtitle, subTitle, cover, tags, description, maxPage, language, favoriteId, stars}) {
+function Comic({id, title, subtitle, subTitle, cover, tags, description, maxPage, language, favoriteId, stars, favoriteUpdate}) {
     this.id = id;
     this.title = title;
     this.subtitle = subtitle;
@@ -1027,6 +1028,7 @@ function Comic({id, title, subtitle, subTitle, cover, tags, description, maxPage
     this.language = language;
     this.favoriteId = favoriteId;
     this.stars = stars;
+    this.favoriteUpdate = favoriteUpdate;
 }
 
 /**

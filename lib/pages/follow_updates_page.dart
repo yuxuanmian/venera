@@ -153,10 +153,10 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
 
   bool get _baselineIncomplete {
     if (!_enabled) return false;
-    return NetworkFavoriteCacheManager().countUncheckedComicsInFolders(
-          getFollowUpdateFolders(),
-        ) >
-        0;
+    return hasPendingFollowUpdateWork(
+      mode: FollowUpdateMode.missing,
+      folders: getFollowUpdateFolders(),
+    );
   }
 
   @override
@@ -324,16 +324,25 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
                     ),
                     if (!starting)
                       Text(
-                        '@completed / @total checked'.tlParams({
-                          'completed': completed,
-                          'total': total,
-                        }),
+                        (status?.containsBatchWork == true
+                                ? '@completed / @total scan tasks'
+                                : '@completed / @total checked')
+                            .tlParams({'completed': completed, 'total': total}),
                         style: ts.s14,
                       ).paddingHorizontal(16).paddingTop(8),
                     if (status != null && status.currentComic != null)
                       Text(
                         'Checking: @title'.tlParams({
                           'title': status.currentComic!,
+                        }),
+                        style: ts.s12,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ).paddingHorizontal(16).paddingTop(4),
+                    if (status != null && status.isBatchWork)
+                      Text(
+                        'Scanning list: @title'.tlParams({
+                          'title': status.currentLabel ?? '-',
                         }),
                         style: ts.s12,
                         maxLines: 1,
@@ -654,16 +663,23 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
                   ),
                   if (!starting)
                     Text(
-                      '@completed / @total checked'.tlParams({
-                        'completed': completed,
-                        'total': total,
-                      }),
+                      (status?.containsBatchWork == true
+                              ? '@completed / @total scan tasks'
+                              : '@completed / @total checked')
+                          .tlParams({'completed': completed, 'total': total}),
                       style: ts.s16,
                     ).paddingTop(12),
                   if (status != null && status.currentComic != null)
                     Text(
                       'Checking: @title'.tlParams({
                         'title': status.currentComic!,
+                      }),
+                      style: ts.s14,
+                    ).paddingTop(8),
+                  if (status != null && status.isBatchWork)
+                    Text(
+                      'Scanning list: @title'.tlParams({
+                        'title': status.currentLabel ?? '-',
                       }),
                       style: ts.s14,
                     ).paddingTop(8),
@@ -846,10 +862,18 @@ abstract class FollowUpdatesService {
       (token) async {
         final cache = NetworkFavoriteCacheManager();
         final folders = getFollowUpdateFolders();
+        final listFolders = <NetworkFavoriteFolderRef>[];
+        final listSources = <String>{};
         final comics =
             <({String sourceKey, String comicId, String folderId})>[];
         final seen = <String>{};
         for (final folder in folders) {
+          final source = ComicSource.find(folder.sourceKey);
+          final updateCheck = source?.favoriteData?.updateCheck;
+          if (updateCheck != null) {
+            if (listSources.add(folder.sourceKey)) listFolders.add(folder);
+            continue;
+          }
           for (final comic in cache.getComicsWithUpdatesInfo(folder)) {
             final key = '${comic.sourceKey}\u0000${comic.id}';
             if (seen.add(key)) {
@@ -861,21 +885,110 @@ abstract class FollowUpdatesService {
             }
           }
         }
-        if (comics.isEmpty) return;
+        if (comics.isEmpty && listFolders.isEmpty) return;
         final random = math.Random();
         final count = math.min(5 + random.nextInt(6), comics.length);
         comics.shuffle(random);
         var updated = 0;
         var errors = 0;
         var completed = 0;
+        final total = count + listFolders.length;
         if (!token.canCommit) return;
         baselineStatus.value = BaselineStatus(
           isRunning: true,
-          total: count,
+          total: total,
           completed: 0,
           errors: 0,
           updated: 0,
+          containsBatchWork: listFolders.isNotEmpty,
         );
+        final expectedEpochs = <String, int>{
+          for (final folder in listFolders)
+            folder.sourceKey: cache.captureFavoriteSessionEpoch(
+              folder.sourceKey,
+            ),
+        };
+        for (final folder in listFolders) {
+          if (!token.canCommit) return;
+          if (!cache.tryAcquireFullCacheLock(folder)) {
+            completed++;
+            if (token.canCommit) {
+              baselineStatus.value = BaselineStatus(
+                isRunning: true,
+                total: total,
+                completed: completed,
+                errors: errors,
+                updated: updated,
+                isBatchWork: true,
+                currentLabel: '${folder.sourceKey}/${folder.folderId}',
+                containsBatchWork: true,
+              );
+            }
+            continue;
+          }
+          final source = ComicSource.find(folder.sourceKey);
+          final data = source?.favoriteData;
+          final updateCheck = data?.updateCheck;
+          final expectedEpoch = expectedEpochs[folder.sourceKey]!;
+          try {
+            if (data == null || updateCheck == null) {
+              errors++;
+            } else {
+              cache.recordFavoriteUpdateScanAttempt(folder);
+              final result = await updateCheck.load(folder.folderId);
+              if (!token.canCommit) return;
+              if (cache.isFavoriteSessionEpochCurrent(
+                folder.sourceKey,
+                expectedEpoch,
+              )) {
+                if (result.error) {
+                  cache.recordFavoriteUpdateScanFailure(folder);
+                  errors++;
+                } else if (cache.isFavoriteSessionEpochCurrent(
+                  folder.sourceKey,
+                  expectedEpoch,
+                )) {
+                  final applied = cache.applyCompleteFavoriteUpdateSnapshot(
+                    data,
+                    folder,
+                    result.data,
+                    completedAt: DateTime.now(),
+                  );
+                  updated += applied.updatedComicCount;
+                } else {
+                  // The account changed between the response and commit.
+                }
+              }
+            }
+          } catch (e, s) {
+            if (!token.canCommit) return;
+            if (cache.isFavoriteSessionEpochCurrent(
+              folder.sourceKey,
+              expectedEpoch,
+            )) {
+              Log.error('Follow updates random list refresh', e, s);
+              cache.recordFavoriteUpdateScanFailure(folder);
+              errors++;
+            } else {
+              // Session invalidation is a neutral skip; do not back off.
+            }
+          } finally {
+            cache.releaseFullCacheLock(folder);
+          }
+          completed++;
+          if (token.canCommit) {
+            baselineStatus.value = BaselineStatus(
+              isRunning: true,
+              total: total,
+              completed: completed,
+              errors: errors,
+              updated: updated,
+              isBatchWork: true,
+              currentLabel: '${folder.sourceKey}/${folder.folderId}',
+              containsBatchWork: true,
+            );
+          }
+        }
         for (final item in comics.take(count)) {
           if (!token.canCommit) return;
           final fresh = cache.getComicUpdateInfo(
@@ -904,11 +1017,12 @@ abstract class FollowUpdatesService {
           if (token.canCommit) {
             baselineStatus.value = BaselineStatus(
               isRunning: true,
-              total: count,
+              total: total,
               completed: completed,
               errors: errors,
               updated: updated,
               currentComic: fresh?.title,
+              containsBatchWork: listFolders.isNotEmpty,
             );
           }
         }
@@ -961,8 +1075,7 @@ abstract class FollowUpdatesService {
       Log.error('Follow updates task', e, s);
     } finally {
       if (identical(_activeTask, current)) {
-        final canRecordCompletion =
-            completedSuccessfully && token.canCommit;
+        final canRecordCompletion = completedSuccessfully && token.canCommit;
         _activeTask = null;
         _activeToken = null;
         _taskRunning = false;
@@ -1011,7 +1124,12 @@ abstract class FollowUpdatesService {
       _autoScanTimer = Timer(const Duration(seconds: 5), _tryStartAutoScan);
       return;
     }
-    if (cache.countPendingUncheckedComicsInFolders(folders) == 0) return;
+    if (!hasPendingFollowUpdateWork(
+      mode: FollowUpdateMode.missing,
+      folders: folders,
+    )) {
+      return;
+    }
     unawaited(_startTask(_runMissingOnly, cancelExisting: false));
   }
 
@@ -1034,6 +1152,7 @@ abstract class FollowUpdatesService {
         token,
         mode: FollowUpdateMode.regular,
         ignoreRetryAfter: true,
+        forceListSnapshots: true,
       ),
       cancelExisting: true,
     );
@@ -1062,12 +1181,14 @@ abstract class FollowUpdatesService {
     required FollowUpdateMode mode,
     bool ignoreRetryAfter = false,
     bool includeSuspect = false,
+    bool forceListSnapshots = false,
     List<NetworkFavoriteFolderRef>? folders,
   }) async {
     final effectiveFolders = folders ?? getFollowUpdateFolders();
-    final cache = NetworkFavoriteCacheManager();
     var errors = 0;
     var updated = 0;
+    var plannedTotal = 0;
+    var completed = 0;
     try {
       await for (final progress in scanFollowUpdates(
         effectiveFolders,
@@ -1075,11 +1196,14 @@ abstract class FollowUpdatesService {
         cancellationToken: token,
         ignoreRetryAfter: ignoreRetryAfter,
         includeSuspect: includeSuspect,
+        forceListSnapshots: forceListSnapshots,
       )) {
-        errors = progress.errors;
-        updated = progress.updated;
         // Empty queue: no plan, keep any previous UI state untouched.
         if (progress.total == 0) continue;
+        plannedTotal = progress.total;
+        completed = progress.current;
+        errors = progress.errors;
+        updated = progress.updated;
         // Cancellation stops publishing; the status is released by
         // [_startTask]'s cancel callback, never by a late frame here (it may
         // belong to a replacement task already).
@@ -1091,11 +1215,16 @@ abstract class FollowUpdatesService {
           errors: errors,
           updated: updated,
           currentComic: progress.comic?.title,
+          isBatchWork: progress.isBatchWork,
+          currentLabel: progress.currentLabel,
+          containsBatchWork: progress.containsBatchWork,
         );
       }
       if (!token.canCommit) return;
-      final remaining = cache.countUncheckedComicsInFolders(effectiveFolders);
-      if (remaining > 0) {
+      final remaining = mode == FollowUpdateMode.force
+          ? plannedTotal > 0 && completed < plannedTotal
+          : hasPendingFollowUpdateWork(mode: mode, folders: effectiveFolders);
+      if (remaining) {
         final last = baselineStatus.value;
         baselineStatus.value = BaselineStatus(
           isRunning: false,
@@ -1132,9 +1261,11 @@ abstract class FollowUpdatesService {
   /// force-check semantics.
   static Future<void> _runMissingOnly(ScanCancellationToken token) async {
     final folders = getFollowUpdateFolders();
-    final cache = NetworkFavoriteCacheManager();
     if (!token.canCommit ||
-        cache.countPendingUncheckedComicsInFolders(folders) == 0) {
+        !hasPendingFollowUpdateWork(
+          mode: FollowUpdateMode.missing,
+          folders: folders,
+        )) {
       return;
     }
     await _runScanWithStatus(token, mode: FollowUpdateMode.missing);
@@ -1181,7 +1312,11 @@ abstract class FollowUpdatesService {
     for (final key in enabled.whereType<String>()) {
       if (_taskRunning) return;
       final source = ComicSource.find(key);
-      if (source?.favoriteData == null || !source!.isLogged) continue;
+      if (source?.favoriteData == null ||
+          source!.favoriteData!.updateCheck != null ||
+          !source.isLogged) {
+        continue;
+      }
       sources.add(key);
     }
     await Future.wait([

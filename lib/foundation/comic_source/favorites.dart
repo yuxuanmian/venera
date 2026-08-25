@@ -8,6 +8,30 @@ typedef AddOrDelFavFunc =
       String? favId,
     );
 
+class FavoriteUpdateSnapshot {
+  final List<Comic> comics;
+  final int pageSize;
+  final int total;
+
+  const FavoriteUpdateSnapshot({
+    required this.comics,
+    required this.pageSize,
+    required this.total,
+  });
+}
+
+class FavoriteUpdateCheckData {
+  final String markerScheme;
+  final Duration scanInterval;
+  final Future<Res<FavoriteUpdateSnapshot>> Function([String? folderId]) load;
+
+  const FavoriteUpdateCheckData({
+    required this.markerScheme,
+    required this.scanInterval,
+    required this.load,
+  });
+}
+
 class FavoriteData {
   final String key;
 
@@ -38,6 +62,8 @@ class FavoriteData {
 
   final bool singleFolderForSingleComic;
 
+  final FavoriteUpdateCheckData? updateCheck;
+
   const FavoriteData({
     required this.key,
     required this.title,
@@ -49,6 +75,7 @@ class FavoriteData {
     this.addFolder,
     this.addOrDelFavorite,
     this.singleFolderForSingleComic = false,
+    this.updateCheck,
   });
 }
 

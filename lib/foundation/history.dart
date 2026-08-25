@@ -164,6 +164,9 @@ class History implements Comic {
   double? get stars => null;
 
   @override
+  FavoriteUpdateHint? get favoriteUpdate => null;
+
+  @override
   List<String>? get tags => null;
 
   @override

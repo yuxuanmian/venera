@@ -169,6 +169,41 @@ void main() {
     },
   );
 
+  testWidgets('clearing the cache discards stored pages and reloads page one', (
+    tester,
+  ) async {
+    final sourceKey = 'clear-generation-source';
+    final calls = <int, int>{};
+    final data = _pagingData(sourceKey, {
+      1: [_comic(sourceKey, 'fresh-page-one')],
+      2: [_comic(sourceKey, 'stale-page-two')],
+    }, calls);
+    final folder = NetworkFavoriteFolderRef(
+      sourceKey: sourceKey,
+      folderId: '',
+      title: sourceKey,
+    );
+    await cache.refreshPage(data, folder, 1);
+    await cache.refreshPage(data, folder, 2);
+    calls.clear();
+
+    final bucket = PageStorageBucket();
+    await pumpSource(tester, data, bucket);
+    await showPageTwo(tester);
+    expect(find.text('stale-page-two'), findsOneWidget);
+
+    final generation = cache.cacheGeneration;
+    cache.clearAllCache();
+    expect(cache.cacheGeneration, generation + 1);
+    await _pumpFrames(tester, count: 12);
+
+    expect(find.text('Page 1 / 2'), findsOneWidget);
+    expect(find.text('fresh-page-one'), findsOneWidget);
+    expect(find.text('stale-page-two'), findsNothing);
+    expect(calls[1], 1);
+    expect(calls[2], isNull);
+  });
+
   testWidgets(
     'same source and folder restores its page while another source is isolated',
     (tester) async {
@@ -218,6 +253,37 @@ void main() {
       expect(callsB, isEmpty);
     },
   );
+
+  testWidgets('search results use scroll storage separate from paging state', (
+    tester,
+  ) async {
+    const sourceKey = 'search-storage-source';
+    final calls = <int, int>{};
+    final data = _pagingData(sourceKey, {
+      1: [_comic(sourceKey, 'search-target')],
+    }, calls);
+    final folder = NetworkFavoriteFolderRef(
+      sourceKey: sourceKey,
+      folderId: '',
+      title: sourceKey,
+    );
+    await cache.refreshPage(data, folder, 1);
+
+    await pumpSource(tester, data, PageStorageBucket());
+    await tester.tap(find.byIcon(Icons.search));
+    await tester.pumpAndSettle();
+    expect(tester.testTextInput.isVisible, isTrue);
+    await tester.enterText(find.byType(TextField), 'target');
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).focusNode?.hasFocus,
+      isTrue,
+    );
+    expect(tester.testTextInput.isVisible, isTrue);
+    expect(find.text('search-target'), findsOneWidget);
+  });
 
   testWidgets(
     'cursor page one backfill preserves page two and its next cursor',

@@ -7,6 +7,7 @@ import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
+import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/network/app_dio.dart';
 import 'package:venera/network/cookie_jar.dart';
@@ -899,7 +900,7 @@ class _SliverComicSourceState extends State<_SliverComicSource> {
   Iterable<Widget> buildSourceSettings() sync* {
     // Try to get dynamic settings first (for getters), fall back to cached settings
     var settingsMap = source.getSettingsDynamic() ?? source.settings;
-    
+
     if (settingsMap == null) {
       return;
     } else if (source.data['settings'] == null) {
@@ -1063,6 +1064,9 @@ class _SliverComicSourceState extends State<_SliverComicSource> {
           source.data["account"] = null;
           source.account?.logout();
           source.saveData();
+          NetworkFavoriteCacheManager().invalidateFavoriteSessionForSource(
+            source.key,
+          );
           ComicSourceManager().notifyStateChange();
           setState(() {});
         },
@@ -1212,6 +1216,9 @@ class _LoginPageState extends State<_LoginPage> {
             loading = false;
           });
         } else {
+          NetworkFavoriteCacheManager().invalidateFavoriteSessionForSource(
+            widget.source.key,
+          );
           if (mounted) {
             context.pop();
           }
@@ -1228,6 +1235,9 @@ class _LoginPageState extends State<_LoginPage> {
         if (value) {
           widget.source.data['account'] = 'ok';
           widget.source.saveData();
+          NetworkFavoriteCacheManager().invalidateFavoriteSessionForSource(
+            widget.source.key,
+          );
           context.pop();
         } else {
           context.showMessage(message: "Invalid cookies".tl);
@@ -1284,6 +1294,9 @@ class _LoginPageState extends State<_LoginPage> {
     if (success) {
       widget.source.data['account'] = 'ok';
       widget.source.saveData();
+      NetworkFavoriteCacheManager().invalidateFavoriteSessionForSource(
+        widget.source.key,
+      );
       context.pop();
     }
   }
@@ -1302,6 +1315,9 @@ class _LoginPageState extends State<_LoginPage> {
       if (success) {
         widget.source.data['account'] = 'ok';
         widget.source.saveData();
+        NetworkFavoriteCacheManager().invalidateFavoriteSessionForSource(
+          widget.source.key,
+        );
         context.pop();
       }
     }

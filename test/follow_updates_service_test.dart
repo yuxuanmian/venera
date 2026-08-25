@@ -18,6 +18,23 @@ FavoriteItem _comic(String id) => FavoriteItem(
   tags: const ['tag'],
 );
 
+const _listSnapshotComic = Comic(
+  'Cached list comic',
+  'https://example.invalid/cached.jpg',
+  'cached-list-comic',
+  null,
+  <String>[],
+  '',
+  'force-list-source',
+  null,
+  null,
+  favoriteUpdate: FavoriteUpdateHint(
+    marker: 'chapter:m1',
+    isNew: false,
+    metadata: <String, dynamic>{'fullIsNew': false},
+  ),
+);
+
 FavoriteData _numericData(
   Future<Res<List<Comic>>> Function(int page, [String? folder]) loader,
 ) => FavoriteData(
@@ -29,6 +46,59 @@ FavoriteData _numericData(
   loadFolders: ([String? _]) async =>
       const Res(<String, String>{'remote': 'Remote'}),
 );
+
+FavoriteData _listData(
+  Future<Res<FavoriteUpdateSnapshot>> Function([String? folder]) loader,
+) => FavoriteData(
+  key: 'force-list-source',
+  title: 'Test source',
+  multiFolder: false,
+  loadComic: null,
+  loadNext: null,
+  updateCheck: FavoriteUpdateCheckData(
+    markerScheme: 'list-v1',
+    scanInterval: const Duration(hours: 12),
+    load: loader,
+  ),
+);
+
+ComicSource _listSource(FavoriteData data) {
+  return ComicSource(
+    'Test source',
+    data.key,
+    null,
+    null,
+    null,
+    data,
+    const [],
+    null,
+    null,
+    (_) async => const Res.error('unused in list-strategy test'),
+    null,
+    null,
+    null,
+    null,
+    '',
+    '',
+    '1.0.0',
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    false,
+    false,
+    null,
+    null,
+  );
+}
 
 ComicSource _detailSource(
   Future<Res<ComicDetails>> Function(String id) loader,
@@ -354,4 +424,48 @@ void main() {
     // The random subset is a completed run: status settles to null.
     await _waitUntil(() => FollowUpdatesService.baselineStatus.value == null);
   });
+
+  test(
+    'force scan clears baseline status after a list task completes',
+    () async {
+      var calls = 0;
+      const snapshot = FavoriteUpdateSnapshot(
+        comics: <Comic>[_listSnapshotComic],
+        pageSize: 15,
+        total: 1,
+      );
+      final data = _listData(([_]) async {
+        calls++;
+        return const Res(snapshot);
+      });
+      final source = _listSource(data);
+      source.data['account'] = <String, dynamic>{};
+      ComicSourceManager().add(source);
+      final previousFavorites = List<String>.from(
+        appdata.settings['favorites'] as List,
+      );
+      appdata.settings['favorites'] = [...previousFavorites, data.key];
+      addTearDown(() {
+        appdata.settings['favorites'] = previousFavorites;
+        ComicSourceManager().remove(data.key);
+      });
+
+      await cache.refreshFolders(data);
+      final folder = NetworkFavoriteFolderRef(
+        sourceKey: data.key,
+        folderId: '',
+      );
+      await cache.cacheAllPages(data, folder, isCanceled: () => false).drain();
+      // The initial snapshot only seeds the locally established folder. The
+      // assertion below must observe exactly one subsequent Force request.
+      calls = 0;
+      cache.clearScanRun();
+      FollowUpdatesService.baselineStatus.value = null;
+
+      await FollowUpdatesService.forceScanAll();
+
+      expect(calls, 1);
+      expect(FollowUpdatesService.baselineStatus.value, isNull);
+    },
+  );
 }

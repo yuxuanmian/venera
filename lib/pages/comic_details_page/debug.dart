@@ -65,12 +65,34 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
     return const JsonEncoder.withIndent('  ').convert(details.toJson());
   }
 
+  bool get _usesListUpdateStrategy =>
+      ComicSource.find(widget.sourceKey)?.favoriteData?.updateCheck != null;
+
+  NetworkFavoriteFolderRef? _debugFolder() {
+    final known = _cache.getKnownFolderIds(widget.sourceKey, widget.comicId);
+    for (final folder in _cache.getAllCachedFolders()) {
+      if (folder.sourceKey == widget.sourceKey &&
+          (known.isEmpty || known.contains(folder.folderId))) {
+        return folder;
+      }
+    }
+    return null;
+  }
+
   Future<void> _recheck() async {
     setState(() => _rechecking = true);
-    final ok = await recheckFavoriteComic(widget.sourceKey, widget.comicId);
+    final result = await recheckFavoriteComicDetailed(
+      widget.sourceKey,
+      widget.comicId,
+    );
     if (!mounted) return;
     setState(() => _rechecking = false);
-    context.showMessage(message: ok ? "Success".tl : "Failed".tl);
+    final message = !result.succeeded
+        ? "Failed".tl
+        : result.found == false
+        ? "Not present in favorite snapshot".tl
+        : "Success".tl;
+    context.showMessage(message: message);
   }
 
   void _clearSuspect() {
@@ -129,10 +151,11 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
               onPressed: _recheck,
               child: Text("Recheck Now".tl),
             ),
-            Button.outlined(
-              onPressed: _clearSuspect,
-              child: Text("Clear Suspected Removed".tl),
-            ),
+            if (!_usesListUpdateStrategy)
+              Button.outlined(
+                onPressed: _clearSuspect,
+                child: Text("Clear Suspected Removed".tl),
+              ),
             Button.outlined(onPressed: _copyJson, child: Text("Copy JSON".tl)),
           ],
         ),
@@ -141,6 +164,7 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
   }
 
   List<Widget> _buildFollowUpSection() {
+    if (_usesListUpdateStrategy) return _buildListFollowUpSection();
     final info = _updateInfo();
     return [
       ListTile(title: Text("Follow-up State".tl)),
@@ -172,6 +196,71 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
         _infoRow("Suspected Removed", _yesNo(info.isSuspectGone)),
       ],
     ];
+  }
+
+  List<Widget> _buildListFollowUpSection() {
+    final source = ComicSource.find(widget.sourceKey);
+    final updateCheck = source?.favoriteData?.updateCheck;
+    final folder = _debugFolder();
+    final scan = folder == null
+        ? null
+        : _cache.getFavoriteUpdateScanState(folder);
+    final info = _updateInfo();
+    final marker = info?.updateMarker == null
+        ? null
+        : decodeFollowUpdateMarker(info!.updateMarker!);
+    final metadata = info?.sourceUpdateMetadata;
+    String sourceBool(String key) {
+      final value = metadata?[key];
+      return value is bool ? _yesNo(value) : '-';
+    }
+
+    return [
+      ListTile(title: Text("Follow-up State".tl)),
+      _infoRow("Update Check Strategy", "Favorite list snapshot".tl),
+      _infoRow("Source is_new", sourceBool('isNew')),
+      _infoRow("Source full_is_new", sourceBool('fullIsNew')),
+      _infoRow("Marker Scheme", marker?.scheme ?? '-'),
+      _infoRow("Marker Value", marker?.value ?? '-'),
+      _infoRow(
+        "List Scan Interval",
+        updateCheck == null ? '-' : _formatInterval(updateCheck.scanInterval),
+      ),
+      _infoRow("Last List Scan Attempt", _fmt(scan?.lastAttemptAt)),
+      _infoRow("Last Successful List Scan", _fmt(scan?.lastSuccessAt)),
+      _infoRow(
+        "Next Automatic List Scan",
+        _nextListScanText(scan, updateCheck?.scanInterval),
+      ),
+      _infoRow("List Retry After", _fmt(scan?.retryAfter)),
+      _infoRow("List Check Failures", '${scan?.checkFailures ?? 0}'),
+      _infoRow(
+        "Last Snapshot Pages / Comics",
+        '${scan?.lastPageCount ?? 0} / ${scan?.lastComicCount ?? 0}',
+      ),
+      _infoRow(
+        "Has New Update",
+        info == null ? '-' : _yesNo(info.hasNewUpdate),
+      ),
+      _infoRow("Last Update Time", info?.updateTime ?? '-'),
+    ];
+  }
+
+  String _formatInterval(Duration interval) {
+    final seconds = interval.inSeconds;
+    if (seconds % 3600 == 0) return '${seconds ~/ 3600}h';
+    if (seconds % 60 == 0) return '${seconds ~/ 60}m';
+    return '${seconds}s';
+  }
+
+  String _nextListScanText(FavoriteUpdateScanState? scan, Duration? interval) {
+    if (scan?.lastSuccessAt == null || interval == null) return '-';
+    var next = scan!.lastSuccessAt!.add(interval);
+    if (scan.retryAfter != null && scan.retryAfter!.isAfter(next)) {
+      next = scan.retryAfter!;
+    }
+    final ready = !next.isAfter(DateTime.now());
+    return '${_fmt(next)} (${ready ? "Ready".tl : "In Cooldown".tl})';
   }
 
   String _nextCheckText(FavoriteItemWithUpdateInfo info) {
@@ -209,7 +298,16 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
       _infoRow("Source Key", widget.sourceKey),
       _infoRow("Source Name", source?.name ?? '-'),
       _infoRow("Logged In", _yesNo(source?.isLogged ?? false)),
-      _infoRow("Supports Detail Check", _yesNo(source?.loadComicInfo != null)),
+      _infoRow(
+        "Supports Detail Check",
+        _usesListUpdateStrategy ? '-' : _yesNo(source?.loadComicInfo != null),
+      ),
+      _infoRow(
+        "Update Check Strategy",
+        _usesListUpdateStrategy
+            ? "Favorite list snapshot".tl
+            : "Comic details".tl,
+      ),
       _infoRow("Follow Updates Enabled", _yesNo(followUpdatesEnabled)),
       _infoRow("Folders", foldersText),
     ];

@@ -356,12 +356,13 @@ class _CachedFavoriteFolderPage extends StatefulWidget {
 }
 
 class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
-  final _comicListKey = GlobalKey<ComicListState>();
+  GlobalKey<ComicListState> _comicListKey = GlobalKey<ComicListState>();
   final _searchController = TextEditingController();
   final _searchFocusNode = FocusNode();
   List<FavoriteItem>? _searchResults;
   bool _fullCacheRunning = false;
   bool _searchExpanded = false;
+  late int _cacheGeneration;
 
   bool get _usesPage => widget.data.loadComic != null;
 
@@ -372,6 +373,7 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
   @override
   void initState() {
     super.initState();
+    _cacheGeneration = _cache.cacheGeneration;
     _searchController.addListener(_onFilterChanged);
     _cache.addListener(_onCacheChanged);
   }
@@ -406,6 +408,14 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
 
   void _onCacheChanged() {
     if (!mounted) return;
+    final generation = _cache.cacheGeneration;
+    if (generation != _cacheGeneration) {
+      _cacheGeneration = generation;
+      _comicListKey = GlobalKey<ComicListState>();
+      _searchResults = null;
+      setState(() {});
+      return;
+    }
     _updateSearchResults();
   }
 
@@ -687,9 +697,10 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
       ],
     );
     return KeyedSubtree(
-      key: PageStorageKey<(String, String)>((
+      key: PageStorageKey<(String, String, int)>((
         widget.folder.sourceKey,
         widget.folder.folderId,
+        _cacheGeneration,
       )),
       child: comicList,
     );

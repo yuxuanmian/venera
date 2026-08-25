@@ -52,7 +52,12 @@ bool shouldShowFavoriteHotWindowAction({
   required bool followUpdatesEnabled,
   required bool isFavorite,
   required bool hasTrackedInfo,
-}) => followUpdatesEnabled && isFavorite && hasTrackedInfo;
+  required bool usesListUpdateStrategy,
+}) =>
+    followUpdatesEnabled &&
+    isFavorite &&
+    hasTrackedInfo &&
+    !usesListUpdateStrategy;
 
 bool _isAuthorNamespace(String namespace) {
   switch (namespace.trim().toLowerCase()) {
@@ -661,6 +666,8 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
                   followUpdatesEnabled: followUpdatesEnabled,
                   isFavorite: isFavorite,
                   hasTrackedInfo: followInfo != null,
+                  usesListUpdateStrategy:
+                      comicSource.favoriteData?.updateCheck != null,
                 ))
                   FavoriteHotWindowActionButton(
                     isLoading: isFavoriting,

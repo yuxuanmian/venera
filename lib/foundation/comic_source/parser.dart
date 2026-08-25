@@ -186,14 +186,20 @@ class ComicSourceParser {
   }
 
   bool _checkExists(String index) {
-    return JsEngine().runCode(
-      "ComicSource.sources.$_key.$index !== null "
-      "&& ComicSource.sources.$_key.$index !== undefined",
-    );
+    return _getValue(index) != null;
   }
 
   dynamic _getValue(String index) {
-    return JsEngine().runCode("ComicSource.sources.$_key.$index");
+    return JsEngine().runCode("""
+      (() => {
+        try {
+          const value = ComicSource.sources.$_key.$index;
+          return value === undefined ? null : value;
+        } catch (_) {
+          return null;
+        }
+      })()
+    """);
   }
 
   AccountConfig? _loadAccountConfig() {
@@ -797,10 +803,10 @@ class ComicSourceParser {
   FavoriteData? _loadFavoriteData() {
     if (!_checkExists("favorites")) return null;
 
-    final bool multiFolder = _getValue("favorites.multiFolder");
-    final bool? singleFolderForSingleComic = _getValue(
-      "favorites.singleFolderForSingleComic",
-    );
+    final bool multiFolder =
+        _getValue("favorites.multiFolder") as bool? ?? false;
+    final bool? singleFolderForSingleComic =
+        _getValue("favorites.singleFolderForSingleComic") as bool?;
 
     Future<Res<T>> retryZone<T>(Future<Res<T>> Function() func) async {
       if (!ComicSource.find(_key!)!.isLogged) {
@@ -894,6 +900,125 @@ class ComicSourceParser {
       };
     }
 
+    FavoriteUpdateCheckData? updateCheck;
+    final updateCheckValue = _getValue("favorites.updateCheck");
+    if (updateCheckValue != null) {
+      if (updateCheckValue is! Map) {
+        throw ComicSourceParseException(
+          "favorites.updateCheck must be an object",
+        );
+      }
+      final markerScheme = updateCheckValue["markerScheme"];
+      if (markerScheme is! String ||
+          !RegExp(r"^[A-Za-z0-9._-]{1,64}$").hasMatch(markerScheme) ||
+          markerScheme.contains("|")) {
+        throw ComicSourceParseException(
+          "favorites.updateCheck.markerScheme is invalid",
+        );
+      }
+      final rawInterval = updateCheckValue["scanInterval"];
+      if (rawInterval is! int || rawInterval < 900 || rawInterval > 2592000) {
+        throw ComicSourceParseException(
+          "favorites.updateCheck.scanInterval is invalid",
+        );
+      }
+      if (_getValue("favorites.updateCheck.load") == null) {
+        throw ComicSourceParseException(
+          "favorites.updateCheck.load is required",
+        );
+      }
+
+      FavoriteUpdateSnapshot parseSnapshot(dynamic value) {
+        if (value is! Map) {
+          throw ComicSourceParseException(
+            "favorites.updateCheck.load returned an invalid snapshot",
+          );
+        }
+        final rawComics = value["comics"];
+        final rawPageSize = value["pageSize"];
+        final rawTotal = value["total"];
+        if (rawComics is! List ||
+            rawPageSize is! int ||
+            rawPageSize < 1 ||
+            rawPageSize > 200 ||
+            rawTotal is! int ||
+            rawTotal != rawComics.length) {
+          throw ComicSourceParseException(
+            "favorites.updateCheck.load returned an invalid snapshot shape",
+          );
+        }
+
+        final ids = <String>{};
+        final comics = <Comic>[];
+        for (final rawComic in rawComics) {
+          if (rawComic is! Map) {
+            throw ComicSourceParseException(
+              "favorites.updateCheck.load returned an invalid comic",
+            );
+          }
+          final rawId = rawComic["id"];
+          if (rawId is! String || rawId.trim().isEmpty || !ids.add(rawId)) {
+            throw ComicSourceParseException(
+              "favorites.updateCheck.load returned duplicate or empty comic IDs",
+            );
+          }
+          final comic = Comic.fromJson(
+            Map<String, dynamic>.from(rawComic),
+            _key!,
+          );
+          final rawHint = rawComic["favoriteUpdate"];
+          final rawUpdateTime = rawHint is Map ? rawHint["updateTime"] : null;
+          if (rawHint is! Map ||
+              (rawUpdateTime != null && rawUpdateTime is! String)) {
+            throw ComicSourceParseException(
+              "favorites.updateCheck.load returned a comic without full update evidence",
+            );
+          }
+          final hint = comic.favoriteUpdate;
+          if (hint == null ||
+              hint.marker.trim().isEmpty ||
+              (hint.updateTime != null &&
+                  (hint.updateTime!.trim().isEmpty ||
+                      parseFollowUpdateActivityTime(
+                            hint.updateTime,
+                            now: DateTime.now(),
+                          ) ==
+                          null))) {
+            throw ComicSourceParseException(
+              "favorites.updateCheck.load returned a comic without full update evidence",
+            );
+          }
+          comics.add(comic);
+        }
+        return FavoriteUpdateSnapshot(
+          comics: comics,
+          pageSize: rawPageSize,
+          total: rawTotal,
+        );
+      }
+
+      updateCheck = FavoriteUpdateCheckData(
+        markerScheme: markerScheme,
+        scanInterval: Duration(seconds: rawInterval),
+        load: ([String? folderId]) async {
+          Future<Res<FavoriteUpdateSnapshot>> func() async {
+            try {
+              final res = await JsEngine().runCode("""
+                ComicSource.sources.$_key.favorites.updateCheck.load(
+                  ${jsonEncode(folderId)})
+              """);
+              return Res(parseSnapshot(res));
+            } catch (e, s) {
+              Log.error("Network", "$e\n$s");
+              return Res.error(e.toString());
+            }
+          }
+
+          return retryZone(func);
+        },
+      );
+    }
+
     Future<Res<Map<String, String>>> Function([String? comicId])? loadFolders;
 
     Future<Res<bool>> Function(String name)? addFolder;
@@ -959,6 +1084,7 @@ class ComicSourceParser {
       deleteFolder: deleteFolder,
       addOrDelFavorite: addOrDelFavFunc,
       singleFolderForSingleComic: singleFolderForSingleComic ?? false,
+      updateCheck: updateCheck,
     );
   }
 

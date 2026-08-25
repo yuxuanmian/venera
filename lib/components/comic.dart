@@ -1425,6 +1425,7 @@ class ComicListState extends State<ComicList> {
   Widget buildStaticMode() {
     final comics = _filterComics(widget.staticComics!);
     return SmoothCustomScrollView(
+      key: enablePageStorage ? PageStorageKey('scroll$_page') : null,
       controller: widget.controller,
       slivers: [
         if (widget.leadingSliver != null) widget.leadingSliver!,
