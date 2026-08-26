@@ -322,9 +322,30 @@ abstract mixin class _ComicPageActions {
     update();
   }
 
-  void onTapTag(String tag, String namespace) {
-    var target = comicSource.handleClickTagEvent?.call(namespace, tag);
-    var context = App.mainNavigatorKey!.currentContext!;
+  Future<void> onTapTag(String tag, String namespace) async {
+    final context = App.mainNavigatorKey?.currentContext;
+    if (context == null) return;
+    final handleClickTagEvent = comicSource.handleClickTagEvent;
+    if (handleClickTagEvent == null) return;
+
+    var searchTag = tag;
+    if (_isAuthorNamespace(namespace)) {
+      final resolution = resolveComicAuthorCopyCandidates(tag);
+      if (resolution.hasAlternatives) {
+        searchTag =
+            await showComicAuthorChoiceMenu(
+              context,
+              text: tag,
+              resolution: resolution,
+              title: 'Choose an author to search'.tl,
+              actionIcon: Icons.search,
+            ) ??
+            '';
+        if (searchTag.isEmpty || !context.mounted) return;
+      }
+    }
+
+    final target = handleClickTagEvent(namespace, searchTag);
     target?.jump(context);
   }
 

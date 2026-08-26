@@ -11,6 +11,7 @@ import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/image_provider/cached_image.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/pages/comic_details_page/comic_page.dart';
+import 'package:venera/pages/search_result_page.dart';
 import 'package:venera/utils/translations.dart';
 
 class _DetailFixture {
@@ -256,5 +257,96 @@ void main() {
       cid: 'comic-id',
     );
     expect(provider.url, 'https://example.com/new.jpg');
+  });
+
+  testWidgets('author search chooses a candidate before navigating', (
+    tester,
+  ) async {
+    const sourceKey = 'detail-author-search-source';
+    const comicId = 'author-search-comic';
+    final selectedQueries = <String>[];
+    final source = ComicSource(
+      'Author search source',
+      sourceKey,
+      null,
+      null,
+      null,
+      null,
+      const [],
+      SearchPageData(
+        null,
+        (keyword, page, options) async => const Res(<Comic>[]),
+        null,
+      ),
+      null,
+      (id) async => Res(
+        ComicDetails.fromJson({
+          'title': 'Author search comic',
+          'subtitle': 'Author',
+          'cover': '',
+          'description': '',
+          'tags': <String, List<String>>{
+            'artist': ['社团（作者）'],
+          },
+          'chapters': <String, String>{'chapter': 'Chapter'},
+          'sourceKey': sourceKey,
+          'comicId': id,
+        }),
+      ),
+      null,
+      null,
+      null,
+      null,
+      '',
+      '',
+      '1.0.0',
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      (namespace, tag) {
+        selectedQueries.add('$namespace:$tag');
+        return PageJumpTarget(sourceKey, 'search', {'text': '$namespace:$tag'});
+      },
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
+    );
+    ComicSourceManager().add(source);
+    addTearDown(() => ComicSourceManager().remove(sourceKey));
+
+    final navigatorKey = GlobalKey<NavigatorState>();
+    App.mainNavigatorKey = navigatorKey;
+    addTearDown(() => App.mainNavigatorKey = null);
+    await tester.pumpWidget(
+      MaterialApp(
+        navigatorKey: navigatorKey,
+        home: ComicPage(id: comicId, sourceKey: sourceKey),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.text('社团（作者）'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Choose an author to search'.tl), findsOneWidget);
+    await tester.tap(
+      find.byKey(const ValueKey('comic-author-copy-candidate-作者')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(selectedQueries, ['artist:作者']);
+    expect(find.byType(SearchResultPage), findsOneWidget);
+    final searchField = tester.widget<TextField>(find.byType(TextField));
+    expect(searchField.controller!.text, 'artist:作者');
   });
 }

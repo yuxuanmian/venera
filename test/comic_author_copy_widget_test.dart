@@ -88,6 +88,54 @@ void main() {
     expect(find.text('Choose an author to copy'.tl), findsNothing);
   });
 
+  testWidgets('author search chooser returns the selected candidate', (
+    tester,
+  ) async {
+    String? selectedText;
+    const text = '社团（作者）';
+    await tester.pumpWidget(
+      MaterialApp(
+        navigatorKey: App.rootNavigatorKey,
+        home: Scaffold(
+          body: Builder(
+            builder: (context) {
+              return TextButton(
+                onPressed: () async {
+                  selectedText = await showComicAuthorChoiceMenu(
+                    context,
+                    text: text,
+                    title: 'Choose an author to search'.tl,
+                    actionIcon: Icons.search,
+                  );
+                },
+                child: const Text('Search author'),
+              );
+            },
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Search author'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Choose an author to search'.tl), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('comic-author-copy-candidate-作者')),
+        matching: find.byIcon(Icons.search),
+      ),
+      findsOneWidget,
+    );
+
+    await tester.tap(
+      find.byKey(const ValueKey('comic-author-copy-candidate-作者')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(selectedText, '作者');
+  });
+
   testWidgets('author menu can copy outside and complete candidates', (
     tester,
   ) async {

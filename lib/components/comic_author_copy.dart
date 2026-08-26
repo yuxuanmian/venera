@@ -24,7 +24,7 @@ class ComicAuthorCopyTarget extends StatelessWidget {
       onTap: onTap,
       onLongPress: () {
         if (hasAlternatives) {
-          showComicAuthorCopyMenu(context, text: text);
+          showComicAuthorCopyMenu(context, text: text, resolution: resolution);
         } else {
           _copyComicAuthorText(context, text);
         }
@@ -41,7 +41,11 @@ class ComicAuthorCopyTarget extends StatelessWidget {
             text: "Copy".tl,
             onClick: () {
               if (hasAlternatives) {
-                showComicAuthorCopyMenu(context, text: text);
+                showComicAuthorCopyMenu(
+                  context,
+                  text: text,
+                  resolution: resolution,
+                );
               } else {
                 _copyComicAuthorText(context, text);
               }
@@ -62,14 +66,36 @@ void _copyComicAuthorText(BuildContext context, String text) {
 Future<void> showComicAuthorCopyMenu(
   BuildContext context, {
   required String text,
+  ComicAuthorCopyResolution? resolution,
 }) async {
-  final resolution = resolveComicAuthorCopyCandidates(text);
-  if (!resolution.hasAlternatives || !context.mounted) return;
+  final selectedText = await showComicAuthorChoiceMenu(
+    context,
+    text: text,
+    resolution: resolution,
+    title: 'Choose an author to copy'.tl,
+  );
+  if (selectedText == null) return;
+  await _copyComicAuthorCandidate(context, selectedText);
+}
+
+/// Opens the author candidate picker and returns the selected text.
+///
+/// The picker is shared by copy and author-search actions so both interactions
+/// keep the same candidate ordering, labels, and recommended item.
+Future<String?> showComicAuthorChoiceMenu(
+  BuildContext context, {
+  required String text,
+  ComicAuthorCopyResolution? resolution,
+  String? title,
+  IconData actionIcon = Icons.copy_outlined,
+}) async {
+  final resolved = resolution ?? resolveComicAuthorCopyCandidates(text);
+  if (!resolved.hasAlternatives || !context.mounted) return null;
 
   final dialogContext = _comicCopyDialogContext(context);
-  if (dialogContext == null || !dialogContext.mounted) return;
+  if (dialogContext == null || !dialogContext.mounted) return null;
 
-  await showDialog<void>(
+  return showDialog<String>(
     context: dialogContext,
     useRootNavigator: true,
     builder: (dialogContext) {
@@ -88,23 +114,22 @@ Future<void> showComicAuthorCopyMenu(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Choose an author to copy'.tl,
+                  title ?? 'Choose an author to copy'.tl,
                   style: Theme.of(dialogContext).textTheme.titleLarge,
                 ),
                 const SizedBox(height: 12),
                 Flexible(
                   child: ListView.separated(
                     shrinkWrap: true,
-                    itemCount: resolution.candidates.length,
+                    itemCount: resolved.candidates.length,
                     separatorBuilder: (_, _) => const SizedBox(height: 6),
                     itemBuilder: (context, index) {
-                      final candidate = resolution.candidates[index];
+                      final candidate = resolved.candidates[index];
                       return _ComicAuthorCopyCandidateTile(
                         candidate: candidate,
-                        onTap: () => _copyComicAuthorCandidate(
-                          dialogContext,
-                          candidate.text,
-                        ),
+                        actionIcon: actionIcon,
+                        onTap: () =>
+                            Navigator.of(dialogContext).pop(candidate.text),
                       );
                     },
                   ),
@@ -119,17 +144,15 @@ Future<void> showComicAuthorCopyMenu(
 }
 
 Future<void> _copyComicAuthorCandidate(
-  BuildContext dialogContext,
+  BuildContext context,
   String text,
 ) async {
   try {
     await Clipboard.setData(ClipboardData(text: text));
-    if (!dialogContext.mounted) return;
-    Navigator.of(dialogContext).pop();
     App.rootContext.showMessage(message: 'Copied'.tl);
   } catch (_) {
-    if (dialogContext.mounted) {
-      dialogContext.showMessage(message: 'Error'.tl);
+    if (context.mounted) {
+      context.showMessage(message: 'Error'.tl);
     }
   }
 }
@@ -137,10 +160,12 @@ Future<void> _copyComicAuthorCandidate(
 class _ComicAuthorCopyCandidateTile extends StatelessWidget {
   const _ComicAuthorCopyCandidateTile({
     required this.candidate,
+    required this.actionIcon,
     required this.onTap,
   });
 
   final ComicAuthorCopyCandidate candidate;
+  final IconData actionIcon;
   final VoidCallback onTap;
 
   @override
@@ -201,7 +226,7 @@ class _ComicAuthorCopyCandidateTile extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              const Icon(Icons.copy_outlined, size: 20),
+              Icon(actionIcon, size: 20),
             ],
           ),
         ),

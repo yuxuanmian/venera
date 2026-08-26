@@ -527,48 +527,69 @@ class SearchOptionWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        ListTile(
-          contentPadding: EdgeInsets.zero,
-          title: Text(option.label.ts(sourceKey)),
-        ),
-        if (option.type == 'select')
-          Wrap(
-            runSpacing: 8,
-            spacing: 8,
-            children: option.options.entries.map((e) {
-              return OptionChip(
-                text: e.value.ts(sourceKey),
-                isSelected: value == e.key,
+    Widget buildSelectOptions({required bool multiSelect}) {
+      final entries = option.options.entries.toList();
+      return SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (var index = 0; index < entries.length; index++) ...[
+              if (index > 0) const SizedBox(width: 8),
+              OptionChip(
+                text: entries[index].value.ts(sourceKey),
+                isSelected: multiSelect
+                    ? (jsonDecode(value) as List).contains(entries[index].key)
+                    : value == entries[index].key,
                 onTap: () {
-                  onChanged(e.key);
-                },
-              );
-            }).toList(),
-          ),
-        if (option.type == 'multi-select')
-          Wrap(
-            runSpacing: 8,
-            spacing: 8,
-            children: option.options.entries.map((e) {
-              return OptionChip(
-                text: e.value.ts(sourceKey),
-                isSelected: (jsonDecode(value) as List).contains(e.key),
-                onTap: () {
+                  if (!multiSelect) {
+                    onChanged(entries[index].key);
+                    return;
+                  }
                   var list = jsonDecode(value) as List;
-                  if (list.contains(e.key)) {
-                    list.remove(e.key);
+                  if (list.contains(entries[index].key)) {
+                    list.remove(entries[index].key);
                   } else {
-                    list.add(e.key);
+                    list.add(entries[index].key);
                   }
                   onChanged(jsonEncode(list));
                 },
-              );
-            }).toList(),
+              ),
+            ],
+          ],
+        ),
+      );
+    }
+
+    final isMultiSelect = option.type == 'multi-select';
+    final isSelect = option.type == 'select' || isMultiSelect;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (isSelect)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 120),
+                  child: Text(
+                    option.label.ts(sourceKey),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(child: buildSelectOptions(multiSelect: isMultiSelect)),
+              ],
+            ),
           ),
-        if (option.type == 'dropdown')
+        if (option.type == 'dropdown') ...[
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: Text(option.label.ts(sourceKey)),
+          ),
           Select(
             current: option.options[value],
             values: option.options.values.toList(),
@@ -577,6 +598,7 @@ class SearchOptionWidget extends StatelessWidget {
             },
             minWidth: 96,
           ),
+        ],
       ],
     );
   }
