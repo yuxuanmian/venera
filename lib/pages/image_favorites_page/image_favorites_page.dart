@@ -308,6 +308,7 @@ class _ImageFavoritesPageState extends State<ImageFavoritesPage> {
     return PopScope(
       canPop: !multiSelectMode && !searchMode,
       onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
         if (multiSelectMode) {
           setState(() {
             multiSelectMode = false;

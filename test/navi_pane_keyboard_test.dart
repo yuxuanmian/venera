@@ -58,6 +58,42 @@ void main() {
       300 / tester.view.devicePixelRatio,
     );
   });
+
+  testWidgets('tab content keeps the app bar top inset removed', (
+    tester,
+  ) async {
+    final probe = _Probe();
+    final observer = NaviObserver();
+    final navigatorKey = GlobalKey<NavigatorState>();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MediaQuery(
+          data: const MediaQueryData(
+            size: Size(360, 800),
+            padding: EdgeInsets.only(top: 24),
+            viewPadding: EdgeInsets.only(top: 24),
+          ),
+          child: NaviPane(
+            paneItems: [
+              PaneItemEntry(
+                label: 'Favorites',
+                icon: Icons.favorite_border,
+                activeIcon: Icons.favorite,
+              ),
+            ],
+            paneActions: const [],
+            pageBuilder: (_) => probe,
+            observer: observer,
+            navigatorKey: navigatorKey,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(probe.lastPaddingTop, 0);
+  });
 }
 
 /// Page content probe: records how often it builds and the bottom viewInsets
@@ -74,6 +110,7 @@ class _ProbeState extends State<_Probe> {
   Widget build(BuildContext context) {
     _ProbeStats.builds++;
     _ProbeStats.lastInsets = MediaQuery.of(context).viewInsets.bottom;
+    _ProbeStats.lastPaddingTop = MediaQuery.of(context).padding.top;
     return const SizedBox.expand();
   }
 }
@@ -82,10 +119,14 @@ extension on _Probe {
   int get builds => _ProbeStats.builds;
 
   double get lastViewInsetsBottom => _ProbeStats.lastInsets;
+
+  double get lastPaddingTop => _ProbeStats.lastPaddingTop;
 }
 
 abstract final class _ProbeStats {
   static int builds = 0;
 
   static double lastInsets = 0;
+
+  static double lastPaddingTop = 0;
 }

@@ -728,23 +728,32 @@ class _NaviMainViewState extends State<_NaviMainView> {
   @override
   Widget build(BuildContext context) {
     var shouldShowAppBar = state.controller.value < 2;
-    Widget pageContent = state.buildMainViewContent();
+    final ambientMediaQuery = MediaQuery.of(context);
     // While another route (e.g. the search page with its keyboard) covers the
     // tab content, the tabs are invisible: drop the bottom viewInsets from
     // their MediaQuery so the keyboard show/hide animation does not rebuild
     // this whole subtree on every frame. When the tabs are the top-most route
     // (e.g. the inline search field of the favorites tab), keep the insets so
     // the keyboard resize still applies.
+    var pageMediaQuery = ambientMediaQuery.removePadding(
+      removeTop: shouldShowAppBar,
+    );
     if (state.widget.observer.routes.length > 1) {
-      pageContent = MediaQuery.removeViewInsets(
-        context: context,
+      pageMediaQuery = pageMediaQuery.removeViewInsets(
         removeLeft: true,
         removeTop: true,
         removeRight: true,
         removeBottom: true,
-        child: pageContent,
       );
     }
+    // Keep the direct child of AnimatedSwitcher the same type while a detail
+    // route is pushed or popped. Changing between a bare page and a
+    // MediaQuery wrapper would replace the page subtree and lose state such as
+    // an inline favorites search controller.
+    final pageContent = MediaQuery(
+      data: pageMediaQuery,
+      child: state.buildMainViewContent(),
+    );
     return Column(
       children: [
         if (shouldShowAppBar) state.buildTop().paddingTop(context.padding.top),

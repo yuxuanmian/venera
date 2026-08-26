@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:venera/components/components.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
@@ -284,6 +285,98 @@ void main() {
     expect(tester.testTextInput.isVisible, isTrue);
     expect(find.text('search-target'), findsOneWidget);
   });
+
+  testWidgets(
+    'main navigation preserves cached favorite search after opening detail',
+    (tester) async {
+      const sourceKey = 'main-navigation-search-source';
+      final calls = <int, int>{};
+      final data = _pagingData(sourceKey, {
+        1: [_comic(sourceKey, 'search-target')],
+      }, calls);
+      final folder = NetworkFavoriteFolderRef(
+        sourceKey: sourceKey,
+        folderId: '',
+        title: sourceKey,
+      );
+      await cache.refreshPage(data, folder, 1);
+
+      final observer = NaviObserver();
+      final navigatorKey = GlobalKey<NavigatorState>();
+      App.mainNavigatorKey = navigatorKey;
+      await tester.pumpWidget(
+        MaterialApp(
+          navigatorKey: App.rootNavigatorKey,
+          home: NaviPane(
+            paneItems: [
+              PaneItemEntry(
+                label: 'Favorites',
+                icon: Icons.favorite_border,
+                activeIcon: Icons.favorite,
+              ),
+            ],
+            paneActions: const [],
+            pageBuilder: (_) => NetworkFavoritePage(data: data),
+            observer: observer,
+            navigatorKey: navigatorKey,
+          ),
+        ),
+      );
+      await _pumpFrames(tester);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Search'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'target');
+      await _pumpFrames(tester);
+      expect(find.text('search-target'), findsOneWidget);
+
+      final detailRoute = navigatorKey.currentState!.push<void>(
+        MaterialPageRoute<void>(
+          builder: (context) => Scaffold(
+            appBar: AppBar(
+              leading: IconButton(
+                key: const ValueKey('detail-back'),
+                onPressed: () => Navigator.maybePop(context),
+                icon: const Icon(Icons.arrow_back),
+              ),
+              title: const Text('detail'),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('detail'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('detail-back')));
+      await detailRoute;
+      await _pumpFrames(tester, count: 20);
+
+      expect(find.byType(TextField), findsOneWidget);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'target',
+      );
+      expect(find.text('search-target'), findsOneWidget);
+
+      final secondDetailRoute = navigatorKey.currentState!.push<void>(
+        MaterialPageRoute<void>(
+          builder: (_) => const Scaffold(body: Text('detail-again')),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('detail-again'), findsOneWidget);
+      navigatorKey.currentState!.pop();
+      await secondDetailRoute;
+      await _pumpFrames(tester, count: 20);
+
+      expect(find.byType(TextField), findsOneWidget);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'target',
+      );
+      expect(find.text('search-target'), findsOneWidget);
+    },
+  );
 
   testWidgets(
     'cursor page one backfill preserves page two and its next cursor',
