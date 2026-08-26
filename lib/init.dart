@@ -105,9 +105,9 @@ void _checkOldConfigs() {
   if (appdata.settings['comicSourceListUrl'].toString().contains(
     "git.nyne.dev",
   )) {
-    // migrate to jsdelivr cdn
+    // migrate legacy source list URL
     appdata.settings['comicSourceListUrl'] =
-        "https://cdn.jsdelivr.net/gh/venera-app/venera-configs@main/index.json";
+        "https://raw.githubusercontent.com/yuxuanmian/venera-configs/yxm/index.json";
     appdata.saveData();
   }
 }

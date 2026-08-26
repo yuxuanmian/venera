@@ -37,12 +37,12 @@ class ImageFavoritesProvider
     var localImage = await getImageFromLocal();
     checkStop?.call();
     if (localImage != null) {
-      return (bytes: localImage, cacheKey: null);
+      return LoadResult(bytes: localImage, cacheKey: null);
     }
     var cacheImage = await readFromCache();
     checkStop?.call();
     if (cacheImage != null) {
-      return (bytes: cacheImage, cacheKey: null);
+      return LoadResult(bytes: cacheImage, cacheKey: null);
     }
     var gotImageKey = false;
     if (imageKey == "") {
@@ -62,7 +62,7 @@ class ImageFavoritesProvider
       }
     }
     await writeToCache(image);
-    return (
+    return LoadResult(
       bytes: image,
       cacheKey: ImageDownloader.comicImageCacheKey(
         imageKey,

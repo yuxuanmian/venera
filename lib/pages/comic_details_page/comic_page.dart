@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ui';
-import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:flutter/foundation.dart' show kDebugMode, visibleForTesting;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:photo_view/photo_view.dart';
@@ -78,6 +78,15 @@ String _briefLoadError(Object? error) {
   return message.length <= 160 ? message : '${message.substring(0, 160)}...';
 }
 
+@visibleForTesting
+String selectComicCoverUrl(String? widgetCover, String comicCover) {
+  final loadedCover = comicCover.trim();
+  if (loadedCover.isNotEmpty) {
+    return loadedCover;
+  }
+  return (widgetCover ?? '').trim();
+}
+
 List<String> _collectKnownAuthorNames(ComicDetails comic) {
   final names = <String>[];
   for (final entry in comic.tags.entries) {
@@ -116,6 +125,8 @@ class ComicPage extends StatefulWidget {
 
 class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     with _ComicPageActions {
+  String get _comicCoverUrl => selectComicCoverUrl(widget.cover, comic.cover);
+
   @override
   History? history;
 
@@ -564,7 +575,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
                 clipBehavior: Clip.antiAlias,
                 child: AnimatedImage(
                   image: CachedImageProvider(
-                    widget.cover ?? comic.cover,
+                    _comicCoverUrl,
                     sourceKey: comic.sourceKey,
                     cid: comic.id,
                   ),
@@ -1010,7 +1021,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
 
   void _viewCover(BuildContext context) {
     final imageProvider = CachedImageProvider(
-      widget.cover ?? comic.cover,
+      _comicCoverUrl,
       sourceKey: comic.sourceKey,
       cid: comic.id,
     );
@@ -1027,7 +1038,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   void _saveCover(BuildContext context) async {
     try {
       final imageProvider = CachedImageProvider(
-        widget.cover ?? comic.cover,
+        _comicCoverUrl,
         sourceKey: comic.sourceKey,
         cid: comic.id,
       );

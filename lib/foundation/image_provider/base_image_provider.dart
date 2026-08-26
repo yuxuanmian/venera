@@ -1,4 +1,4 @@
-import 'dart:async' show Future, StreamController, scheduleMicrotask;
+import 'dart:async' show Future, FutureOr, StreamController, scheduleMicrotask;
 import 'dart:convert';
 import 'dart:math';
 import 'dart:ui' as ui show Codec;
@@ -9,11 +9,47 @@ import 'package:flutter/material.dart';
 import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/log.dart';
 
-/// Result of a provider [BaseImageProvider.load] call: the image bytes plus
-/// the disk cache key ([CacheManager]) the bytes came from, if any. On
-/// decode failure the entry is deleted so the next load re-downloads instead
-/// of serving the corrupted bytes forever.
-typedef LoadResult = ({Uint8List bytes, String? cacheKey});
+/// Result of a provider [BaseImageProvider.load] call.
+///
+/// [bytes] and [cacheKey] retain the original provider contract. The optional
+/// callbacks let a provider keep post-decode side effects and decode retries
+/// tied to the exact bytes/URL that produced this result.
+class LoadResult {
+  const LoadResult({
+    required this.bytes,
+    required this.cacheKey,
+    this.onDecodeSuccess,
+    this.reloadAfterDecodeFailure,
+  });
+
+  final Uint8List bytes;
+  final String? cacheKey;
+  final FutureOr<void> Function()? onDecodeSuccess;
+  final Future<LoadResult> Function()? reloadAfterDecodeFailure;
+
+  static const _notProvided = Object();
+
+  LoadResult copyWith({
+    Uint8List? bytes,
+    Object? cacheKey = _notProvided,
+    Object? onDecodeSuccess = _notProvided,
+    Object? reloadAfterDecodeFailure = _notProvided,
+  }) {
+    return LoadResult(
+      bytes: bytes ?? this.bytes,
+      cacheKey: identical(cacheKey, _notProvided)
+          ? this.cacheKey
+          : cacheKey as String?,
+      onDecodeSuccess: identical(onDecodeSuccess, _notProvided)
+          ? this.onDecodeSuccess
+          : onDecodeSuccess as FutureOr<void> Function()?,
+      reloadAfterDecodeFailure:
+          identical(reloadAfterDecodeFailure, _notProvided)
+          ? this.reloadAfterDecodeFailure
+          : reloadAfterDecodeFailure as Future<LoadResult> Function()?,
+    );
+  }
+}
 
 abstract class BaseImageProvider<T extends BaseImageProvider<T>>
     extends ImageProvider<T> {
@@ -97,36 +133,41 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
       // error is surfaced instead of looping forever.
       var decodeFailures = 0;
 
-      while (data == null && !stop) {
-        try {
-          data = await load(chunkEvents, () {
-            if (stop) {
-              throw const _ImageLoadingStopException();
+      while (!stop) {
+        if (data == null) {
+          try {
+            data = await load(chunkEvents, () {
+              if (stop) {
+                throw const _ImageLoadingStopException();
+              }
+            });
+          } on _ImageLoadingStopException {
+            rethrow;
+          } catch (e) {
+            if (!retryLoadErrors) {
+              rethrow;
             }
-          });
-        } on _ImageLoadingStopException {
-          rethrow;
-        } catch (e) {
-          if (e is DioException && e.type == DioExceptionType.cancel) {
-            // A cancelled image load must not be retried.
-            rethrow;
-          }
-          if (e.toString().contains("Invalid Status Code: 404")) {
-            rethrow;
-          }
-          if (e.toString().contains("Invalid Status Code: 403")) {
-            rethrow;
-          }
-          if (e.toString().contains("handshake")) {
-            if (retryTime < 5) {
-              retryTime = 5;
+            if (e is DioException && e.type == DioExceptionType.cancel) {
+              // A cancelled image load must not be retried.
+              rethrow;
             }
+            if (e.toString().contains("Invalid Status Code: 404")) {
+              rethrow;
+            }
+            if (e.toString().contains("Invalid Status Code: 403")) {
+              rethrow;
+            }
+            if (e.toString().contains("handshake")) {
+              if (retryTime < 5) {
+                retryTime = 5;
+              }
+            }
+            retryTime <<= 1;
+            if (retryTime > (1 << 3) || stop) {
+              rethrow;
+            }
+            await Future.delayed(Duration(seconds: retryTime));
           }
-          retryTime <<= 1;
-          if (retryTime > (1 << 3) || stop) {
-            rethrow;
-          }
-          await Future.delayed(Duration(seconds: retryTime));
         }
 
         if (data == null) {
@@ -143,7 +184,20 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
 
         try {
           final buffer = await ImmutableBuffer.fromUint8List(data.bytes);
-          return await decode(buffer, getTargetSize: _getTargetSize);
+          final codec = await decode(buffer, getTargetSize: _getTargetSize);
+          final onDecodeSuccess = data.onDecodeSuccess;
+          if (onDecodeSuccess != null) {
+            try {
+              await onDecodeSuccess();
+            } catch (callbackError, callbackStackTrace) {
+              Log.error(
+                "Image decode success callback",
+                callbackError,
+                callbackStackTrace,
+              );
+            }
+          }
+          return codec;
         } catch (e) {
           // The bytes could not be decoded. Purge the exact disk cache entry
           // they came from (the provider key is an identity key and does NOT
@@ -165,11 +219,19 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
             }
           }
           decodeFailures++;
-          if (cacheKey == null || decodeFailures >= 2 || stop) {
+          if (decodeFailures >= 2 || stop) {
             rethrow;
           }
-          // The poisoned entry is gone; reload to fetch fresh bytes.
-          data = null;
+          final reloadAfterDecodeFailure = data.reloadAfterDecodeFailure;
+          if (reloadAfterDecodeFailure != null) {
+            data = await reloadAfterDecodeFailure();
+          } else {
+            if (cacheKey == null) {
+              rethrow;
+            }
+            // The poisoned entry is gone; reload to fetch fresh bytes.
+            data = null;
+          }
         }
       }
 
@@ -196,6 +258,10 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
     StreamController<ImageChunkEvent> chunkEvents,
     void Function() checkStop,
   );
+
+  /// Whether failures from [load] should use the generic image retry policy.
+  /// Providers with their own bounded recovery state machine can disable it.
+  bool get retryLoadErrors => true;
 
   String get key;
 

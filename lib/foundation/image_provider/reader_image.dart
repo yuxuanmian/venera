@@ -83,7 +83,7 @@ class ReaderImageProvider
     if (appdata.settings['enableCustomImageProcessing']) {
       var script = appdata.settings['customImageProcessing'].toString();
       if (!script.contains('function processImage')) {
-        return (bytes: imageBytes, cacheKey: cacheKey);
+        return LoadResult(bytes: imageBytes, cacheKey: cacheKey);
       }
       var func = JsEngine().runCode('''
         (() => {
@@ -138,7 +138,7 @@ class ReaderImageProvider
         }
       }
     }
-    return (bytes: imageBytes!, cacheKey: cacheKey);
+    return LoadResult(bytes: imageBytes!, cacheKey: cacheKey);
   }
 
   @override

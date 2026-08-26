@@ -303,6 +303,42 @@ class HistoryManager with ChangeNotifier {
     notifyListeners();
   }
 
+  /// Updates only a history cover when the persisted value is still the one
+  /// observed by the caller. This must never create a missing history row.
+  bool updateCoverIfUnchanged({
+    required String id,
+    required ComicType type,
+    required String expectedCover,
+    required String newCover,
+  }) {
+    if (newCover.isEmpty || newCover == expectedCover) {
+      return false;
+    }
+
+    _db.execute(
+      '''
+      UPDATE history
+      SET cover = ?
+      WHERE id = ? AND type = ? AND cover = ?;
+      ''',
+      [newCover, id, type.value, expectedCover],
+    );
+    final changes = _db.select('SELECT changes();').first[0] as int;
+    if (changes != 1) {
+      return false;
+    }
+
+    final cachedHistory = cachedHistories[id];
+    if (cachedHistory != null &&
+        cachedHistory.id == id &&
+        cachedHistory.type == type &&
+        cachedHistory.cover == expectedCover) {
+      cachedHistory.cover = newCover;
+    }
+    notifyListeners();
+    return true;
+  }
+
   void clearHistory() {
     _db.execute("delete from history;");
     updateCache();

@@ -8,6 +8,7 @@ import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/history.dart';
+import 'package:venera/foundation/image_provider/cached_image.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/pages/comic_details_page/comic_page.dart';
 import 'package:venera/utils/translations.dart';
@@ -229,5 +230,31 @@ void main() {
       NetworkFavoriteCacheManager().isFavoriteKnown(sourceKey, comicId),
       isFalse,
     );
+  });
+
+  test('loaded comic cover takes priority over the widget placeholder', () {
+    expect(
+      selectComicCoverUrl(
+        '  https://example.com/old.jpg  ',
+        '  https://example.com/new.jpg  ',
+      ),
+      'https://example.com/new.jpg',
+    );
+    expect(
+      selectComicCoverUrl('  https://example.com/old.jpg  ', '   '),
+      'https://example.com/old.jpg',
+    );
+    expect(selectComicCoverUrl('   ', '  '), '');
+    expect(selectComicCoverUrl(null, '  '), '');
+
+    final provider = CachedImageProvider(
+      selectComicCoverUrl(
+        '  https://example.com/old.jpg  ',
+        '  https://example.com/new.jpg  ',
+      ),
+      sourceKey: 'detail-source',
+      cid: 'comic-id',
+    );
+    expect(provider.url, 'https://example.com/new.jpg');
   });
 }

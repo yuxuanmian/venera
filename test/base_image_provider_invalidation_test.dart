@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -18,7 +19,7 @@ class _PoisonedProvider extends BaseImageProvider<_PoisonedProvider> {
 
   @override
   Future<LoadResult> load(chunkEvents, checkStop) async {
-    return (bytes: bytes, cacheKey: cacheKey);
+    return LoadResult(bytes: bytes, cacheKey: cacheKey);
   }
 
   @override
@@ -30,6 +31,49 @@ class _PoisonedProvider extends BaseImageProvider<_PoisonedProvider> {
   String get key => 'poisoned-test-provider';
 }
 
+final Uint8List _validImageBytes = Uint8List.fromList(
+  base64Decode(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  ),
+);
+
+class _DecodeReloadProvider extends BaseImageProvider<_DecodeReloadProvider> {
+  _DecodeReloadProvider(this.reloadBytes);
+
+  final Uint8List reloadBytes;
+  var loadCalls = 0;
+  var exactReloadCalls = 0;
+  var onDecodeSuccessCalls = 0;
+
+  LoadResult _result(Uint8List bytes, {required bool canReload}) {
+    return LoadResult(
+      bytes: bytes,
+      cacheKey: 'decode-reload-test-cache',
+      onDecodeSuccess: () => onDecodeSuccessCalls++,
+      reloadAfterDecodeFailure: canReload
+          ? () async {
+              exactReloadCalls++;
+              return _result(reloadBytes, canReload: false);
+            }
+          : null,
+    );
+  }
+
+  @override
+  Future<LoadResult> load(chunkEvents, checkStop) async {
+    loadCalls++;
+    return _result(Uint8List.fromList([1, 2, 3]), canReload: true);
+  }
+
+  @override
+  Future<_DecodeReloadProvider> obtainKey(ImageConfiguration configuration) {
+    return SynchronousFuture(this);
+  }
+
+  @override
+  String get key => 'decode-reload-test-provider-${reloadBytes.length}';
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -37,6 +81,7 @@ void main() {
   late CacheManager manager;
 
   setUp(() {
+    PaintingBinding.instance.imageCache.clear();
     tempDir = Directory.systemTemp.createTempSync('venera_invalidation_test');
     manager = CacheManager.test(
       cachePath: '${tempDir.path}/cache',
@@ -47,6 +92,7 @@ void main() {
   });
 
   tearDown(() {
+    PaintingBinding.instance.imageCache.clear();
     CacheManager.instance = null;
     manager.dispose();
     tempDir.deleteSync(recursive: true);
@@ -59,7 +105,7 @@ void main() {
   /// complete under the test's fake-async zone.
   Future<void> expectImageError(
     WidgetTester tester,
-    _PoisonedProvider provider,
+    ImageProvider provider,
   ) async {
     await tester.runAsync(() async {
       final stream = provider.resolve(ImageConfiguration.empty);
@@ -116,5 +162,46 @@ void main() {
       isNotNull,
       reason: 'unrelated cache entries must survive',
     );
+  });
+
+  testWidgets(
+    'decode failure reloads the exact result without calling provider.load',
+    (tester) async {
+      final provider = _DecodeReloadProvider(_validImageBytes);
+
+      await tester.runAsync(() async {
+        final stream = provider.resolve(ImageConfiguration.empty);
+        final done = Completer<void>();
+        stream.addListener(
+          ImageStreamListener(
+            (ImageInfo image, bool synchronousCall) {
+              if (!done.isCompleted) {
+                done.complete();
+              }
+            },
+            onError: (Object error, StackTrace? stackTrace) {
+              if (!done.isCompleted) {
+                done.completeError(error, stackTrace);
+              }
+            },
+          ),
+        );
+        await done.future.timeout(const Duration(seconds: 10));
+      });
+
+      expect(provider.loadCalls, 1);
+      expect(provider.exactReloadCalls, 1);
+      expect(provider.onDecodeSuccessCalls, 1);
+    },
+  );
+
+  testWidgets('two decode failures never call onDecodeSuccess', (tester) async {
+    final provider = _DecodeReloadProvider(Uint8List.fromList([1, 2, 3]));
+
+    await expectImageError(tester, provider);
+
+    expect(provider.loadCalls, 1);
+    expect(provider.exactReloadCalls, 1);
+    expect(provider.onDecodeSuccessCalls, 0);
   });
 }

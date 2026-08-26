@@ -1,4 +1,6 @@
 import 'dart:async' show Future;
+import 'dart:convert' show jsonEncode;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:venera/foundation/comic_type.dart';
@@ -46,7 +48,7 @@ class CachedImageProvider
     try {
       if (url.startsWith("file://")) {
         var file = File(url.substring(7));
-        return (bytes: await file.readAsBytes(), cacheKey: null);
+        return LoadResult(bytes: await file.readAsBytes(), cacheKey: null);
       }
       final cacheKey = ImageDownloader.thumbnailCacheKey(url, sourceKey, cid);
       await for (var progress in ImageDownloader.loadThumbnail(
@@ -62,7 +64,7 @@ class CachedImageProvider
           ),
         );
         if (progress.imageBytes != null) {
-          return (bytes: progress.imageBytes!, cacheKey: cacheKey);
+          return LoadResult(bytes: progress.imageBytes!, cacheKey: cacheKey);
         }
       }
       throw "Error: Empty response body.";
@@ -77,7 +79,7 @@ class CachedImageProvider
           if (await file.exists()) {
             var data = await file.readAsBytes();
             if (data.isNotEmpty) {
-              return (bytes: data, cacheKey: null);
+              return LoadResult(bytes: data, cacheKey: null);
             }
           }
         }
@@ -94,5 +96,5 @@ class CachedImageProvider
   }
 
   @override
-  String get key => url + (sourceKey ?? "") + (cid ?? "");
+  String get key => jsonEncode(['cached', url, sourceKey, cid]);
 }
