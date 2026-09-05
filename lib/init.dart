@@ -38,20 +38,33 @@ Future<void> init() async {
   await App.init().wait();
   await SingleInstanceCookieJar.createInstance();
   try {
-    var futures = [
-      Rhttp.init(),
-      App.initComponents(),
+    await Rhttp.init();
+    // Source admission reads the persisted Cloud ownership setting, so load
+    // appdata before initializing the source/runtime boundary.
+    await appdata.init();
+    await Future.wait([
       SAFTaskWorker().init().wait(),
       AppTranslation.init().wait(),
       TagsTranslation.readData().wait(),
-      JsEngine().init().wait(),
-      ComicSourceManager().init().wait(),
       OpenCC.init(),
-    ];
-    await Future.wait(futures);
+    ]);
+    await JsEngine().init().wait();
+    // Establish the registry and runtime admission boundary before any
+    // source script is parsed.  The same sequence is used by headless mode
+    // because it calls this function as its only application bootstrap.
+    await App.cloudTracking.prepareRuntimeAdmission().wait();
+    await ComicSourceManager().init().wait();
+    // LocalManager restores persisted download tasks by source key, so keep
+    // component initialization after ComicSourceManager is ready.
+    await App.initComponents();
+    App.local.restoreDownloadingTasks();
   } catch (e, s) {
     Log.error("init", "$e\n$s");
   }
+  // ComicSourceManager has loaded the active artifact registry above, so the
+  // Cloud coordinator can now align exact artifacts before any follow-up
+  // checker starts issuing Local work.
+  await App.cloudTracking.start().wait();
   CacheManager().setLimitSize(appdata.settings['cacheSize']);
   // Flush batched cache index updates when the app is backgrounded or
   // killed, so sliding expirations are durable even if the process dies.

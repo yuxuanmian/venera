@@ -96,6 +96,9 @@ class Appdata with Init {
     "disableSyncFields",
     "deviceId",
     "developerMode",
+    "cloudTrackingEnabled",
+    "cloudTrackingServerUrl",
+    "cloudTrackingAccessToken",
   ];
 
   /// Sync data from another device
@@ -239,6 +242,11 @@ class Settings with ChangeNotifier {
     'showChapterCommentsAtEnd':
         false, // show chapter comments at end of chapter
     'developerMode': false, // show debug info in comic details
+    // Cloud tracking is opt-in and device-local. A blank URL keeps the
+    // feature paused until the user configures an authenticated Server.
+    'cloudTrackingEnabled': false,
+    'cloudTrackingServerUrl': '',
+    'cloudTrackingAccessToken': '',
   };
 
   operator [](String key) {

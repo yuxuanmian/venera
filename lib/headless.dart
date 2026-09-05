@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/widgets.dart';
+import 'package:venera/foundation/app.dart';
 import 'package:venera/utils/data_sync.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/log.dart';
@@ -152,7 +153,9 @@ Future<void> runHeadlessMode(List<String> args) async {
         var type = args[updateIndex + 2];
         FavoriteItemWithUpdateInfo? comic;
         NetworkFavoriteFolderRef? folder;
-        for (final candidate in getFollowUpdateFolders()) {
+        for (final candidate in App.cloudTracking.localFolders(
+          getFollowUpdateFolders(),
+        )) {
           var comics = NetworkFavoriteCacheManager().getComicsWithUpdatesInfo(
             candidate,
           );
@@ -173,7 +176,14 @@ Future<void> runHeadlessMode(List<String> args) async {
           exit(1);
         }
 
-        var result = await updateComic(comic, folder);
+        var result = await updateComic(
+          comic,
+          folder,
+          cancellationToken: generationScanTokenForSource(
+            type,
+            App.cloudTracking.generations,
+          ),
+        );
 
         Map<String, dynamic> data = {
           'current': 1,
@@ -221,9 +231,10 @@ Future<void> runHeadlessMode(List<String> args) async {
         int updated = 0;
         int errors = 0;
         await for (var progress in scanFollowUpdates(
-          getFollowUpdateFolders(),
+          App.cloudTracking.localFolders(getFollowUpdateFolders()),
           FollowUpdateMode.force,
           ignoreRetryAfter: true,
+          generationController: App.cloudTracking.generations,
         )) {
           total = progress.total;
           updated = progress.updated;

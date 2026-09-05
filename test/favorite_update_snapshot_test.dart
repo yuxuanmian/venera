@@ -131,7 +131,7 @@ Comic _snapshotComic(
   String marker, {
   String sourceKey = 'list-test',
   bool? isNew,
-  String? updateTime = '2026-08-01',
+  String? updateTime = '2026-08-01T00:00:00Z',
   bool? fullIsNew = false,
 }) => Comic(
   'Comic $id',
@@ -212,7 +212,7 @@ void main() {
               null,
               favoriteUpdate: FavoriteUpdateHint(
                 marker: 'm1',
-                updateTime: '2026-08-20',
+                updateTime: '2026-08-20T00:00:00Z',
                 isNew: false,
                 metadata: {'fullIsNew': false},
               ),
@@ -229,7 +229,7 @@ void main() {
               null,
               favoriteUpdate: FavoriteUpdateHint(
                 marker: 'm2',
-                updateTime: '2026-08-21',
+                updateTime: '2026-08-21T00:00:00Z',
                 isNew: false,
                 metadata: {'fullIsNew': false},
               ),
@@ -243,13 +243,10 @@ void main() {
       expect(first.updatedComicCount, 0);
       expect(manager.countCachedComics(folder), 2);
       expect(manager.getFullCacheStatus(folder).completedAt, isNotNull);
-      expect(
-        manager.getFavoriteUpdateScanState(folder)!.markerScheme,
-        'list-v1',
-      );
+      expect(manager.getFavoriteUpdateScanState(folder)!.markerScheme, isNull);
       expect(
         manager.getComicUpdateInfo('list-test', 'c1', '')!.updateMarker,
-        encodeFollowUpdateMarker('list-v1', 'm1'),
+        'm1',
       );
       expect(
         manager.getCachedPage(folder, 1)!.comics.first.favoriteUpdate,
@@ -295,7 +292,7 @@ void main() {
       expect(repeated.updatedComicCount, 0);
       expect(
         manager.getComicUpdateInfo('list-test', 'c1', '')!.hasNewUpdate,
-        isFalse,
+        isTrue,
       );
     },
   );
@@ -321,77 +318,68 @@ void main() {
       completedAt: DateTime(2026, 8, 24),
     );
 
-    expect(result.updatedComicCount, 1);
+    expect(result.updatedComicCount, 0);
     final info = manager.getComicUpdateInfo('list-test', 'c1', '');
     expect(info, isNotNull);
     expect(info!.updateTime, isNull);
     expect(info.sourceActivityAt, isNull);
-    expect(
-      info.updateMarker,
-      encodeFollowUpdateMarker('chapter-v1', 'normal:chapter-1|full:'),
-    );
-    expect(info.sourceUpdateMetadata, {'fullIsNew': true, 'isNew': true});
-    expect(
-      manager.getFavoriteUpdateScanState(folder)!.markerScheme,
-      'chapter-v1',
-    );
+    expect(info.updateMarker, 'normal:chapter-1|full:');
+    expect(info.sourceUpdateMetadata, {'fullIsNew': true});
+    expect(manager.getFavoriteUpdateScanState(folder)!.markerScheme, isNull);
   });
 
-  test(
-    'same marker preserves prior time while a no-time marker change clears it',
-    () {
-      final data = _data(markerScheme: 'chapter-v1');
-      final completedAt = DateTime(2026, 8, 24);
-      manager.applyCompleteFavoriteUpdateSnapshot(
-        data,
-        folder,
-        _snapshotWithComic(
-          _snapshotComic(
-            'c1',
-            'normal:chapter-1|full:',
-            updateTime: '2026-08-20',
-          ),
+  test('marker-only observations do not fabricate a source activity time', () {
+    final data = _data(markerScheme: 'chapter-v1');
+    final completedAt = DateTime(2026, 8, 24);
+    manager.applyCompleteFavoriteUpdateSnapshot(
+      data,
+      folder,
+      _snapshotWithComic(
+        _snapshotComic(
+          'c1',
+          'normal:chapter-1|full:',
+          updateTime: '2026-08-20T00:00:00Z',
         ),
-        completedAt: completedAt,
-      );
+      ),
+      completedAt: completedAt,
+    );
 
-      manager.applyCompleteFavoriteUpdateSnapshot(
-        data,
-        folder,
-        _snapshotWithComic(
-          _snapshotComic('c1', 'normal:chapter-1|full:', updateTime: null),
-        ),
-        completedAt: completedAt.add(const Duration(days: 1)),
-      );
-      final same = manager.getComicUpdateInfo('list-test', 'c1', '')!;
-      expect(same.updateTime, '2026-08-20');
-      expect(same.sourceActivityAt, isNotNull);
-      expect(same.hasNewUpdate, isFalse);
+    manager.applyCompleteFavoriteUpdateSnapshot(
+      data,
+      folder,
+      _snapshotWithComic(
+        _snapshotComic('c1', 'normal:chapter-1|full:', updateTime: null),
+      ),
+      completedAt: completedAt.add(const Duration(days: 1)),
+    );
+    final same = manager.getComicUpdateInfo('list-test', 'c1', '')!;
+    expect(same.updateTime, isNull);
+    expect(same.sourceActivityAt, isNotNull);
+    expect(same.hasNewUpdate, isFalse);
 
-      final changed = manager.applyCompleteFavoriteUpdateSnapshot(
-        data,
-        folder,
-        _snapshotWithComic(
-          _snapshotComic('c1', 'normal:chapter-2|full:', updateTime: null),
-        ),
-        completedAt: completedAt.add(const Duration(days: 2)),
-      );
-      expect(changed.updatedComicCount, 1);
-      final changedInfo = manager.getComicUpdateInfo('list-test', 'c1', '')!;
-      expect(changedInfo.updateTime, isNull);
-      expect(changedInfo.sourceActivityAt, isNull);
-      expect(changedInfo.hasNewUpdate, isTrue);
-    },
-  );
+    final changed = manager.applyCompleteFavoriteUpdateSnapshot(
+      data,
+      folder,
+      _snapshotWithComic(
+        _snapshotComic('c1', 'normal:chapter-2|full:', updateTime: null),
+      ),
+      completedAt: completedAt.add(const Duration(days: 2)),
+    );
+    expect(changed.updatedComicCount, 1);
+    final changedInfo = manager.getComicUpdateInfo('list-test', 'c1', '')!;
+    expect(changedInfo.updateTime, isNull);
+    expect(changedInfo.sourceActivityAt, isNotNull);
+    expect(changedInfo.hasNewUpdate, isTrue);
+  });
 
-  test('scheme migration to a no-time marker clears legacy activity time', () {
+  test('marker scheme declarations do not alter opaque marker semantics', () {
     final oldData = _data(markerScheme: 'time-v1');
     final newData = _data(markerScheme: 'chapter-v1');
     manager.applyCompleteFavoriteUpdateSnapshot(
       oldData,
       folder,
       _snapshotWithComic(
-        _snapshotComic('c1', 'legacy-time', updateTime: '2026-08-20'),
+        _snapshotComic('c1', 'legacy-time', updateTime: '2026-08-20T00:00:00Z'),
       ),
       completedAt: DateTime(2026, 8, 24),
     );
@@ -409,15 +397,12 @@ void main() {
       completedAt: DateTime(2026, 8, 25),
     );
 
-    expect(migrated.updatedComicCount, 0);
+    expect(migrated.updatedComicCount, 1);
     final info = manager.getComicUpdateInfo('list-test', 'c1', '')!;
     expect(info.updateTime, isNull);
-    expect(info.sourceActivityAt, isNull);
+    expect(info.sourceActivityAt, isNotNull);
     expect(info.hasNewUpdate, isFalse);
-    expect(
-      info.updateMarker,
-      encodeFollowUpdateMarker('chapter-v1', 'normal:chapter-3|full:'),
-    );
+    expect(info.updateMarker, 'normal:chapter-3|full:');
   });
 
   test('list scan failures use the prescribed capped backoff', () {
@@ -599,7 +584,7 @@ void main() {
           folders: [folder],
           now: dueAt,
         ),
-        isTrue,
+        isFalse,
       );
 
       final detailSource = _detailSource();
@@ -723,7 +708,7 @@ void main() {
       );
       expect(
         manager.getComicUpdateInfo('list-test', 'c1', '')!.updateMarker,
-        encodeFollowUpdateMarker('list-v1', 'fresh-marker'),
+        'fresh-marker',
       );
     },
   );

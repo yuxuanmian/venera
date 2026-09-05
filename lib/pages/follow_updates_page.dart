@@ -10,6 +10,7 @@ import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_updates.dart';
 import 'package:venera/foundation/global_state.dart';
 import 'package:venera/foundation/log.dart';
+import 'package:venera/foundation/tracking/runtime_generation.dart';
 import 'package:venera/utils/translations.dart';
 
 class FollowUpdatesWidget extends StatefulWidget {
@@ -844,6 +845,25 @@ abstract class FollowUpdatesService {
   static const _resumeDebounce = Duration(seconds: 2);
   static const _resumeStaleAfter = Duration(minutes: 10);
 
+  static List<NetworkFavoriteFolderRef> _effectiveLocalFolders(
+    List<NetworkFavoriteFolderRef> folders,
+  ) {
+    if (!App.isInitialized) return folders;
+    return App.cloudTracking.localFolders(folders);
+  }
+
+  static RuntimeGenerationController? get _generationController =>
+      App.isInitialized ? App.cloudTracking.generations : null;
+
+  static ScanCancellationToken _sourceToken(
+    ScanCancellationToken base,
+    String sourceKey,
+  ) {
+    final controller = _generationController;
+    if (controller == null) return base;
+    return generationScanTokenForSource(sourceKey, controller, base: base);
+  }
+
   /// Latest progress of the background baseline run, or null when no baseline
   /// task is active.
   static final ValueNotifier<BaselineStatus?> baselineStatus =
@@ -861,7 +881,7 @@ abstract class FollowUpdatesService {
     return _startTask(
       (token) async {
         final cache = NetworkFavoriteCacheManager();
-        final folders = getFollowUpdateFolders();
+        final folders = _effectiveLocalFolders(getFollowUpdateFolders());
         final listFolders = <NetworkFavoriteFolderRef>[];
         final listSources = <String>{};
         final comics =
@@ -909,10 +929,11 @@ abstract class FollowUpdatesService {
             ),
         };
         for (final folder in listFolders) {
-          if (!token.canCommit) return;
+          final folderToken = _sourceToken(token, folder.sourceKey);
+          if (!folderToken.canCommit) return;
           if (!cache.tryAcquireFullCacheLock(folder)) {
             completed++;
-            if (token.canCommit) {
+            if (folderToken.canCommit) {
               baselineStatus.value = BaselineStatus(
                 isRunning: true,
                 total: total,
@@ -936,7 +957,7 @@ abstract class FollowUpdatesService {
             } else {
               cache.recordFavoriteUpdateScanAttempt(folder);
               final result = await updateCheck.load(folder.folderId);
-              if (!token.canCommit) return;
+              if (!folderToken.canCommit) return;
               if (cache.isFavoriteSessionEpochCurrent(
                 folder.sourceKey,
                 expectedEpoch,
@@ -945,9 +966,10 @@ abstract class FollowUpdatesService {
                   cache.recordFavoriteUpdateScanFailure(folder);
                   errors++;
                 } else if (cache.isFavoriteSessionEpochCurrent(
-                  folder.sourceKey,
-                  expectedEpoch,
-                )) {
+                      folder.sourceKey,
+                      expectedEpoch,
+                    ) &&
+                    folderToken.canCommit) {
                   final applied = cache.applyCompleteFavoriteUpdateSnapshot(
                     data,
                     folder,
@@ -961,7 +983,7 @@ abstract class FollowUpdatesService {
               }
             }
           } catch (e, s) {
-            if (!token.canCommit) return;
+            if (!folderToken.canCommit) return;
             if (cache.isFavoriteSessionEpochCurrent(
               folder.sourceKey,
               expectedEpoch,
@@ -976,7 +998,7 @@ abstract class FollowUpdatesService {
             cache.releaseFullCacheLock(folder);
           }
           completed++;
-          if (token.canCommit) {
+          if (folderToken.canCommit) {
             baselineStatus.value = BaselineStatus(
               isRunning: true,
               total: total,
@@ -990,7 +1012,8 @@ abstract class FollowUpdatesService {
           }
         }
         for (final item in comics.take(count)) {
-          if (!token.canCommit) return;
+          final itemToken = _sourceToken(token, item.sourceKey);
+          if (!itemToken.canCommit) return;
           final fresh = cache.getComicUpdateInfo(
             item.sourceKey,
             item.comicId,
@@ -1004,9 +1027,9 @@ abstract class FollowUpdatesService {
                 folderId: item.folderId,
               ),
               cache: cache,
-              cancellationToken: token,
+              cancellationToken: itemToken,
             );
-            if (!token.canCommit) return;
+            if (!itemToken.canCommit) return;
             if (result.errorMessage != null) {
               errors++;
             } else {
@@ -1014,7 +1037,7 @@ abstract class FollowUpdatesService {
             }
           }
           completed++;
-          if (token.canCommit) {
+          if (itemToken.canCommit) {
             baselineStatus.value = BaselineStatus(
               isRunning: true,
               total: total,
@@ -1119,7 +1142,7 @@ abstract class FollowUpdatesService {
       return;
     }
     final cache = NetworkFavoriteCacheManager();
-    final folders = getFollowUpdateFolders();
+    final folders = _effectiveLocalFolders(getFollowUpdateFolders());
     if (folders.any(cache.isFullCacheRunning)) {
       _autoScanTimer = Timer(const Duration(seconds: 5), _tryStartAutoScan);
       return;
@@ -1184,7 +1207,9 @@ abstract class FollowUpdatesService {
     bool forceListSnapshots = false,
     List<NetworkFavoriteFolderRef>? folders,
   }) async {
-    final effectiveFolders = folders ?? getFollowUpdateFolders();
+    final effectiveFolders = _effectiveLocalFolders(
+      folders ?? getFollowUpdateFolders(),
+    );
     var errors = 0;
     var updated = 0;
     var plannedTotal = 0;
@@ -1197,6 +1222,7 @@ abstract class FollowUpdatesService {
         ignoreRetryAfter: ignoreRetryAfter,
         includeSuspect: includeSuspect,
         forceListSnapshots: forceListSnapshots,
+        generationController: _generationController,
       )) {
         // Empty queue: no plan, keep any previous UI state untouched.
         if (progress.total == 0) continue;
@@ -1260,7 +1286,7 @@ abstract class FollowUpdatesService {
   /// completion). Cooldowns are respected; manual Retry / Check Now keep their
   /// force-check semantics.
   static Future<void> _runMissingOnly(ScanCancellationToken token) async {
-    final folders = getFollowUpdateFolders();
+    final folders = _effectiveLocalFolders(getFollowUpdateFolders());
     if (!token.canCommit ||
         !hasPendingFollowUpdateWork(
           mode: FollowUpdateMode.missing,
@@ -1277,9 +1303,9 @@ abstract class FollowUpdatesService {
     // constantly; the periodic scan must not fight the full-cache worker
     // over the same comics.
     final cache = NetworkFavoriteCacheManager();
-    final folders = getFollowUpdateFolders()
-        .where((f) => !cache.isFullCacheRunning(f))
-        .toList();
+    final folders = _effectiveLocalFolders(
+      getFollowUpdateFolders(),
+    ).where((f) => !cache.isFullCacheRunning(f)).toList();
     await _runScanWithStatus(
       token,
       mode: FollowUpdateMode.regular,

@@ -1,3 +1,6 @@
+@Deprecated(
+  'Use opaque update_marker values; hosts must not parse marker schemes.',
+)
 class FollowUpdateMarkerParts {
   final String scheme;
   final String value;
@@ -10,6 +13,7 @@ class FollowUpdateMarkerParts {
 bool _isFollowUpdateMarkerScheme(String value) =>
     RegExp(r'^[A-Za-z0-9._-]{1,64}$').hasMatch(value) && !value.contains('|');
 
+@Deprecated('Use opaque update_marker values; hosts must not encode schemes.')
 String encodeFollowUpdateMarker(String markerScheme, String rawMarker) {
   if (!_isFollowUpdateMarkerScheme(markerScheme)) {
     throw ArgumentError.value(markerScheme, 'markerScheme');
@@ -17,6 +21,7 @@ String encodeFollowUpdateMarker(String markerScheme, String rawMarker) {
   return '$markerScheme|$rawMarker';
 }
 
+@Deprecated('Use opaque update_marker values; hosts must not decode schemes.')
 FollowUpdateMarkerParts decodeFollowUpdateMarker(String marker) {
   final separator = marker.indexOf('|');
   if (separator > 0) {
@@ -31,6 +36,7 @@ FollowUpdateMarkerParts decodeFollowUpdateMarker(String marker) {
   return FollowUpdateMarkerParts(scheme: 'v1', value: marker);
 }
 
+@Deprecated('Compare opaque markers directly through TrackingComparator.')
 bool hasSameSchemeMarkerChanged(String? previous, String? candidate) {
   if (previous == null ||
       previous.isEmpty ||

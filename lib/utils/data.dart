@@ -1,17 +1,30 @@
 import 'dart:convert';
 import 'dart:isolate';
 
+import 'package:path/path.dart' as p;
 import 'package:sqlite3/sqlite3.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/log.dart';
+import 'package:venera/foundation/tracking/source_revision_store.dart';
+import 'package:venera/foundation/tracking/source_import_transaction.dart';
 import 'package:venera/network/cookie_jar.dart';
 import 'package:venera/utils/ext.dart';
 import 'package:zip_flutter/zip_flutter.dart';
 
 import 'io.dart';
+
+class AppDataImportResult {
+  const AppDataImportResult({
+    this.sourceImported = false,
+    this.sourceSkipped = false,
+  });
+
+  final bool sourceImported;
+  final bool sourceSkipped;
+}
 
 Future<File> exportAppData([bool sync = true]) async {
   var time = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -32,11 +45,16 @@ Future<File> exportAppData([bool sync = true]) async {
     zipFile.addFile("history.db", historyFile);
     zipFile.addFile("appdata.json", appdata);
     zipFile.addFile("cookie.db", cookies);
-    for (var file in Directory(
-      FilePath.join(dataPath, "comic_source"),
-    ).listSync()) {
-      if (file is File) {
-        zipFile.addFile("comic_source/${file.name}", file.path);
+    final sourceRoot = Directory(FilePath.join(dataPath, 'comic_source'));
+    if (sourceRoot.existsSync()) {
+      for (final entity in sourceRoot.listSync(recursive: true)) {
+        if (entity is! File) continue;
+        final relative = p
+            .relative(entity.path, from: sourceRoot.path)
+            .replaceAll('\\', '/');
+        if (_isTemporarySourcePath(relative)) continue;
+        SourceRevisionStore.validateSafeRelativePath(relative);
+        zipFile.addFile('comic_source/$relative', entity.path);
       }
     }
     zipFile.close();
@@ -44,13 +62,17 @@ Future<File> exportAppData([bool sync = true]) async {
   return cacheFile;
 }
 
-Future<void> importAppData(File file, [bool checkVersion = false]) async {
-  var cacheDirPath = FilePath.join(App.cachePath, 'temp_data');
-  var cacheDir = Directory(cacheDirPath);
-  if (cacheDir.existsSync()) {
-    cacheDir.deleteSync(recursive: true);
-  }
-  cacheDir.createSync();
+Future<AppDataImportResult> importAppData(
+  File file, [
+  bool checkVersion = false,
+]) async {
+  final sourceCloudAtStart =
+      App.cloudTracking.cloudEnabled || App.cloudTracking.pendingCloudEnable;
+  final sourceEpochAtStart = App.cloudTracking.operationEpoch;
+  var sourceImported = false;
+  var sourceSkipped = false;
+  final cacheDir = await Directory(App.cachePath).createTemp('source-import-');
+  final cacheDirPath = cacheDir.path;
   try {
     await Isolate.run(() {
       ZipFile.openAndExtract(file.path, cacheDirPath);
@@ -62,7 +84,7 @@ Future<void> importAppData(File file, [bool checkVersion = false]) async {
       var data = jsonDecode(await appdataFile.readAsString());
       var version = data["settings"]["dataVersion"];
       if (version is int && version <= appdata.settings["dataVersion"]) {
-        return;
+        return const AppDataImportResult();
       }
     }
     if (await historyFile.exists()) {
@@ -86,24 +108,98 @@ Future<void> importAppData(File file, [bool checkVersion = false]) async {
     }
     var comicSourceDir = FilePath.join(cacheDirPath, "comic_source");
     if (Directory(comicSourceDir).existsSync()) {
-      Directory(
-        FilePath.join(App.dataPath, "comic_source"),
-      ).deleteIfExistsSync(recursive: true);
-      Directory(FilePath.join(App.dataPath, "comic_source")).createSync();
-      for (var file in Directory(comicSourceDir).listSync()) {
-        if (file is File) {
-          var targetFile = FilePath.join(
-            App.dataPath,
-            "comic_source",
-            file.name,
+      _validateImportedSourceTree(Directory(comicSourceDir));
+      final sourceRoot = Directory(FilePath.join(App.dataPath, "comic_source"));
+      if (sourceCloudAtStart ||
+          !App.cloudTracking.customizationAllowed ||
+          App.cloudTracking.operationEpoch != sourceEpochAtStart) {
+        sourceSkipped = true;
+        Log.info(
+          "Import data",
+          "Skipped comic source scripts because Cloud owns source runtimes.",
+        );
+      } else {
+        await App.cloudTracking.withCommitLock(() async {
+          if (sourceCloudAtStart ||
+              !App.cloudTracking.customizationAllowed ||
+              App.cloudTracking.operationEpoch != sourceEpochAtStart) {
+            sourceSkipped = true;
+            return;
+          }
+          void requireCurrent() {
+            App.cloudTracking.requireCurrentCommit(
+              sourceEpochAtStart,
+              expectedCloud: false,
+            );
+            if (App.cloudTracking.pendingCloudEnable) {
+              throw StateError('Cloud was requested during source import.');
+            }
+          }
+
+          await SourceImportTransaction(sourceRoot).replace(
+            Directory(comicSourceDir),
+            requireCurrent: requireCurrent,
+            denyRuntime: App.cloudTracking.denySourceRuntimes,
+            reload: () =>
+                App.cloudTracking.reloadSourcesLocked(sourceEpochAtStart),
           );
-          await file.copy(targetFile);
-        }
+          sourceImported = true;
+        });
+        if (sourceImported) await App.cloudTracking.refreshNow();
       }
-      await ComicSourceManager().reload();
     }
+    return AppDataImportResult(
+      sourceImported: sourceImported,
+      sourceSkipped: sourceSkipped,
+    );
   } finally {
     cacheDir.deleteIgnoreError(recursive: true);
+  }
+}
+
+bool _isTemporarySourcePath(String relative) {
+  final segments = p.posix.split(relative);
+  return segments.contains('.custom-drafts') ||
+      segments.any((segment) => segment.endsWith('.tmp'));
+}
+
+void _validateImportedSourceTree(Directory sourceRoot) {
+  final root = p.absolute(sourceRoot.path);
+  for (final entity in sourceRoot.listSync(
+    recursive: true,
+    followLinks: false,
+  )) {
+    if (entity is Link) {
+      throw const FormatException('source archive contains a link');
+    }
+    final relative = p.relative(entity.path, from: root).replaceAll('\\', '/');
+    SourceRevisionStore.validateSafeRelativePath(relative);
+    if (_isTemporarySourcePath(relative)) {
+      throw const FormatException('source archive contains staging data');
+    }
+  }
+
+  final managed = Directory(p.join(root, '.managed'));
+  if (!managed.existsSync()) return;
+  final store = SourceRevisionStore(sourceRoot);
+  for (final name in const [
+    'active-artifacts.json',
+    'active-artifacts.json.lkg',
+  ]) {
+    final file = File(p.join(managed.path, name));
+    if (!file.existsSync()) continue;
+    final registry = ActiveArtifactRegistry.fromJson(
+      jsonDecode(file.readAsStringSync()),
+    );
+    for (final artifact in [
+      ...registry.artifacts,
+      ...registry.recoverableArtifacts,
+    ]) {
+      if (_isTemporarySourcePath(artifact.relativePath)) {
+        throw const FormatException('registry references staging data');
+      }
+      store.readBytesSync(artifact);
+    }
   }
 }
 

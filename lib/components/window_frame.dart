@@ -5,7 +5,6 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:venera/foundation/app.dart';
-import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/pages/follow_updates_page.dart';
 import 'package:venera/utils/translations.dart';
 import 'package:window_manager/window_manager.dart';
@@ -776,5 +775,5 @@ TransitionBuilder VirtualWindowFrameInit() {
 }
 
 void debug() {
-  ComicSourceManager().reload();
+  unawaited(App.cloudTracking.reloadAllSources());
 }

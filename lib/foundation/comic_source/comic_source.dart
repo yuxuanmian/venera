@@ -5,13 +5,20 @@ import 'dart:collection';
 import 'dart:convert';
 import 'dart:math' as math;
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_qjs/flutter_qjs.dart';
+import 'package:path/path.dart' as p;
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/follow_update_schedule.dart';
 import 'package:venera/foundation/res.dart';
+import 'package:venera/foundation/tracking/update_state.dart';
+import 'package:venera/foundation/tracking/source_revision_manager.dart';
+import 'package:venera/foundation/tracking/source_revision_store.dart';
+import 'package:venera/foundation/tracking/source_runtime_policy.dart';
+import 'package:venera/foundation/tracking/trusted_catalog.dart';
 import 'package:venera/pages/category_comics_page.dart';
 import 'package:venera/pages/search_result_page.dart';
 import 'package:venera/utils/data_sync.dart';
@@ -50,34 +57,316 @@ class ComicSourceManager with ChangeNotifier, Init {
   ComicSource? fromIntKey(int key) =>
       _sources.firstWhereOrNull((element) => element.key.hashCode == key);
 
+  /// Requires the manager to contain the exact selected artifact, rather than
+  /// merely a source with the same key.  Same-key variants are independent
+  /// runtime identities and must not satisfy one another's reload checks.
+  void requireLoadedArtifact(ActiveArtifact artifact) {
+    final expectedPath = p.normalize(
+      p.absolute(p.join(App.dataPath, 'comic_source', artifact.relativePath)),
+    );
+    final matches = _sources.where(
+      (source) =>
+          source.key == artifact.sourceKey &&
+          p.equals(p.normalize(p.absolute(source.filePath)), expectedPath),
+    );
+    if (matches.length != 1) {
+      throw StateError(
+        'Expected exactly one loaded runtime for ${artifact.fileName}, '
+        'found ${matches.length}',
+      );
+    }
+  }
+
   @override
   @protected
   Future<void> doInit() async {
+    await App.cloudTracking.withCommitLock(() => _initialize());
+  }
+
+  Future<void> _initialize({
+    ActiveArtifact? requiredArtifact,
+    bool strictRequiredArtifact = false,
+  }) async {
     await JsEngine().ensureInit();
     final path = "${App.dataPath}/comic_source";
-    if (!(await Directory(path).exists())) {
-      Directory(path).create();
-      return;
+    final sourceDirectory = Directory(path);
+    if (!(await sourceDirectory.exists())) {
+      await sourceDirectory.create(recursive: true);
     }
-    await for (var entity in Directory(path).list()) {
-      if (entity is File && entity.path.endsWith(".js")) {
+    final loadedPaths = <String>{};
+    final store = SourceRevisionStore(sourceDirectory);
+    try {
+      final registry = await store.load() ?? const ActiveArtifactRegistry();
+      // Production startup prepares this state before the manager is entered.
+      // Keep direct/test reloads safe as well, without weakening an already
+      // prepared Cloud admission boundary.
+      if (sourceRuntimePolicy.registry == null ||
+          sourceRuntimePolicy.sourceDirectoryPath == null) {
+        sourceRuntimePolicy.prepare(
+          cloudEnabled: sourceRuntimePolicy.cloudEnabled,
+          registry: registry,
+          sourceDirectoryPath: sourceDirectory.path,
+          authorityRevision: sourceRuntimePolicy.authorityRevision,
+          operationEpoch: sourceRuntimePolicy.operationEpoch,
+        );
+      }
+      for (final artifact in registry.artifacts) {
+        final file = store.fileForRelativePath(artifact.relativePath);
+        if (!(await file.exists())) continue;
+        // A blocked artifact is never part of ordinary discovery.  The only
+        // exception is the exact artifact requested by an activation/edit
+        // transaction while its one-shot candidate permit is still live.
+        // That permit is checked again by ComicSourceParser before any JS
+        // boundary, so a blocked working copy cannot become a normal runtime.
+        final candidatePermit =
+            requiredArtifact != null &&
+                artifact.identity == requiredArtifact.identity
+            ? sourceRuntimePolicy.permitForPath(file.path)
+            : null;
+        if (artifact.activationBlocked && candidatePermit == null) continue;
         try {
-          var source = await ComicSourceParser().parse(
-            await entity.readAsString(),
-            entity.absolute.path,
+          await store.readBytes(artifact);
+          final source = await file.readAsString();
+          final parsed = await ComicSourceParser().parse(
+            source,
+            file.absolute.path,
+            runtimePermit: candidatePermit,
+            allowExistingKey: true,
           );
-          _sources.add(source);
+          if (requiredArtifact != null &&
+              artifact.identity == requiredArtifact.identity) {
+            if (artifact.relativePath != requiredArtifact.relativePath ||
+                artifact.sha256 != requiredArtifact.sha256 ||
+                parsed.key != requiredArtifact.sourceKey) {
+              throw StateError("required artifact runtime identity mismatch");
+            }
+          }
+          _sources.add(parsed);
+          loadedPaths.add(file.absolute.path);
         } catch (e, s) {
           Log.error("ComicSource", "$e\n$s");
+          if (strictRequiredArtifact &&
+              requiredArtifact != null &&
+              artifact.identity == requiredArtifact.identity) {
+            rethrow;
+          }
         }
+      }
+    } catch (e, s) {
+      Log.error(
+        "ComicSource",
+        "Failed to load active artifact registry: $e\n$s",
+      );
+      if (strictRequiredArtifact) rethrow;
+    }
+    if (!sourceRuntimePolicy.cloudEnabled) {
+      await for (var entity in sourceDirectory.list()) {
+        if (entity is File && entity.path.endsWith(".js")) {
+          if (loadedPaths.contains(entity.absolute.path) ||
+              !sourceRuntimePolicy.allowUnmanagedRoot(entity.path)) {
+            continue;
+          }
+          try {
+            await _registerAndLoadLegacyRoot(entity, store, loadedPaths);
+          } on _StaleLocalAdmission {
+            // A newer mode request owns the next transition.  Do not continue
+            // scanning root files under the old Local admission.
+            break;
+          } catch (e, s) {
+            Log.error("ComicSource", "$e\n$s");
+          }
+        }
+      }
+    }
+    if (strictRequiredArtifact && requiredArtifact != null) {
+      final loaded = _sources.where(
+        (source) =>
+            source.key == requiredArtifact.sourceKey &&
+            File(source.filePath).absolute.path ==
+                store
+                    .fileForRelativePath(requiredArtifact.relativePath)
+                    .absolute
+                    .path,
+      );
+      if (loaded.length != 1) {
+        throw StateError("required artifact runtime was not loaded");
       }
     }
   }
 
-  Future reload() async {
+  Future<void> _registerAndLoadLegacyRoot(
+    File file,
+    SourceRevisionStore store,
+    Set<String> loadedPaths,
+  ) async {
+    final epoch = sourceRuntimePolicy.operationEpoch;
+    void requireLocalCurrent() {
+      if (sourceRuntimePolicy.operationEpoch != epoch ||
+          sourceRuntimePolicy.cloudEnabled ||
+          sourceRuntimePolicy.pendingCloudEnable ||
+          !sourceRuntimePolicy.admissionReady ||
+          sourceRuntimePolicy.admissionSuspended) {
+        throw const _StaleLocalAdmission();
+      }
+    }
+
+    requireLocalCurrent();
+    final rawBytes = await file.readAsBytes();
+    requireLocalCurrent();
+    final probe = await ComicSourceParser().parse(
+      utf8.decode(rawBytes, allowMalformed: false),
+      file.absolute.path,
+      register: false,
+      allowExistingKey: true,
+      loadData: false,
+      scheduleInit: false,
+    );
+    final sourceKey = probe.key;
+    requireLocalCurrent();
+
+    final registered = await store.registerVerifiedLegacyRoot(
+      fileName: p.basename(file.path),
+      sourceKey: sourceKey,
+      expectedBytes: rawBytes,
+      requireCurrent: requireLocalCurrent,
+    );
+    requireLocalCurrent();
+    final identity = TrustedArtifact(
+      sourceKey: sourceKey,
+      fileName: p.basename(file.path),
+    );
+    final registeredArtifact = registered.find(sourceKey, identity.fileName);
+    if (registeredArtifact == null || !registeredArtifact.activationBlocked) {
+      throw StateError('legacy source registration did not remain blocked');
+    }
+    sourceRuntimePolicy.updateRegistry(
+      registered,
+      authorityRevision: sourceRuntimePolicy.authorityRevision,
+    );
+
+    final normalizedHash = SourceRevisionManager(
+      store: store,
+    ).normalizedSourceHash(rawBytes);
+    final permit = sourceRuntimePolicy.issueCandidatePermit(
+      identity: identity,
+      path: store.fileForRelativePath(registeredArtifact.relativePath).path,
+      sha256: normalizedHash,
+      revision: null,
+    );
+    SourceRuntimeExecutionContext? formalContext;
+    try {
+      final loaded = await ComicSourceParser().parse(
+        utf8.decode(rawBytes, allowMalformed: false),
+        file.absolute.path,
+        register: true,
+        allowExistingKey: true,
+        loadData: true,
+        scheduleInit: true,
+        runtimePermit: permit,
+      );
+      formalContext = sourceRuntimePolicy.contextForRuntimeKey(sourceKey);
+      requireLocalCurrent();
+      final expectedPath = p.normalize(
+        p.absolute(
+          store.fileForRelativePath(registeredArtifact.relativePath).path,
+        ),
+      );
+      if (loaded.key != sourceKey ||
+          !p.equals(p.normalize(p.absolute(loaded.filePath)), expectedPath)) {
+        throw StateError('legacy source runtime identity mismatch');
+      }
+      final actualBytes = await file.readAsBytes();
+      requireLocalCurrent();
+      if (sha256.convert(actualBytes).toString() != registeredArtifact.sha256) {
+        throw const FormatException(
+          'legacy source bytes changed after registration',
+        );
+      }
+      final latest = await store.load() ?? const ActiveArtifactRegistry();
+      requireLocalCurrent();
+      final selected = latest.find(sourceKey, identity.fileName);
+      if (selected == null ||
+          !_sameLegacySelection(selected, registeredArtifact) ||
+          !selected.activationBlocked) {
+        throw const SourceRuntimeDenied(
+          'Legacy source selection changed before activation.',
+        );
+      }
+      final unblocked = await SourceRevisionManager(
+        store: store,
+      ).setActivationBlocked(identity, false);
+      requireLocalCurrent();
+      final activated = unblocked.find(sourceKey, identity.fileName);
+      if (activated == null ||
+          !_sameLegacySelection(activated, registeredArtifact) ||
+          activated.activationBlocked) {
+        throw const SourceRuntimeDenied(
+          'Legacy source selection changed during activation.',
+        );
+      }
+      sourceRuntimePolicy.updateRegistry(
+        unblocked,
+        authorityRevision: sourceRuntimePolicy.authorityRevision,
+      );
+      sourceRuntimePolicy.promoteRuntime(identity);
+      if (!sourceRuntimePolicy.hasActiveRuntime(activated)) {
+        throw StateError('legacy source runtime was not admitted after reload');
+      }
+      _sources.add(loaded);
+      loadedPaths.add(file.absolute.path);
+    } catch (_) {
+      formalContext?.revoke();
+      await _keepLegacySelectionBlocked(store, identity, registeredArtifact);
+      rethrow;
+    } finally {
+      sourceRuntimePolicy.revoke(permit);
+    }
+  }
+
+  Future<void> _keepLegacySelectionBlocked(
+    SourceRevisionStore store,
+    TrustedArtifact identity,
+    ActiveArtifact owned,
+  ) async {
+    try {
+      final latest = await store.load();
+      final selected = latest?.find(identity.sourceKey, identity.fileName);
+      if (selected == null ||
+          !_sameLegacySelection(selected, owned) ||
+          selected.activationBlocked) {
+        return;
+      }
+      final blocked = await SourceRevisionManager(
+        store: store,
+      ).setActivationBlocked(identity, true, preserveLastKnownGood: true);
+      sourceRuntimePolicy.updateRegistry(
+        blocked,
+        authorityRevision: sourceRuntimePolicy.authorityRevision,
+      );
+    } catch (error, stack) {
+      Log.error('Block failed legacy source activation', error, stack);
+    }
+  }
+
+  /// Reload implementation for callers that already hold the Cloud tracking
+  /// commit lock.  This method deliberately does not acquire the lock again;
+  /// callers must use [App.cloudTracking.withCommitLock].
+  Future<void> reloadUnderCommitLock({ActiveArtifact? requiredArtifact}) async {
+    sourceRuntimePolicy.revokeLoadedRuntimes();
     _sources.clear();
     JsEngine().runCode("ComicSource.sources = {};");
-    await doInit();
+    await _initialize(
+      requiredArtifact: requiredArtifact,
+      strictRequiredArtifact: requiredArtifact != null,
+    );
+  }
+
+  /// Public reload entry point for callers that do not already own the shared
+  /// source commit transaction.
+  Future<void> reload({ActiveArtifact? requiredArtifact}) async {
+    await App.cloudTracking.withCommitLock(
+      () => reloadUnderCommitLock(requiredArtifact: requiredArtifact),
+    );
     notifyListeners();
   }
 
@@ -87,6 +376,7 @@ class ComicSourceManager with ChangeNotifier, Init {
   }
 
   void remove(String key) {
+    sourceRuntimePolicy.revokeLoadedRuntimes(sourceKey: key);
     _sources.removeWhere((element) => element.key == key);
     notifyListeners();
   }
@@ -107,6 +397,19 @@ class ComicSourceManager with ChangeNotifier, Init {
     notifyListeners();
   }
 }
+
+class _StaleLocalAdmission implements Exception {
+  const _StaleLocalAdmission();
+}
+
+bool _sameLegacySelection(ActiveArtifact left, ActiveArtifact right) =>
+    left.sourceKey == right.sourceKey &&
+    left.fileName == right.fileName &&
+    left.revision == right.revision &&
+    left.relativePath == right.relativePath &&
+    left.origin == right.origin &&
+    left.sha256 == right.sha256 &&
+    left.cloudCapable == right.cloudCapable;
 
 class ComicSource {
   static List<ComicSource> all() => ComicSourceManager().all();
@@ -214,21 +517,36 @@ class ComicSource {
   bool _isSaving = false;
   bool _haveWaitingTask = false;
 
-  Future<void> saveData() async {
+  Future<void> saveData({SourceRuntimeExecutionContext? runtimeContext}) async {
+    if (runtimeContext != null) {
+      sourceRuntimePolicy.requireExecutionContext(runtimeContext);
+    }
     if (_haveWaitingTask) return;
     while (_isSaving) {
       _haveWaitingTask = true;
       await Future.delayed(const Duration(milliseconds: 20));
       _haveWaitingTask = false;
+      if (runtimeContext != null) {
+        sourceRuntimePolicy.requireExecutionContext(runtimeContext);
+      }
     }
     _isSaving = true;
-    var file = File("${App.dataPath}/comic_source/$key.data");
-    if (!await file.exists()) {
-      await file.create(recursive: true);
+    try {
+      var file = File("${App.dataPath}/comic_source/$key.data");
+      if (!await file.exists()) {
+        await file.create(recursive: true);
+      }
+      if (runtimeContext != null) {
+        sourceRuntimePolicy.requireExecutionContext(runtimeContext);
+      }
+      await file.writeAsString(jsonEncode(data));
+      if (runtimeContext != null) {
+        sourceRuntimePolicy.requireExecutionContext(runtimeContext);
+      }
+      DataSync().uploadData();
+    } finally {
+      _isSaving = false;
     }
-    await file.writeAsString(jsonEncode(data));
-    _isSaving = false;
-    DataSync().uploadData();
   }
 
   Future<bool> reLogin() async {

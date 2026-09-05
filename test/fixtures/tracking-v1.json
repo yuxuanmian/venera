@@ -1,0 +1,421 @@
+{
+  "fixtureVersion": "tracking-v1-fixtures-1",
+  "contractVersion": "1.0.0",
+  "limits": {
+    "maxRecentChapterIds": 10,
+    "maxMarkerUtf8Bytes": 4096,
+    "maxMetadataUtf8Bytes": 4096,
+    "maxObservations": 10000
+  },
+  "constants": {
+    "catalogId": "yuxuanmian/venera-configs",
+    "revisionA": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "revisionB": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "revisionC": "cccccccccccccccccccccccccccccccccccccccc",
+    "observedAt": "2026-09-02T08:15:30.000Z",
+    "validUntil": "2026-09-02T08:45:30.000Z"
+  },
+  "normalizationCases": [
+    {
+      "id": "canonicalize-offset-time",
+      "input": {
+        "updatedAt": "2026-09-02T16:15:30+08:00"
+      },
+      "expected": {
+        "updatedAt": "2026-09-02T08:15:30.000Z"
+      }
+    },
+    {
+      "id": "trim-latest-chapter-id",
+      "input": {
+        "latestChapterId": "  chapter-42  "
+      },
+      "expected": {
+        "latestChapterId": "chapter-42"
+      }
+    },
+    {
+      "id": "drop-invalid-count-keep-valid-id",
+      "input": {
+        "chapterCount": -1,
+        "latestChapterId": "chapter-42"
+      },
+      "expected": {
+        "latestChapterId": "chapter-42"
+      },
+      "dropped": ["chapterCount"]
+    },
+    {
+      "id": "dedupe-and-cap-recent-chapters",
+      "input": {
+        "recentChapterIds": [
+          " c-12 ",
+          "c-11",
+          "c-12",
+          "",
+          "c-10",
+          "c-09",
+          "c-08",
+          "c-07",
+          "c-06",
+          "c-05",
+          "c-04",
+          "c-03"
+        ]
+      },
+      "expected": {
+        "recentChapterIds": [
+          "c-12",
+          "c-11",
+          "c-10",
+          "c-09",
+          "c-08",
+          "c-07",
+          "c-06",
+          "c-05",
+          "c-04",
+          "c-03"
+        ]
+      },
+      "dropped": ["recentChapterIds[3]", "recentChapterIds[4]"]
+    },
+    {
+      "id": "all-invalid-is-unusable",
+      "input": {
+        "updatedAt": "not-a-date",
+        "latestChapterId": "   ",
+        "chapterCount": -4,
+        "recentChapterIds": []
+      },
+      "expected": {},
+      "usable": false,
+      "dropped": ["updatedAt", "latestChapterId", "chapterCount", "recentChapterIds"]
+    }
+  ],
+  "comparisonCases": [
+    {
+      "id": "updated-at-equal",
+      "previous": { "state": { "updatedAt": "2026-09-01T00:00:00.000Z" } },
+      "current": { "state": { "updatedAt": "2026-09-01T02:00:00+02:00" } },
+      "expected": { "contentChange": "unchanged", "selectedEvidence": "updatedAt", "reason": "equal" }
+    },
+    {
+      "id": "updated-at-later",
+      "previous": { "state": { "updatedAt": "2026-09-01T00:00:00.000Z" } },
+      "current": { "state": { "updatedAt": "2026-09-02T00:00:00.000Z" } },
+      "expected": { "contentChange": "changed", "selectedEvidence": "updatedAt", "reason": "later" }
+    },
+    {
+      "id": "updated-at-regression",
+      "previous": { "state": { "updatedAt": "2026-09-02T00:00:00.000Z" } },
+      "current": { "state": { "updatedAt": "2026-09-01T00:00:00.000Z" } },
+      "expected": { "contentChange": "rebaseline", "selectedEvidence": "updatedAt", "reason": "regressed" }
+    },
+    {
+      "id": "latest-chapter-equal",
+      "previous": { "state": { "latestChapterId": "chapter-41" } },
+      "current": { "state": { "latestChapterId": "chapter-41" } },
+      "expected": { "contentChange": "unchanged", "selectedEvidence": "latestChapterId", "reason": "equal" }
+    },
+    {
+      "id": "latest-chapter-different",
+      "previous": { "state": { "latestChapterId": "chapter-41" } },
+      "current": { "state": { "latestChapterId": "chapter-42" } },
+      "expected": { "contentChange": "changed", "selectedEvidence": "latestChapterId", "reason": "different" }
+    },
+    {
+      "id": "chapter-count-equal",
+      "previous": { "state": { "chapterCount": 41 } },
+      "current": { "state": { "chapterCount": 41 } },
+      "expected": { "contentChange": "unchanged", "selectedEvidence": "chapterCount", "reason": "equal" }
+    },
+    {
+      "id": "chapter-count-increase",
+      "previous": { "state": { "chapterCount": 41 } },
+      "current": { "state": { "chapterCount": 42 } },
+      "expected": { "contentChange": "changed", "selectedEvidence": "chapterCount", "reason": "increased" }
+    },
+    {
+      "id": "chapter-count-decrease",
+      "previous": { "state": { "chapterCount": 42 } },
+      "current": { "state": { "chapterCount": 41 } },
+      "expected": { "contentChange": "rebaseline", "selectedEvidence": "chapterCount", "reason": "decreased" }
+    },
+    {
+      "id": "recent-first-id-equal",
+      "previous": { "state": { "recentChapterIds": ["chapter-42", "chapter-41"] } },
+      "current": { "state": { "recentChapterIds": ["chapter-42", "chapter-40"] } },
+      "expected": { "contentChange": "unchanged", "selectedEvidence": "recentChapterIds", "reason": "sameFirst" }
+    },
+    {
+      "id": "recent-previous-anchor-later",
+      "previous": { "state": { "recentChapterIds": ["chapter-42", "chapter-41"] } },
+      "current": { "state": { "recentChapterIds": ["chapter-43", "chapter-42"] } },
+      "expected": { "contentChange": "changed", "selectedEvidence": "recentChapterIds", "reason": "newerAnchor" }
+    },
+    {
+      "id": "recent-no-safe-anchor",
+      "previous": { "state": { "recentChapterIds": ["chapter-42", "chapter-41"] } },
+      "current": { "state": { "recentChapterIds": ["chapter-40", "chapter-39"] } },
+      "expected": { "contentChange": "rebaseline", "selectedEvidence": "recentChapterIds", "reason": "noSafeAnchor" }
+    },
+    {
+      "id": "marker-equal-fallback",
+      "previous": { "state": { "updatedAt": "2026-09-01T00:00:00.000Z" }, "marker": "m-1" },
+      "current": { "state": { "latestChapterId": "chapter-42" }, "marker": "m-1" },
+      "expected": { "contentChange": "unchanged", "selectedEvidence": "marker", "reason": "equal" }
+    },
+    {
+      "id": "marker-different-fallback",
+      "previous": { "state": { "updatedAt": "2026-09-01T00:00:00.000Z" }, "marker": "m-1" },
+      "current": { "state": { "latestChapterId": "chapter-42" }, "marker": "m-2" },
+      "expected": { "contentChange": "changed", "selectedEvidence": "marker", "reason": "different" }
+    },
+    {
+      "id": "no-common-evidence-rebaseline",
+      "previous": { "state": { "updatedAt": "2026-09-01T00:00:00.000Z" } },
+      "current": { "state": { "chapterCount": 42 } },
+      "expected": { "contentChange": "rebaseline", "selectedEvidence": null, "reason": "noCommonEvidence" }
+    },
+    {
+      "id": "no-usable-current-unknown",
+      "previous": { "state": { "latestChapterId": "chapter-41" }, "marker": "m-1" },
+      "current": { "state": {}, "marker": "   " },
+      "expected": { "contentChange": "unknown", "selectedEvidence": null, "reason": "noUsableEvidence" }
+    },
+    {
+      "id": "updated-at-priority-over-latest",
+      "previous": { "state": { "updatedAt": "2026-09-01T00:00:00.000Z", "latestChapterId": "chapter-41" } },
+      "current": { "state": { "updatedAt": "2026-09-01T00:00:00.000Z", "latestChapterId": "chapter-42" } },
+      "expected": { "contentChange": "unchanged", "selectedEvidence": "updatedAt", "reason": "priority" }
+    },
+    {
+      "id": "latest-priority-over-count",
+      "previous": { "state": { "latestChapterId": "chapter-41", "chapterCount": 41 } },
+      "current": { "state": { "latestChapterId": "chapter-41", "chapterCount": 42 } },
+      "expected": { "contentChange": "unchanged", "selectedEvidence": "latestChapterId", "reason": "priority" }
+    },
+    {
+      "id": "count-priority-over-recent",
+      "previous": { "state": { "chapterCount": 41, "recentChapterIds": ["chapter-41"] } },
+      "current": { "state": { "chapterCount": 42, "recentChapterIds": ["chapter-42"] } },
+      "expected": { "contentChange": "changed", "selectedEvidence": "chapterCount", "reason": "priority" }
+    },
+    {
+      "id": "state-priority-over-marker",
+      "previous": { "state": { "latestChapterId": "chapter-41" }, "marker": "m-1" },
+      "current": { "state": { "latestChapterId": "chapter-41" }, "marker": "m-2" },
+      "expected": { "contentChange": "unchanged", "selectedEvidence": "latestChapterId", "reason": "priority" }
+    },
+    {
+      "id": "first-new-format-baseline",
+      "previous": { "state": {}, "marker": null },
+      "current": { "state": { "latestChapterId": "chapter-42" } },
+      "expected": { "contentChange": "rebaseline", "selectedEvidence": null, "reason": "noPreviousEvidence" }
+    }
+  ],
+  "presentationCases": [
+    { "id": "changed-null-prev-false", "sourceUnread": null, "contentChange": "changed", "previousHasNewUpdate": false, "expectedHasNewUpdate": true },
+    { "id": "changed-null-prev-true", "sourceUnread": null, "contentChange": "changed", "previousHasNewUpdate": true, "expectedHasNewUpdate": true },
+    { "id": "changed-true-prev-false", "sourceUnread": true, "contentChange": "changed", "previousHasNewUpdate": false, "expectedHasNewUpdate": true },
+    { "id": "changed-true-prev-true", "sourceUnread": true, "contentChange": "changed", "previousHasNewUpdate": true, "expectedHasNewUpdate": true },
+    { "id": "changed-false-prev-false", "sourceUnread": false, "contentChange": "changed", "previousHasNewUpdate": false, "expectedHasNewUpdate": false },
+    { "id": "changed-false-prev-true", "sourceUnread": false, "contentChange": "changed", "previousHasNewUpdate": true, "expectedHasNewUpdate": false },
+    { "id": "unchanged-null-prev-false", "sourceUnread": null, "contentChange": "unchanged", "previousHasNewUpdate": false, "expectedHasNewUpdate": false },
+    { "id": "unchanged-null-prev-true", "sourceUnread": null, "contentChange": "unchanged", "previousHasNewUpdate": true, "expectedHasNewUpdate": true },
+    { "id": "unchanged-true-prev-false", "sourceUnread": true, "contentChange": "unchanged", "previousHasNewUpdate": false, "expectedHasNewUpdate": true },
+    { "id": "unchanged-true-prev-true", "sourceUnread": true, "contentChange": "unchanged", "previousHasNewUpdate": true, "expectedHasNewUpdate": true },
+    { "id": "unchanged-false-prev-false", "sourceUnread": false, "contentChange": "unchanged", "previousHasNewUpdate": false, "expectedHasNewUpdate": false },
+    { "id": "unchanged-false-prev-true", "sourceUnread": false, "contentChange": "unchanged", "previousHasNewUpdate": true, "expectedHasNewUpdate": false },
+    { "id": "rebaseline-null-prev-false", "sourceUnread": null, "contentChange": "rebaseline", "previousHasNewUpdate": false, "expectedHasNewUpdate": false },
+    { "id": "rebaseline-null-prev-true", "sourceUnread": null, "contentChange": "rebaseline", "previousHasNewUpdate": true, "expectedHasNewUpdate": true },
+    { "id": "rebaseline-true-prev-false", "sourceUnread": true, "contentChange": "rebaseline", "previousHasNewUpdate": false, "expectedHasNewUpdate": true },
+    { "id": "rebaseline-true-prev-true", "sourceUnread": true, "contentChange": "rebaseline", "previousHasNewUpdate": true, "expectedHasNewUpdate": true },
+    { "id": "rebaseline-false-prev-false", "sourceUnread": false, "contentChange": "rebaseline", "previousHasNewUpdate": false, "expectedHasNewUpdate": false },
+    { "id": "rebaseline-false-prev-true", "sourceUnread": false, "contentChange": "rebaseline", "previousHasNewUpdate": true, "expectedHasNewUpdate": false },
+    { "id": "unknown-null-prev-false", "sourceUnread": null, "contentChange": "unknown", "previousHasNewUpdate": false, "expectedHasNewUpdate": false },
+    { "id": "unknown-null-prev-true", "sourceUnread": null, "contentChange": "unknown", "previousHasNewUpdate": true, "expectedHasNewUpdate": true },
+    { "id": "unknown-true-prev-false", "sourceUnread": true, "contentChange": "unknown", "previousHasNewUpdate": false, "expectedHasNewUpdate": true },
+    { "id": "unknown-true-prev-true", "sourceUnread": true, "contentChange": "unknown", "previousHasNewUpdate": true, "expectedHasNewUpdate": true },
+    { "id": "unknown-false-prev-false", "sourceUnread": false, "contentChange": "unknown", "previousHasNewUpdate": false, "expectedHasNewUpdate": false },
+    { "id": "unknown-false-prev-true", "sourceUnread": false, "contentChange": "unknown", "previousHasNewUpdate": true, "expectedHasNewUpdate": false }
+  ],
+  "revisionCases": [
+    {
+      "id": "all-identities-match",
+      "catalogId": "yuxuanmian/venera-configs",
+      "trustedCatalogId": "yuxuanmian/venera-configs",
+      "loadedRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "authorityRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observationRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "loadedArtifact": { "sourceKey": "manwa", "fileName": "manwa.js" },
+      "observationArtifact": { "sourceKey": "manwa", "fileName": "manwa.js" },
+      "interest": true,
+      "fresh": true,
+      "generationMatches": true,
+      "expected": { "accepted": true, "reason": "accepted" }
+    },
+    {
+      "id": "catalog-mismatch",
+      "catalogId": "other/catalog",
+      "trustedCatalogId": "yuxuanmian/venera-configs",
+      "loadedRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "authorityRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observationRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "loadedArtifact": { "sourceKey": "manwa", "fileName": "manwa.js" },
+      "observationArtifact": { "sourceKey": "manwa", "fileName": "manwa.js" },
+      "interest": true,
+      "fresh": true,
+      "generationMatches": true,
+      "expected": { "accepted": false, "reason": "catalogMismatch" }
+    },
+    {
+      "id": "loaded-revision-mismatch",
+      "catalogId": "yuxuanmian/venera-configs",
+      "trustedCatalogId": "yuxuanmian/venera-configs",
+      "loadedRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "authorityRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observationRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "loadedArtifact": { "sourceKey": "manwa", "fileName": "manwa.js" },
+      "observationArtifact": { "sourceKey": "manwa", "fileName": "manwa.js" },
+      "interest": true,
+      "fresh": true,
+      "generationMatches": true,
+      "expected": { "accepted": false, "reason": "loadedRevisionMismatch" }
+    },
+    {
+      "id": "observation-revision-mismatch",
+      "catalogId": "yuxuanmian/venera-configs",
+      "trustedCatalogId": "yuxuanmian/venera-configs",
+      "loadedRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "authorityRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observationRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "loadedArtifact": { "sourceKey": "manwa", "fileName": "manwa.js" },
+      "observationArtifact": { "sourceKey": "manwa", "fileName": "manwa.js" },
+      "interest": true,
+      "fresh": true,
+      "generationMatches": true,
+      "expected": { "accepted": false, "reason": "observationRevisionMismatch" }
+    },
+    {
+      "id": "artifact-file-mismatch",
+      "catalogId": "yuxuanmian/venera-configs",
+      "trustedCatalogId": "yuxuanmian/venera-configs",
+      "loadedRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "authorityRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observationRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "loadedArtifact": { "sourceKey": "manwa", "fileName": "manwa.js" },
+      "observationArtifact": { "sourceKey": "copy_manga", "fileName": "copy_manga.js" },
+      "interest": true,
+      "fresh": true,
+      "generationMatches": true,
+      "expected": { "accepted": false, "reason": "artifactMismatch" }
+    },
+    {
+      "id": "not-an-interest",
+      "catalogId": "yuxuanmian/venera-configs",
+      "trustedCatalogId": "yuxuanmian/venera-configs",
+      "loadedRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "authorityRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observationRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "loadedArtifact": { "sourceKey": "manwa", "fileName": "manwa.js" },
+      "observationArtifact": { "sourceKey": "manwa", "fileName": "manwa.js" },
+      "interest": false,
+      "fresh": true,
+      "generationMatches": true,
+      "expected": { "accepted": false, "reason": "notTracked" }
+    },
+    {
+      "id": "expired-observation",
+      "catalogId": "yuxuanmian/venera-configs",
+      "trustedCatalogId": "yuxuanmian/venera-configs",
+      "loadedRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "authorityRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observationRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "loadedArtifact": { "sourceKey": "manwa", "fileName": "manwa.js" },
+      "observationArtifact": { "sourceKey": "manwa", "fileName": "manwa.js" },
+      "interest": true,
+      "fresh": false,
+      "generationMatches": true,
+      "expected": { "accepted": false, "reason": "staleObservation" }
+    },
+    {
+      "id": "old-generation",
+      "catalogId": "yuxuanmian/venera-configs",
+      "trustedCatalogId": "yuxuanmian/venera-configs",
+      "loadedRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "authorityRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observationRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "loadedArtifact": { "sourceKey": "manwa", "fileName": "manwa.js" },
+      "observationArtifact": { "sourceKey": "manwa", "fileName": "manwa.js" },
+      "interest": true,
+      "fresh": true,
+      "generationMatches": false,
+      "expected": { "accepted": false, "reason": "lostCommitPermission" }
+    }
+  ],
+  "manwaCases": [
+    {
+      "id": "legacy-marker-input",
+      "input": {
+        "marker": "legacy-normal-41",
+        "isNew": true,
+        "markerScheme": "manwa-v1"
+      },
+      "expected": {
+        "state": null,
+        "sourceUnread": true,
+        "marker": "legacy-normal-41",
+        "markerSchemeIgnored": true
+      }
+    },
+    {
+      "id": "new-normal-only",
+      "input": {
+        "normalIdentity": "normal-42",
+        "normalIsNew": false,
+        "fullIdentity": null,
+        "fullIsNew": false
+      },
+      "expected": {
+        "shape": "normal-only",
+        "state": { "latestChapterId": "normal-42" },
+        "sourceUnread": false,
+        "marker": null
+      }
+    },
+    {
+      "id": "new-full-present",
+      "input": {
+        "normalIdentity": "normal-42",
+        "normalIsNew": false,
+        "fullIdentity": "full-9",
+        "fullIsNew": true
+      },
+      "expected": {
+        "shape": "full-present",
+        "state": null,
+        "sourceUnread": true,
+        "marker": "manwa:normal-42|full-9"
+      }
+    },
+    {
+      "id": "state-to-marker-transition",
+      "previousShape": "normal-only",
+      "currentShape": "full-present",
+      "expected": {
+        "contentChange": "rebaseline",
+        "reason": "noCommonEvidence"
+      }
+    },
+    {
+      "id": "marker-to-state-transition",
+      "previousShape": "full-present",
+      "currentShape": "normal-only",
+      "expected": {
+        "contentChange": "rebaseline",
+        "reason": "noCommonEvidence"
+      }
+    }
+  ]
+}

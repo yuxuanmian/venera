@@ -21,14 +21,18 @@ class FavoriteUpdateSnapshot {
 }
 
 class FavoriteUpdateCheckData {
-  final String markerScheme;
   final Duration scanInterval;
   final Future<Res<FavoriteUpdateSnapshot>> Function([String? folderId]) load;
 
+  /// Legacy source declaration accepted during migration but never used for
+  /// comparison, persistence, or Cloud compatibility.
+  @Deprecated('markerScheme is ignored; use UpdateState or opaque marker')
+  final String? markerScheme;
+
   const FavoriteUpdateCheckData({
-    required this.markerScheme,
     required this.scanInterval,
     required this.load,
+    this.markerScheme,
   });
 }
 

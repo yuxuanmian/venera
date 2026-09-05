@@ -8,6 +8,7 @@ import 'package:venera/foundation/history.dart';
 import 'appdata.dart';
 import 'favorites.dart';
 import 'local.dart';
+import 'tracking/cloud_tracking_coordinator.dart';
 
 export "widget_utils.dart";
 export "context.dart";
@@ -67,6 +68,16 @@ class _App {
 
   final LocalManager local = LocalManager();
 
+  CloudTrackingCoordinator? _cloudTracking;
+
+  /// The single process-wide owner of Cloud/Local tracking mode and runtime
+  /// generations. It is created only after [init] has established [dataPath].
+  CloudTrackingCoordinator get cloudTracking =>
+      _cloudTracking ??= CloudTrackingCoordinator(
+        favorites: favorites,
+        sourceDirectory: Directory('$dataPath/comic_source'),
+      );
+
   void rootPop() {
     rootNavigatorKey.currentState?.maybePop();
   }
@@ -89,12 +100,15 @@ class _App {
   }
 
   Future<void> initComponents() async {
-    await Future.wait([
-      data.init(),
-      history.init(),
-      favorites.init(),
-      local.init(),
-    ]);
+    // Appdata is the source of the persisted Cloud ownership preference and
+    // must be ready before any source/runtime component is initialized.
+    await data.init();
+    await Future.wait([history.init(), favorites.init(), local.init()]);
+  }
+
+  void disposeTracking() {
+    _cloudTracking?.dispose();
+    _cloudTracking = null;
   }
 
   Function? _forceRebuildHandler;

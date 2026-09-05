@@ -22,6 +22,7 @@ import 'package:venera/foundation/image_provider/cached_image.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';
+import 'package:venera/foundation/tracking/diagnostics.dart';
 import 'package:venera/network/download.dart';
 import 'package:venera/pages/reader/reader.dart';
 import 'package:venera/utils/file_type.dart';
@@ -251,7 +252,11 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       widget.id,
     );
     context.showMessage(message: 'Rechecking'.tl);
-    final succeeded = await recheckFavoriteComic(widget.sourceKey, widget.id);
+    final succeeded = await recheckFavoriteComic(
+      widget.sourceKey,
+      widget.id,
+      generationController: App.cloudTracking.generations,
+    );
     if (!mounted) return;
     if (succeeded) {
       retry();

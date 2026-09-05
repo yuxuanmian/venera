@@ -62,7 +62,9 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
   String _rawJson() {
     final details = widget.details;
     if (details == null) return '{}';
-    return const JsonEncoder.withIndent('  ').convert(details.toJson());
+    return const JsonEncoder.withIndent(
+      '  ',
+    ).convert(TrackingDiagnostics.redactForDisplay(details.toJson()));
   }
 
   bool get _usesListUpdateStrategy =>
@@ -84,6 +86,7 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
     final result = await recheckFavoriteComicDetailed(
       widget.sourceKey,
       widget.comicId,
+      generationController: App.cloudTracking.generations,
     );
     if (!mounted) return;
     setState(() => _rechecking = false);
@@ -106,6 +109,15 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
     context.showMessage(message: "Copied".tl);
   }
 
+  void _copyTrackingTrace() {
+    final trace = trackingDiagnostics.latest(widget.sourceKey, widget.comicId);
+    if (trace == null) return;
+    Clipboard.setData(
+      ClipboardData(text: const JsonEncoder.withIndent('  ').convert(trace)),
+    );
+    context.showMessage(message: "Copied".tl);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -116,6 +128,10 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
           ..._buildActions(),
           const Divider(),
           ..._buildFollowUpSection(),
+          const Divider(),
+          ..._buildTrackingTraceSection(),
+          const Divider(),
+          ..._buildOwnershipSection(),
           const Divider(),
           ..._buildSourceSection(),
           const Divider(),
@@ -157,6 +173,12 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
                 child: Text("Clear Suspected Removed".tl),
               ),
             Button.outlined(onPressed: _copyJson, child: Text("Copy JSON".tl)),
+            if (trackingDiagnostics.latest(widget.sourceKey, widget.comicId) !=
+                null)
+              Button.outlined(
+                onPressed: _copyTrackingTrace,
+                child: Text("Copy Tracking Trace".tl),
+              ),
           ],
         ),
       ),
@@ -206,9 +228,6 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
         ? null
         : _cache.getFavoriteUpdateScanState(folder);
     final info = _updateInfo();
-    final marker = info?.updateMarker == null
-        ? null
-        : decodeFollowUpdateMarker(info!.updateMarker!);
     final metadata = info?.sourceUpdateMetadata;
     String sourceBool(String key) {
       final value = metadata?[key];
@@ -220,8 +239,7 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
       _infoRow("Update Check Strategy", "Favorite list snapshot".tl),
       _infoRow("Source is_new", sourceBool('isNew')),
       _infoRow("Source full_is_new", sourceBool('fullIsNew')),
-      _infoRow("Marker Scheme", marker?.scheme ?? '-'),
-      _infoRow("Marker Value", marker?.value ?? '-'),
+      _infoRow("Marker Value", info?.updateMarker ?? '-'),
       _infoRow(
         "List Scan Interval",
         updateCheck == null ? '-' : _formatInterval(updateCheck.scanInterval),
@@ -310,6 +328,86 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
       ),
       _infoRow("Follow Updates Enabled", _yesNo(followUpdatesEnabled)),
       _infoRow("Folders", foldersText),
+    ];
+  }
+
+  List<Widget> _buildOwnershipSection() {
+    if (!App.isInitialized) {
+      return [
+        ListTile(title: Text("Runtime Ownership".tl)),
+        _infoRow(
+          "Cloud",
+          _yesNo(appdata.settings['cloudTrackingEnabled'] == true),
+        ),
+        _infoRow("Artifact", "Not initialized".tl),
+      ];
+    }
+    final registry = App.cloudTracking.registry;
+    final artifacts = registry?.artifacts
+        .where((item) => item.sourceKey == widget.sourceKey)
+        .toList(growable: false);
+    if (artifacts == null || artifacts.isEmpty) {
+      return [
+        ListTile(title: Text("Runtime Ownership".tl)),
+        _infoRow("Cloud", _yesNo(App.cloudTracking.cloudEnabled)),
+        _infoRow("Artifact", "Not installed".tl),
+      ];
+    }
+    return [
+      ListTile(title: Text("Runtime Ownership".tl)),
+      _infoRow("Cloud", _yesNo(App.cloudTracking.cloudEnabled)),
+      for (final artifact in artifacts) ...[
+        _infoRow("Artifact", '${artifact.sourceKey} · ${artifact.fileName}'),
+        _infoRow("Active Revision", artifact.revision ?? "Local/custom".tl),
+        _infoRow(
+          "Loaded Revision",
+          App.cloudTracking.generations.current(artifact.identity)?.revision ??
+              '-',
+        ),
+        _infoRow(
+          "Scanner Strategy",
+          App.cloudTracking.modes.strategyFor(artifact.identity).name,
+        ),
+        _infoRow("Activation Blocked", _yesNo(artifact.activationBlocked)),
+        _infoRow(
+          "Failure",
+          App.cloudTracking.modes.errorFor(artifact.identity) ?? '-',
+        ),
+      ],
+    ];
+  }
+
+  List<Widget> _buildTrackingTraceSection() {
+    final trace = trackingDiagnostics.latest(widget.sourceKey, widget.comicId);
+    if (trace == null) {
+      return [
+        ListTile(title: Text("Tracking Diagnostics".tl)),
+        _infoRow("Decision Trace", "No trace in this session".tl),
+      ];
+    }
+    Widget section(String title, Object? value) {
+      final text = value == null
+          ? '-'
+          : const JsonEncoder.withIndent('  ').convert(value);
+      return ExpansionTile(
+        title: Text(title.tl),
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            child: SelectableText(text, style: ts.s14),
+          ),
+        ],
+      );
+    }
+
+    return [
+      ListTile(title: Text("Tracking Diagnostics".tl)),
+      section("Runtime", trace['runtime']),
+      section("Raw Observation", trace['rawObservation']),
+      section("Normalized UpdateState", trace['normalization']),
+      section("Comparison", trace['comparison']),
+      section("Presentation", trace['presentation']),
+      section("Rejection", trace['rejection']),
     ];
   }
 

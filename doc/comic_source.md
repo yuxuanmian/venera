@@ -9,6 +9,51 @@ Venera uses [flutter_qjs](https://github.com/wgh136/flutter_qjs) as js engine wh
 
 This document will describe how to write a comic source for Venera.
 
+## Favorite update evidence
+
+`favoriteUpdate` 是可选的优化扩展，字段可独立省略：`state`、`sourceUnread`、`marker` 和
+`metadata`。`state.updatedAt` 必须带时区的 RFC3339 时间；章节 ID 应是稳定的源内字符串，
+`recentChapterIds` 按最新优先且最多 10 项。`sourceUnread` 表示账号/站点未读事实，不是内容
+版本；`marker` 只是不透明的整值回退证据，Host 不解析它；`metadata` 仅供诊断，不能影响比较。
+
+marker 与 metadata 的规范 JSON 各自限制为 4096 个 UTF-8 字节。普通 source 不需要实现该
+扩展，详情扫描会由 App 归一化已有 `ComicDetails`。source 不提供 `isUpdated(old,current)`、
+marker scheme 或基于 metadata 的比较逻辑；source-specific 字段应在脚本边界内转换为上述
+通用字段。
+
+一次升级会清除旧的派生 marker，但保留用户收藏、Updates 资格和扫描调度数据；新格式首条
+有效证据只建立 baseline，不制造 synthetic update。数据库迁移可重试，禁止以清空用户数据
+作为恢复手段。
+
+## Source revisions and Cloud Tracking
+
+每个已安装源由 `(sourceKey, fileName)` 标识。普通或手动编辑的脚本是 custom Local 制品；
+从受信任目录安装的脚本会在 `comic_source/.managed/` 下按完整 Git commit 保存，并通过
+`active-artifacts.json` 指向当前制品。registry 仍是 version 1；缺少
+`activationBlocked`/`recoverableArtifacts` 时分别按 `false`/空列表读取。`activationBlocked`
+表示 pointer 不能执行，`recoverableArtifacts` 保留接管前 custom 的精确文件路径和 hash。
+
+启动顺序是先加载 appdata、发现 registry 并执行 Cloud admission，再初始化 JS/source
+manager。Cloud-on 不执行旧 root、恢复文件或草稿，也不会从 trusted catalog 自动安装未选中的
+source；所有已安装 exact artifact 都会按当前 authority 的完整 index 对齐。缺少可信 entry、
+下载/hash/parse/reload/恢复失败的 artifact 保留文件但暂停，其他 artifact 独立继续。
+
+Cloud Tracking 只有一个全局开关，没有逐源开关。全局关闭时保留最后验证的 pinned revision；
+关闭 Cloud 不自动恢复旧 custom。用户必须在 Cloud-off 下从恢复列表明确选择 custom，服务会
+校验 identity/path/hash、复制到新的工作路径、fence、reload 并成功后才解除 blocked。全局
+开启时，目录声明了 `cloudTracking.scanner` 且已完成 revision 对齐的精确 `(key, fileName)`
+制品才使用 Cloud；Local-only 制品仍在 pinned revision 上本地扫描。不同文件名即使共享
+`sourceKey` 也不会继承能力。
+
+编辑器只操作 `.custom-drafts/` 中的临时草稿。桌面外部编辑器关闭后要显式 Continue，移动
+编辑器要显式 Save；Cloud 在打开后重新启用时，提交仍被拒绝，草稿可取消或稍后处理。URL
+更新、文件安装、恢复和 archive source 导入都使用同一个 custom mutation gate；Cloud-on
+不会通过 UI、headless 或同步路径静默改变全局开关。
+
+源脚本只提供事实。App 负责 `UpdateState` 归一化、比较、Updates 资格和持久化；Server scanner
+只产生同形状 observation。调试轨迹仅保留在当前会话的有界内存中，metadata 不参与比较，且
+不得包含 Cookie、token、凭据或未经净化的响应内容。
+
 ## Comic Source List
 
 Venera can display a list of comic sources in the app.
@@ -40,6 +85,11 @@ The JSON file should have the following format:
 
 Only one of `url` and `filename` should be provided.
 The description field is optional.
+
+When Cloud is enabled, choosing a trusted list entry is still allowed, but the App resolves the
+current immutable `activeRevision` from the verified authority and fetches only the matching
+catalog/index artifact. It does not follow a branch, arbitrary URL, or local “latest” version. A
+custom URL/file action must first run with Cloud disabled.
 
 ## Create a Comic Source
 

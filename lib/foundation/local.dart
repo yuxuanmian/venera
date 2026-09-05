@@ -286,8 +286,8 @@ class LocalManager with ChangeNotifier {
     }
     _checkPathValidation();
     _checkNoMedia();
-    await ComicSourceManager().ensureInit();
-    restoreDownloadingTasks();
+    // Download tasks are restored by the app bootstrap after
+    // ComicSourceManager has loaded the source definitions they reference.
   }
 
   String findValidId(ComicType type) {

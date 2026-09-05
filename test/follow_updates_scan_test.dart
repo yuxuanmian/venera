@@ -9,6 +9,8 @@ import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_updates.dart';
 import 'package:venera/foundation/res.dart';
+import 'package:venera/foundation/tracking/runtime_generation.dart';
+import 'package:venera/foundation/tracking/trusted_catalog.dart';
 
 FavoriteItem _comic(String id, {String sourceKey = 'test-source'}) =>
     FavoriteItem(
@@ -36,6 +38,7 @@ FavoriteData _numericData(
 ComicSource _detailSource(
   Future<Res<ComicDetails>> Function(String id) loader, {
   String sourceKey = 'test-source',
+  String filePath = '',
 }) {
   return ComicSource(
     'Test source',
@@ -52,7 +55,7 @@ ComicSource _detailSource(
     null,
     null,
     null,
-    '',
+    filePath,
     '',
     '1.0.0',
     null,
@@ -1783,7 +1786,7 @@ void main() {
     'confirmed updates refresh the cover URL; unchanged comics keep it',
     () async {
       await cacheComics(['one']);
-      var updateTime = '2026-08-01';
+      var updateTime = '2026-08-01T00:00:00Z';
       var cover = 'https://example.invalid/old.jpg';
       final source = _detailSource((id) async {
         return Res(
@@ -1818,7 +1821,7 @@ void main() {
 
       // A confirmed update commits the new cover URL.
       cover = 'https://example.invalid/new.jpg';
-      updateTime = '2026-08-02';
+      updateTime = '2026-08-02T00:00:00Z';
       await checkOnce();
       expect(
         cache.getCachedPage(folder, 1)!.comics.single.coverPath,
@@ -1836,7 +1839,7 @@ void main() {
 
       // An update with an empty cover keeps the existing URL.
       cover = '';
-      updateTime = '2026-08-03';
+      updateTime = '2026-08-03T00:00:00Z';
       await checkOnce();
       expect(
         cache.getCachedPage(folder, 1)!.comics.single.coverPath,
@@ -1875,6 +1878,50 @@ void main() {
     expect(item.updateMarker, isNull);
     expect(item.name, 'Comic late');
   });
+
+  test(
+    'a late detail result is rejected by the production generation fence',
+    () async {
+      await cacheComics(['late-generation']);
+      final gate = Completer<void>();
+      final started = Completer<void>();
+      final source = _detailSource((id) async {
+        if (!started.isCompleted) started.complete();
+        await gate.future;
+        return _details(id);
+      }, filePath: 'test-source.js');
+      ComicSourceManager().add(source);
+      addTearDown(() => ComicSourceManager().remove('test-source'));
+
+      const artifact = TrustedArtifact(
+        sourceKey: 'test-source',
+        fileName: 'test-source.js',
+      );
+      final generations = RuntimeGenerationController();
+      generations.activate(
+        artifact: artifact,
+        revision: 'local',
+        strategy: TrackingStrategy.local,
+      );
+
+      final scan = scanFollowUpdates(
+        [folder],
+        FollowUpdateMode.force,
+        ignoreRetryAfter: true,
+        cache: cache,
+        generationController: generations,
+      ).toList();
+      await started.future;
+      generations.invalidate(artifact);
+      gate.complete();
+      await scan;
+
+      final item = cache.getComicsWithUpdatesInfo(folder).single;
+      expect(item.id, 'late-generation');
+      expect(item.lastCheckTime, isNull);
+      expect(item.updateMarker, isNull);
+    },
+  );
 }
 
 /// Polls [condition] until it is true or [timeout] elapses.

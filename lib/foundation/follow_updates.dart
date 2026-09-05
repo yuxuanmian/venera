@@ -3,22 +3,67 @@ import 'dart:collection';
 import 'dart:convert';
 import 'dart:math' as math;
 
-import 'package:crypto/crypto.dart';
+import 'package:path/path.dart' as p;
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_update_schedule.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';
+import 'package:venera/foundation/tracking/tracking.dart';
 
 export 'follow_update_schedule.dart';
-export 'follow_update_marker.dart';
 
 abstract interface class ScanCancellationToken {
   bool get isCanceled;
 
   bool get isCurrent;
 
+  bool get canCommit => !isCanceled && isCurrent;
+}
+
+/// Bridges an App runtime generation into the existing follow-up scan
+/// cancellation contract. Cancellation can stop work early, but the
+/// generation check is the authoritative fence for late successful results.
+class GenerationScanCancellationToken implements ScanCancellationToken {
+  const GenerationScanCancellationToken({
+    required this.controller,
+    required this.captured,
+    this.isCanceledCallback,
+  });
+
+  final RuntimeGenerationController controller;
+  final RuntimeGeneration captured;
+  final bool Function()? isCanceledCallback;
+
+  @override
+  bool get isCanceled => isCanceledCallback?.call() == true;
+
+  @override
+  bool get isCurrent => controller.canCommit(captured);
+
+  @override
+  bool get canCommit => !isCanceled && isCurrent;
+}
+
+class _BoundGenerationScanCancellationToken implements ScanCancellationToken {
+  const _BoundGenerationScanCancellationToken({
+    required this.base,
+    required this.generation,
+    required this.captured,
+  });
+
+  final ScanCancellationToken base;
+  final RuntimeGenerationController generation;
+  final RuntimeGeneration captured;
+
+  @override
+  bool get isCanceled => base.isCanceled;
+
+  @override
+  bool get isCurrent => base.isCurrent && generation.canCommit(captured);
+
+  @override
   bool get canCommit => !isCanceled && isCurrent;
 }
 
@@ -36,6 +81,38 @@ class _CallbackScanCancellationToken implements ScanCancellationToken {
   @override
   bool get canCommit => !isCanceled && isCurrent;
 }
+
+ScanCancellationToken _generationTokenForSource(
+  ScanCancellationToken base,
+  String sourceKey,
+  RuntimeGenerationController controller,
+) {
+  final source = ComicSource.find(sourceKey);
+  if (source == null) return base;
+  final fileName = p.basename(source.filePath);
+  if (!fileName.endsWith('.js')) return base;
+  final captured = controller.current(
+    TrustedArtifact(sourceKey: sourceKey, fileName: fileName),
+  );
+  if (captured == null) return base;
+  return _BoundGenerationScanCancellationToken(
+    base: base,
+    generation: controller,
+    captured: captured,
+  );
+}
+
+/// Returns a source-bound scan token for direct detail rechecks that do not
+/// go through [scanFollowUpdates].
+ScanCancellationToken generationScanTokenForSource(
+  String sourceKey,
+  RuntimeGenerationController controller, {
+  ScanCancellationToken? base,
+}) => _generationTokenForSource(
+  base ?? _CallbackScanCancellationToken(() => false),
+  sourceKey,
+  controller,
+);
 
 const int _defaultFollowUpdateThreads = 8;
 const int _maxConcurrentPerSource = 5;
@@ -342,27 +419,6 @@ Future<bool?> probeSourceAlive(String sourceKey) async {
   }
 }
 
-String? comicUpdateMarker(ComicDetails info) {
-  final updateTime = info.findUpdateTime();
-  final chapterCount = info.chapters?.length;
-  final recent = _recentChapterFingerprint(info.chapters);
-  if (updateTime == null && chapterCount == null && recent == null) return null;
-  return 'v2|time:${_normalizeMarkerTime(updateTime)}|'
-      'chapters:${chapterCount ?? ''}|recent:${recent ?? ''}';
-}
-
-String _normalizeMarkerTime(String? value) {
-  if (value == null || value.trim().isEmpty) return '';
-  final parts = value.trim().split('-');
-  if (parts.length != 3) return value.trim();
-  final year = int.tryParse(parts[0]);
-  final month = int.tryParse(parts[1]);
-  final day = int.tryParse(parts[2]);
-  if (year == null || month == null || day == null) return value.trim();
-  return '$year-${month.toString().padLeft(2, '0')}-'
-      '${day.toString().padLeft(2, '0')}';
-}
-
 /// Extracts the source activity time for scheduling without changing the
 /// marker/display-date semantics. Update metadata wins; malformed update
 /// metadata falls back to upload metadata.
@@ -394,25 +450,6 @@ DateTime? comicSourceActivityAt(ComicDetails info, {DateTime? now}) {
   return null;
 }
 
-String? _recentChapterFingerprint(ComicChapters? chapters) {
-  if (chapters == null) return null;
-  final entries = <Map<String, String>>[];
-  if (chapters.isGrouped) {
-    for (final group in chapters.groups) {
-      for (final entry in chapters.getGroup(group).entries) {
-        entries.add({'group': group, 'id': entry.key, 'title': entry.value});
-      }
-    }
-  } else {
-    for (final entry in chapters.allChapters.entries) {
-      entries.add({'group': '', 'id': entry.key, 'title': entry.value});
-    }
-  }
-  final recent = entries.take(10).toList(growable: false);
-  final payload = jsonEncode(recent);
-  return sha256.convert(utf8.encode(payload)).toString();
-}
-
 Future<ComicUpdateResult> updateComic(
   FavoriteItemWithUpdateInfo c,
   NetworkFavoriteFolderRef folder, {
@@ -431,16 +468,18 @@ Future<ComicUpdateResult> updateComic(
     if (!canCommit()) return canceled();
     final completedAt = currentTime();
     final author = newInfo.subTitle?.trim();
+    final normalized = TrackingNormalizer.fromComicDetails(newInfo);
     // Commit the check state and every favorite snapshot together. The
     // (likely changed) cover URL is only included when the committed marker
     // proves this is an actual update.
     final updated = manager.applySuccessfulComicCheck(
       folder,
       c.id,
-      updateTime: newInfo.findUpdateTime(),
+      updateTime: normalized.state?.updatedAt?.toIso8601String(),
+      updateState: normalized.state,
       sourceActivityAt: comicSourceActivityAt(newInfo, now: completedAt),
       completedAt: completedAt,
-      updateMarker: comicUpdateMarker(newInfo),
+      updateMarker: null,
       title: newInfo.title,
       author: author?.isNotEmpty == true ? author : newInfo.findAuthor(),
       chapterCount: newInfo.chapters?.length,
@@ -696,13 +735,11 @@ List<_FavoriteListScanJob> _buildFavoriteListScanJobs(
     final state = manager.getFavoriteUpdateScanState(folder);
     final retryReady =
         state?.retryAfter == null || !state!.retryAfter!.isAfter(now);
-    final schemeChanged = state?.markerScheme != updateCheck.markerScheme;
     final due = forceListSnapshots || mode == FollowUpdateMode.force
         ? true
         : mode == FollowUpdateMode.missing
-        ? state?.lastSuccessAt == null || schemeChanged
-        : schemeChanged ||
-              state?.lastSuccessAt == null ||
+        ? state?.lastSuccessAt == null
+        : state?.lastSuccessAt == null ||
               !now.isBefore(
                 state!.lastSuccessAt!.add(updateCheck.scanInterval),
               );
@@ -816,6 +853,7 @@ Future<void> _runFavoriteListScanJobs(
   NetworkFavoriteCacheManager manager,
   List<_FavoriteListScanJob> jobs, {
   required ScanCancellationToken token,
+  required ScanCancellationToken Function(String sourceKey) tokenForSource,
   required DateTime Function() clock,
   required void Function(
     _FavoriteListScanJob job,
@@ -845,7 +883,7 @@ Future<void> _runFavoriteListScanJobs(
         final result = await _runFavoriteListScanJob(
           manager,
           job,
-          token: token,
+          token: tokenForSource(job.folder.sourceKey),
           clock: clock,
           expectedEpoch: expectedEpochs[job.folder.sourceKey]!,
         );
@@ -955,6 +993,7 @@ Stream<UpdateProgress> scanFollowUpdates(
   bool forceListSnapshots = false,
   DateTime Function()? clock,
   Future<void> Function(Duration)? delay,
+  RuntimeGenerationController? generationController,
 }) {
   var stream = StreamController<UpdateProgress>();
   final token = cancellationToken ?? _CallbackScanCancellationToken(isCanceled);
@@ -970,6 +1009,13 @@ Stream<UpdateProgress> scanFollowUpdates(
       forceListSnapshots: forceListSnapshots,
       clock: clock ?? DateTime.now,
       delay: delay ?? _defaultFollowUpdateDelay,
+      tokenForSource: generationController == null
+          ? (_) => token
+          : (sourceKey) => _generationTokenForSource(
+              token,
+              sourceKey,
+              generationController,
+            ),
     ),
   );
   return stream.stream;
@@ -986,6 +1032,7 @@ Future<void> _runScan(
   NetworkFavoriteCacheManager? cache,
   bool includeSuspect = false,
   bool forceListSnapshots = false,
+  required ScanCancellationToken Function(String sourceKey) tokenForSource,
 }) async {
   final manager = cache ?? NetworkFavoriteCacheManager();
   var errors = 0;
@@ -1178,6 +1225,7 @@ Future<void> _runScan(
       manager,
       listJobs,
       token: token,
+      tokenForSource: tokenForSource,
       clock: clock,
       onResult: (job, result) {
         if (result.canceled || !token.canCommit) return;
@@ -1207,11 +1255,12 @@ Future<void> _runScan(
         final i = nextIndex++;
         if (i >= items.length) return;
         final item = items[i];
+        final itemToken = tokenForSource(item.sourceKey);
         final folder = NetworkFavoriteFolderRef(
           sourceKey: item.sourceKey,
           folderId: item.representativeFolderId,
         );
-        if (!token.canCommit) return;
+        if (!token.canCommit || !itemToken.canCommit) return;
         // Re-read the row so the persisted schedule and retry state are current.
         final fresh = manager.getComicUpdateInfo(
           item.sourceKey,
@@ -1219,7 +1268,7 @@ Future<void> _runScan(
           item.representativeFolderId,
         );
         if (fresh == null) {
-          if (!token.canCommit) return;
+          if (!token.canCommit || !itemToken.canCommit) return;
           manager.markScanItemDone(
             runId,
             item.sourceKey,
@@ -1242,13 +1291,13 @@ Future<void> _runScan(
               () => sourceLimiter.run<bool?>(
                 item.sourceKey,
                 interval: () => sourceInterval(item.sourceKey),
-                token: token,
+                token: itemToken,
                 action: () => probeSourceAlive(item.sourceKey),
               ),
             );
             final alive = await probe;
             probingSources.remove(item.sourceKey);
-            if (!token.canCommit) return;
+            if (!token.canCommit || !itemToken.canCommit) return;
             if (alive == false) {
               delistSource(item.sourceKey, reason: 're-probe failed');
             } else {
@@ -1265,13 +1314,13 @@ Future<void> _runScan(
               await sourceLimiter.run<ComicUpdateResult>(
                 item.sourceKey,
                 interval: () => sourceInterval(item.sourceKey),
-                token: token,
+                token: itemToken,
                 action: () => updateComic(
                   fresh,
                   folder,
                   cache: manager,
                   sourceHealthy: sourceHealthy(item.sourceKey),
-                  cancellationToken: token,
+                  cancellationToken: itemToken,
                   clock: clock,
                 ),
                 onCompleted: (completed) {
@@ -1335,12 +1384,12 @@ Future<void> _runScan(
               ) ??
               ComicUpdateResult(false, null, canceled: true);
         } catch (e, s) {
-          if (!token.canCommit) return;
+          if (!token.canCommit || !itemToken.canCommit) return;
           // Defensive: an unexpected exception must never kill the worker or
           // leave the item stuck. Back off by the accumulated failure count
           // like every other failure path.
           Log.error('Follow updates item', e, s);
-          if (!token.canCommit) return;
+          if (!token.canCommit || !itemToken.canCommit) return;
           manager.markComicRetryLaterEverywhere(
             item.sourceKey,
             item.comicId,
@@ -1371,7 +1420,7 @@ Future<void> _runScan(
           );
           continue;
         }
-        if (result.canceled || !token.canCommit) return;
+        if (result.canceled || !token.canCommit || !itemToken.canCommit) return;
         current++;
         if (result.errorMessage != null) {
           final signal = classifyNotFoundError(result.errorMessage!);
@@ -1389,13 +1438,13 @@ Future<void> _runScan(
                 () => sourceLimiter.run<bool?>(
                   sourceKey,
                   interval: () => sourceInterval(sourceKey),
-                  token: token,
+                  token: itemToken,
                   action: () => probeSourceAlive(sourceKey),
                 ),
               );
               final alive = await probe;
               probingSources.remove(sourceKey);
-              if (!token.canCommit) return;
+              if (!token.canCommit || !itemToken.canCommit) return;
               if (alive == false) {
                 delistSource(sourceKey, reason: 'probe failed');
               } else if (alive == true) {
@@ -1407,6 +1456,7 @@ Future<void> _runScan(
               probeWindowHits[sourceKey] = probeWindowHits[sourceKey]! + 1;
             }
           }
+          if (!token.canCommit || !itemToken.canCommit) return;
           errors++;
           manager.markScanItemDone(
             runId,
@@ -1416,6 +1466,7 @@ Future<void> _runScan(
             error: result.errorMessage,
           );
         } else {
+          if (!token.canCommit || !itemToken.canCommit) return;
           checked++;
           if (result.updated) updated++;
           manager.markScanItemDone(
@@ -1462,6 +1513,8 @@ Future<void> _runScan(
           final i = retryIndex++;
           if (i >= notFoundRetries.length) return;
           final retry = notFoundRetries[i];
+          final retryToken = tokenForSource(retry.comic.sourceKey);
+          if (!retryToken.canCommit) return;
           if (manager.isComicSuspectGone(
             retry.comic.sourceKey,
             retry.comic.id,
@@ -1481,18 +1534,20 @@ Future<void> _runScan(
               await sourceLimiter.run<ComicUpdateResult>(
                 retry.comic.sourceKey,
                 interval: () => sourceInterval(retry.comic.sourceKey),
-                token: token,
+                token: retryToken,
                 action: () => updateComic(
                   fresh,
                   retry.folder,
                   cache: manager,
                   sourceHealthy: sourceHealthy(retry.comic.sourceKey),
-                  cancellationToken: token,
+                  cancellationToken: retryToken,
                   clock: clock,
                 ),
               ) ??
               ComicUpdateResult(false, null, canceled: true);
-          if (result.canceled || !token.canCommit) return;
+          if (result.canceled || !token.canCommit || !retryToken.canCommit) {
+            return;
+          }
           if (result.errorMessage == null) {
             checked++;
             if (result.updated) updated++;
@@ -1556,8 +1611,22 @@ Future<FavoriteRecheckResult> recheckFavoriteComicDetailed(
   String sourceKey,
   String comicId, {
   NetworkFavoriteCacheManager? cache,
+  RuntimeGenerationController? generationController,
 }) async {
   final manager = cache ?? NetworkFavoriteCacheManager();
+  final generationToken = generationController == null
+      ? null
+      : _generationTokenForSource(
+          _CallbackScanCancellationToken(() => false),
+          sourceKey,
+          generationController,
+        );
+  if (generationToken != null && !generationToken.canCommit) {
+    return const FavoriteRecheckResult(
+      succeeded: false,
+      errorMessage: 'Tracking generation changed',
+    );
+  }
   final source = ComicSource.find(sourceKey);
   final updateCheck = source?.favoriteData?.updateCheck;
   if (updateCheck != null) {
@@ -1581,6 +1650,12 @@ Future<FavoriteRecheckResult> recheckFavoriteComicDetailed(
     try {
       manager.recordFavoriteUpdateScanAttempt(folder);
       final result = await updateCheck.load(folder.folderId);
+      if (generationToken != null && !generationToken.canCommit) {
+        return const FavoriteRecheckResult(
+          succeeded: false,
+          errorMessage: 'Tracking generation changed',
+        );
+      }
       if (!manager.isFavoriteSessionEpochCurrent(sourceKey, expectedEpoch)) {
         return const FavoriteRecheckResult(
           succeeded: false,
@@ -1601,6 +1676,12 @@ Future<FavoriteRecheckResult> recheckFavoriteComicDetailed(
           errorMessage: 'Favorite session changed',
         );
       }
+      if (generationToken != null && !generationToken.canCommit) {
+        return const FavoriteRecheckResult(
+          succeeded: false,
+          errorMessage: 'Tracking generation changed',
+        );
+      }
       manager.applyCompleteFavoriteUpdateSnapshot(
         source!.favoriteData!,
         folder,
@@ -1611,6 +1692,12 @@ Future<FavoriteRecheckResult> recheckFavoriteComicDetailed(
       return FavoriteRecheckResult(succeeded: true, found: found);
     } catch (e, s) {
       Log.error('Favorite list recheck', e.toString(), s);
+      if (generationToken != null && !generationToken.canCommit) {
+        return const FavoriteRecheckResult(
+          succeeded: false,
+          errorMessage: 'Tracking generation changed',
+        );
+      }
       if (!manager.isFavoriteSessionEpochCurrent(sourceKey, expectedEpoch)) {
         return const FavoriteRecheckResult(
           succeeded: false,
@@ -1650,6 +1737,7 @@ Future<FavoriteRecheckResult> recheckFavoriteComicDetailed(
       itemToCheck,
       folderToCheck,
       cache: manager,
+      cancellationToken: generationToken,
     );
     succeeded = result.errorMessage == null;
   }
@@ -1661,11 +1749,13 @@ Future<bool> recheckFavoriteComic(
   String sourceKey,
   String comicId, {
   NetworkFavoriteCacheManager? cache,
+  RuntimeGenerationController? generationController,
 }) async {
   final result = await recheckFavoriteComicDetailed(
     sourceKey,
     comicId,
     cache: cache,
+    generationController: generationController,
   );
   return result.succeeded;
 }

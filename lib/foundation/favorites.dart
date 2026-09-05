@@ -10,13 +10,137 @@ import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/follow_update_schedule.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';
+import 'package:venera/foundation/tracking/tracking.dart';
 import 'package:venera/utils/io.dart';
 
 import 'app.dart';
-import 'follow_update_marker.dart';
 
 String _formatFavoriteTime(DateTime time) =>
     time.toIso8601String().replaceFirst('T', ' ').substring(0, 19);
+
+class _SqliteTrackingApplyStore implements TrackingApplyStore {
+  const _SqliteTrackingApplyStore(this.database);
+
+  final Database database;
+
+  @override
+  TrackingApplyTransaction beginTrackingTransaction() =>
+      _SqliteTrackingApplyTransaction(database);
+}
+
+class _SqliteTrackingApplyTransaction implements TrackingApplyTransaction {
+  _SqliteTrackingApplyTransaction(this.database, {bool begin = true}) {
+    if (begin) database.execute('BEGIN');
+  }
+
+  final Database database;
+  bool _closed = false;
+
+  @override
+  TrackingBaseline? readBaseline(String sourceKey, String comicId) {
+    final rows = database.select(
+      '''SELECT update_state, update_marker, has_new_update,
+                source_update_metadata, baseline_at, source_activity_at
+         FROM comic_check_state
+         WHERE source_key = ? AND comic_id = ? LIMIT 1''',
+      [sourceKey, comicId],
+    );
+    if (rows.isEmpty) return null;
+    final row = rows.first;
+    UpdateState? state;
+    final rawState = row['update_state'];
+    if (rawState is String && rawState.isNotEmpty) {
+      try {
+        state = UpdateState.fromJson(jsonDecode(rawState));
+      } catch (e) {
+        Log.warning('FavoriteUpdate', 'Ignoring corrupted UpdateState: $e');
+      }
+    }
+    Map<String, dynamic>? metadata;
+    final rawMetadata = row['source_update_metadata'];
+    if (rawMetadata is String && rawMetadata.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(rawMetadata);
+        if (decoded is Map) metadata = Map<String, dynamic>.from(decoded);
+      } catch (e) {
+        Log.warning(
+          'FavoriteUpdate',
+          'Ignoring corrupted tracking metadata: $e',
+        );
+      }
+    }
+    return TrackingBaseline(
+      state: state,
+      marker: row['update_marker'] as String?,
+      metadata: metadata,
+      hasNewUpdate: (row['has_new_update'] as int? ?? 0) != 0,
+      baselineAt: _millisToDateTime(row['baseline_at']),
+      sourceActivityAt: _millisToDateTime(row['source_activity_at']),
+    );
+  }
+
+  @override
+  void writeBaseline(
+    String sourceKey,
+    String comicId,
+    TrackingBaseline baseline,
+  ) {
+    final encodedState = baseline.state == null
+        ? null
+        : jsonEncode(baseline.state!.toJson());
+    final encodedMetadata = baseline.metadata == null
+        ? null
+        : jsonEncode(baseline.metadata);
+    final updatedAt = baseline.state?.updatedAt?.toIso8601String();
+    database.execute(
+      '''INSERT INTO comic_check_state
+           (source_key, comic_id, last_update_time, update_state,
+            update_marker, last_check_time, has_new_update, baseline_at,
+            source_activity_at, source_update_metadata)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(source_key, comic_id) DO UPDATE SET
+           last_update_time = excluded.last_update_time,
+           update_state = excluded.update_state,
+           update_marker = excluded.update_marker,
+           last_check_time = COALESCE(excluded.last_check_time,
+                                      comic_check_state.last_check_time),
+           has_new_update = excluded.has_new_update,
+           baseline_at = COALESCE(excluded.baseline_at,
+                                  comic_check_state.baseline_at),
+           source_activity_at = excluded.source_activity_at,
+           source_update_metadata = excluded.source_update_metadata''',
+      [
+        sourceKey,
+        comicId,
+        updatedAt,
+        encodedState,
+        baseline.marker,
+        null,
+        baseline.hasNewUpdate ? 1 : 0,
+        baseline.baselineAt?.millisecondsSinceEpoch,
+        baseline.sourceActivityAt?.millisecondsSinceEpoch,
+        encodedMetadata,
+      ],
+    );
+  }
+
+  @override
+  void commit() {
+    if (_closed) throw StateError('tracking transaction already closed');
+    database.execute('COMMIT');
+    _closed = true;
+  }
+
+  @override
+  void rollback() {
+    if (_closed) return;
+    database.execute('ROLLBACK');
+    _closed = true;
+  }
+
+  static DateTime? _millisToDateTime(Object? value) =>
+      value is int ? DateTime.fromMillisecondsSinceEpoch(value) : null;
+}
 
 /// A cached copy of a comic in a source-owned favorite folder.
 ///
@@ -155,6 +279,7 @@ class FavoriteItemWithUpdateInfo extends FavoriteItem {
     this.manualHotUntil,
     this.manualHotEnabled = false,
     this.oldScheduleJitterApplied = false,
+    this.updateState,
     this.sourceUpdateMetadata,
   }) : lastCheckTime = lastCheckTime == null
            ? null
@@ -188,6 +313,7 @@ class FavoriteItemWithUpdateInfo extends FavoriteItem {
   final DateTime? manualHotUntil;
   final bool manualHotEnabled;
   final bool oldScheduleJitterApplied;
+  final UpdateState? updateState;
   final Map<String, dynamic>? sourceUpdateMetadata;
 
   DateTime? get effectiveActivityAt => sourceActivityAt ?? baselineAt;
@@ -216,7 +342,8 @@ class FavoriteItemWithUpdateInfo extends FavoriteItem {
   );
 
   @override
-  String get description => '${updateTime ?? 'Unknown'} | $sourceKey';
+  String get description =>
+      '${updateTime ?? updateState?.updatedAt?.toIso8601String() ?? 'Unknown'} | $sourceKey';
 }
 
 /// Lightweight scan-candidate row (snapshot row + check-state join), used
@@ -476,6 +603,7 @@ class FavoriteUpdateScanState {
     this.lastComicCount = 0,
   });
 
+  @Deprecated('Legacy schema column is retained but never read or written')
   final String? markerScheme;
   final DateTime? lastAttemptAt;
   final DateTime? lastSuccessAt;
@@ -546,6 +674,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   static const _backgroundRefreshAfter = Duration(minutes: 5);
   static const backgroundSummaryRefreshAfter = Duration(hours: 6);
   static const _followScheduleBackfillKey = 'follow_schedule_state_backfill_v1';
+  static const _trackingEvidenceMigrationKey = 'tracking_evidence_migration_v1';
   static const _followScheduleCoreColumns = <String>{
     'baseline_at',
     'source_activity_at',
@@ -657,6 +786,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         comic_id TEXT NOT NULL,
         last_update_time TEXT,
         update_marker TEXT,
+        update_state TEXT,
         last_check_time INTEGER,
         has_new_update INTEGER NOT NULL DEFAULT 0,
         retry_after INTEGER,
@@ -692,6 +822,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       _writeFollowScheduleBackfillStatus('pending');
     }
     final checkStateAdditions = <String, String>{
+      'update_state': 'TEXT',
       'baseline_at': 'INTEGER',
       'source_activity_at': 'INTEGER',
       'next_check_at': 'INTEGER',
@@ -819,6 +950,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     _migrateFollowScheduleState(
       applyLegacyBackfill: applyLegacyFollowScheduleBackfill,
     );
+    _migrateTrackingEvidenceOnce();
     if (applyLegacyFollowScheduleBackfill || backfillStatus != 'done') {
       _writeFollowScheduleBackfillStatus('done');
     }
@@ -826,6 +958,33 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       await appdata.ensureInit();
       await _migrateLegacyLocalFavorites();
     }
+  }
+
+  /// Returns the host-owned transaction store used by Cloud and local
+  /// tracking producers. The database itself remains private to favorites so
+  /// callers cannot bypass the cache's schema boundary.
+  TrackingApplyStore get trackingApplyStore => _SqliteTrackingApplyStore(_db);
+
+  /// Builds the exact local favorite interest set from cached membership.
+  /// [fileNameForSource] is supplied by the loaded runtime so same-key source
+  /// variants do not silently inherit one another's identity.
+  List<TrackingFavoriteRef> getTrackingFavoriteRefs({
+    String? Function(String sourceKey)? fileNameForSource,
+  }) {
+    final rows = _db.select('''
+      SELECT source_key, comic_id FROM favorite_membership
+      UNION
+      SELECT source_key, comic_id FROM favorite_items
+      ORDER BY source_key, comic_id
+    ''');
+    return List.unmodifiable([
+      for (final row in rows)
+        TrackingFavoriteRef(
+          sourceKey: row['source_key'] as String,
+          comicId: row['comic_id'] as String,
+          fileName: fileNameForSource?.call(row['source_key'] as String),
+        ),
+    ]);
   }
 
   void _writeFollowScheduleBackfillStatus(String status) {
@@ -1460,7 +1619,9 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     if (rows.isEmpty) return null;
     final row = rows.first;
     return FavoriteUpdateScanState(
-      markerScheme: row['marker_scheme'] as String?,
+      // Retained only for source compatibility; the legacy column is no
+      // longer read as tracking authority.
+      markerScheme: null,
       lastAttemptAt: _dateTimeFromRow(row['last_attempt_at']),
       lastSuccessAt: _dateTimeFromRow(row['last_success_at']),
       retryAfter: _dateTimeFromRow(row['retry_after']),
@@ -1517,134 +1678,103 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   }
 
   String? _favoriteUpdateMetadataJson(FavoriteUpdateHint hint) {
-    final metadata = <String, dynamic>{};
-    if (hint.metadata != null) {
-      try {
-        metadata.addAll(hint.metadata!);
-      } catch (e) {
-        Log.warning('FavoriteUpdate', 'Dropped invalid source metadata: $e');
-      }
-    }
-    // isNew is a diagnostic field, not authoritative update evidence.
-    metadata['isNew'] = hint.isNew;
+    final metadata = hint.metadata;
+    if (metadata == null) return null;
     try {
       final encoded = jsonEncode(metadata);
-      if (encoded.length > 4096) {
+      if (utf8.encode(encoded).length > 4096) {
         Log.warning(
           'FavoriteUpdate',
-          'Dropped source metadata exceeding the 4096 UTF-16 code-unit limit',
+          'Dropped source metadata exceeding the 4096 UTF-8 byte limit',
         );
-        return jsonEncode({'isNew': hint.isNew});
+        return null;
       }
       return encoded;
     } catch (e) {
       Log.warning('FavoriteUpdate', 'Dropped invalid source metadata: $e');
-      return jsonEncode({'isNew': hint.isNew});
+      return null;
     }
+  }
+
+  /// Applies a validated observation through the shared App-owned tracking
+  /// service. Callers that need to combine it with other cache writes should
+  /// use the snapshot path below, which keeps the transaction open.
+  TrackingApplyResult applyTrackingObservation(
+    TrackingObservation observation,
+  ) {
+    final result = TrackingApplyService(
+      _SqliteTrackingApplyStore(_db),
+      diagnostics: trackingDiagnostics,
+    ).apply(observation);
+    notifyListeners();
+    return result;
   }
 
   bool _applyFavoriteUpdateHint(
     NetworkFavoriteFolderRef folder, {
-    required FavoriteUpdateCheckData updateCheck,
     required String comicId,
     required FavoriteUpdateHint hint,
     required DateTime completedAt,
   }) {
-    final candidateActivity = parseFollowUpdateActivityTime(
-      hint.updateTime,
-      now: completedAt,
+    final facts = TrackingNormalizer.fromFavoriteUpdate(hint);
+    final observation = TrackingObservation(
+      origin: TrackingObservationOrigin.localOptimized,
+      revision: 'local',
+      artifact: TrackingArtifactIdentity(
+        sourceKey: folder.sourceKey,
+        fileName: '${folder.sourceKey}.js',
+      ),
+      comicId: comicId,
+      observedAt: completedAt,
+      validUntil: completedAt,
+      state: facts.state,
+      sourceUnread: facts.sourceUnread,
+      marker: facts.marker,
+      metadata: facts.metadata,
+      normalizationDrops: facts.droppedFields
+          .map(
+            (item) => <String, String>{
+              'field': item.field,
+              'reason': item.reason,
+            },
+          )
+          .toList(growable: false),
+      compatibilityNotes: facts.compatibilityNotes,
     );
-    final candidateMarker = encodeFollowUpdateMarker(
-      updateCheck.markerScheme,
-      hint.marker,
-    );
-    final rows = _db.select(
-      '''SELECT * FROM comic_check_state
-         WHERE source_key = ? AND comic_id = ? LIMIT 1''',
-      [folder.sourceKey, comicId],
-    );
-    final previous = rows.isEmpty ? null : rows.first;
-    final previousMarker = previous?['update_marker'] as String?;
-    final previousHasMarker =
-        previousMarker != null && previousMarker.isNotEmpty;
-    final previousParts = previousHasMarker
-        ? decodeFollowUpdateMarker(previousMarker)
-        : null;
-    final candidateParts = decodeFollowUpdateMarker(candidateMarker);
-    final previousActivity = (previous?['last_update_time'] as String?) == null
-        ? null
-        : parseFollowUpdateActivityTime(
-            previous!['last_update_time'] as String,
-            now: completedAt,
-          );
-    final effectivePreviousActivity =
-        previousActivity ?? _dateTimeFromRow(previous?['source_activity_at']);
-    final schemeChanged =
-        previousParts != null && previousParts.scheme != candidateParts.scheme;
-    final sameScheme = previousParts != null && !schemeChanged;
-    final candidateIsOlder =
-        sameScheme &&
-        effectivePreviousActivity != null &&
-        candidateActivity != null &&
-        candidateActivity.isBefore(effectivePreviousActivity);
-    final markerSame = previousMarker == candidateMarker;
-    final accepted =
-        !previousHasMarker ||
-        schemeChanged ||
-        (!candidateIsOlder && !markerSame);
-    final markerChanged = accepted && previousHasMarker && !schemeChanged;
-    final remotePositive = hint.isNew == true;
-    final detected = !previousHasMarker || schemeChanged
-        ? remotePositive
-        : markerChanged;
-    final previousHasNew = (previous?['has_new_update'] as int? ?? 0) != 0;
-    final baseline = _dateTimeFromRow(previous?['baseline_at']) ?? completedAt;
-    final acceptedLastUpdateTime = accepted
-        ? hint.updateTime
-        : previous?['last_update_time'];
-    final acceptedSourceActivity = accepted
-        ? candidateActivity
-        : _dateTimeFromRow(previous?['source_activity_at']);
-    final sourceMetadata = _favoriteUpdateMetadataJson(hint);
-    _db.execute(
-      '''INSERT INTO comic_check_state
-           (source_key, comic_id, last_update_time, update_marker,
-            last_check_time, has_new_update, retry_after, check_failures,
-            check_not_found_count, check_suspect_gone, baseline_at,
-            source_activity_at, next_check_at, auto_hot_until,
-            manual_hot_until, manual_hot_enabled, old_schedule_jitter_applied,
-            source_update_metadata)
-         VALUES (?, ?, ?, ?, ?, ?, NULL, 0, 0, 0, ?, ?, NULL, NULL, NULL, 0, 0, ?)
-         ON CONFLICT(source_key, comic_id) DO UPDATE SET
-           last_update_time = excluded.last_update_time,
-           update_marker = excluded.update_marker,
-           last_check_time = excluded.last_check_time,
-           has_new_update = excluded.has_new_update,
-           retry_after = NULL,
-           check_failures = 0,
-           check_not_found_count = 0,
-           check_suspect_gone = 0,
-           baseline_at = excluded.baseline_at,
-           source_activity_at = excluded.source_activity_at,
-           next_check_at = NULL,
-           auto_hot_until = NULL,
-           manual_hot_until = NULL,
-           manual_hot_enabled = 0,
-           old_schedule_jitter_applied = 0,
-           source_update_metadata = excluded.source_update_metadata''',
-      [
-        folder.sourceKey,
-        comicId,
-        acceptedLastUpdateTime,
-        accepted ? candidateMarker : previousMarker,
-        completedAt.millisecondsSinceEpoch,
-        (previousHasNew || detected) ? 1 : 0,
-        baseline.millisecondsSinceEpoch,
-        acceptedSourceActivity?.millisecondsSinceEpoch,
-        sourceMetadata,
-      ],
-    );
-    return detected;
+    final transaction = _SqliteTrackingApplyTransaction(_db, begin: false);
+    final result = TrackingApplyService(
+      _SqliteTrackingApplyStore(_db),
+      diagnostics: trackingDiagnostics,
+    ).applyInTransaction(transaction, observation);
+    return result.decision.contentChange == ContentChange.changed;
+  }
+
+  /// Invalidates only pre-UpdateState comparison evidence. The transaction
+  /// and marker make retries safe: an interrupted migration rolls back, while
+  /// a completed migration never touches a later baseline.
+  void _migrateTrackingEvidenceOnce() {
+    final rows = _db.select('SELECT value FROM metadata WHERE key = ?', [
+      _trackingEvidenceMigrationKey,
+    ]);
+    if (rows.isNotEmpty && rows.first['value'] == 'done') return;
+
+    _db.execute('BEGIN');
+    try {
+      _db.execute('''
+        UPDATE comic_check_state
+        SET update_state = NULL,
+            update_marker = NULL,
+            source_update_metadata = NULL
+      ''');
+      _db.execute(
+        'INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)',
+        [_trackingEvidenceMigrationKey, 'done'],
+      );
+      _db.execute('COMMIT');
+    } catch (_) {
+      _db.execute('ROLLBACK');
+      rethrow;
+    }
   }
 
   void _validateFavoriteUpdateSnapshot(
@@ -1671,15 +1801,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         throw StateError('Invalid or duplicate comic ID in update snapshot');
       }
       final hint = comic.favoriteUpdate;
-      if (hint == null ||
-          hint.marker.trim().isEmpty ||
-          (hint.updateTime != null &&
-              (hint.updateTime!.trim().isEmpty ||
-                  parseFollowUpdateActivityTime(
-                        hint.updateTime,
-                        now: completedAt,
-                      ) ==
-                      null))) {
+      if (hint == null) {
         throw StateError('Invalid full update evidence for ${comic.id}');
       }
       // Validate the diagnostic payload before starting the transaction.
@@ -1694,7 +1816,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     required DateTime completedAt,
   }) {
     _validateFavoriteUpdateSnapshot(data, folder, snapshot, completedAt);
-    final updateCheck = data.updateCheck!;
     final oldRows = _db.select(
       '''SELECT * FROM favorite_items
          WHERE source_key = ? AND folder_id = ?''',
@@ -1783,7 +1904,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
           );
           if (_applyFavoriteUpdateHint(
             folder,
-            updateCheck: updateCheck,
             comicId: item.id,
             hint: hint!,
             completedAt: completedAt,
@@ -1809,12 +1929,11 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       );
       _db.execute(
         '''INSERT INTO favorite_update_scan_state
-             (source_key, folder_id, marker_scheme, last_attempt_at,
+             (source_key, folder_id, last_attempt_at,
               last_success_at, retry_after, check_failures,
               last_page_count, last_comic_count)
-           VALUES (?, ?, ?, ?, ?, NULL, 0, ?, ?)
+           VALUES (?, ?, ?, ?, NULL, 0, ?, ?)
            ON CONFLICT(source_key, folder_id) DO UPDATE SET
-             marker_scheme = excluded.marker_scheme,
              last_attempt_at = excluded.last_attempt_at,
              last_success_at = excluded.last_success_at,
              retry_after = NULL,
@@ -1824,7 +1943,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         [
           folder.sourceKey,
           folder.folderId,
-          updateCheck.markerScheme,
           lastAttemptAt.millisecondsSinceEpoch,
           completedAt.millisecondsSinceEpoch,
           pageCount,
@@ -2122,11 +2240,10 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
           ],
         );
         if (updateCheck != null && remoteItem.id.isNotEmpty) {
-          if (hint != null && hint.marker.trim().isNotEmpty) {
+          if (hint != null) {
             try {
               _applyFavoriteUpdateHint(
                 folder,
-                updateCheck: updateCheck,
                 comicId: item.id,
                 hint: hint,
                 completedAt: now,
@@ -2831,6 +2948,68 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     return rows.isNotEmpty;
   }
 
+  /// Returns the source-scoped favorite identities that should be sent as
+  /// Cloud demand. Membership is the durable source of truth; the cached
+  /// item union keeps the method useful while an older cache is being
+  /// upgraded or while a page snapshot is being rebuilt.
+  List<TrackingFavoriteRef> getCloudTrackingFavoriteRefs() {
+    final rows = _db.select('''
+      SELECT source_key, comic_id FROM favorite_membership
+      UNION
+      SELECT source_key, comic_id FROM favorite_items
+      ORDER BY source_key, comic_id
+    ''');
+    return List.unmodifiable(
+      rows.map(
+        (row) => TrackingFavoriteRef(
+          sourceKey: row['source_key'] as String,
+          comicId: row['comic_id'] as String,
+          fileName: _loadedArtifactFileName(row['source_key'] as String),
+        ),
+      ),
+    );
+  }
+
+  /// Builds exact `(sourceKey, fileName, comicId)` Cloud interests from the
+  /// active registry. Sources with a managed artifact that is not advertised
+  /// by the Server are filtered by [capableArtifacts].
+  List<TrackingInterest> buildCloudTrackingInterests(
+    ActiveArtifactRegistry registry, {
+    Iterable<TrustedArtifact>? capableArtifacts,
+  }) {
+    return const CloudInterestSync().buildInterests(
+      getCloudTrackingFavoriteRefs(),
+      registry: registry,
+      capableArtifacts: capableArtifacts,
+    );
+  }
+
+  /// Synchronizes the canonical interest set through the existing client.
+  /// This method is intentionally a full replacement: removing a local
+  /// favorite must remove its Server demand in the same idempotent update.
+  Future<CloudClientState> syncCloudTrackingInterests({
+    required CloudTrackingClient client,
+    required ActiveArtifactRegistry registry,
+    required bool cloudEnabled,
+    Iterable<TrustedArtifact>? capableArtifacts,
+  }) {
+    return const CloudInterestSync().synchronize(
+      client: client,
+      cloudEnabled: cloudEnabled,
+      favorites: getCloudTrackingFavoriteRefs(),
+      registry: registry,
+      capableArtifacts: capableArtifacts,
+    );
+  }
+
+  String? _loadedArtifactFileName(String sourceKey) {
+    final source = ComicSource.find(sourceKey);
+    if (source == null) return null;
+    final normalized = source.filePath.replaceAll('\\', '/');
+    final fileName = normalized.split('/').last.trim();
+    return fileName.isEmpty ? null : fileName;
+  }
+
   String? _cachedFavoriteId(String sourceKey, String folderId, String comicId) {
     final rows = _db.select(
       '''SELECT favorite_id FROM favorite_items
@@ -3247,6 +3426,15 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     Row row,
     Map<String, Object?>? state,
   ) {
+    UpdateState? updateState;
+    final rawState = state?['update_state'];
+    if (rawState is String && rawState.isNotEmpty) {
+      try {
+        updateState = UpdateState.fromJson(jsonDecode(rawState));
+      } catch (e) {
+        Log.warning('FavoriteUpdate', 'Ignoring corrupted UpdateState: $e');
+      }
+    }
     Map<String, dynamic>? sourceUpdateMetadata;
     final rawMetadata = state?['source_update_metadata'];
     if (rawMetadata is String && rawMetadata.isNotEmpty) {
@@ -3280,6 +3468,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       manualHotEnabled: (state?['manual_hot_enabled'] as int? ?? 0) != 0,
       oldScheduleJitterApplied:
           (state?['old_schedule_jitter_applied'] as int? ?? 0) != 0,
+      updateState: updateState,
       sourceUpdateMetadata: sourceUpdateMetadata,
     );
   }
@@ -3356,6 +3545,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     NetworkFavoriteFolderRef fallback,
     String comicId, {
     String? updateTime,
+    UpdateState? updateState,
     DateTime? sourceActivityAt,
     DateTime? completedAt,
     String? updateMarker,
@@ -3368,6 +3558,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     final finishedAt = completedAt ?? DateTime.now();
     final candidateActivity =
         sourceActivityAt ??
+        updateState?.updatedAt ??
         parseFollowUpdateActivityTime(updateTime, now: finishedAt);
     final folders = _comicFolders(fallback, comicId);
     var changed = false;
@@ -3380,11 +3571,43 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       );
       final previous = previousRows.isEmpty ? null : previousRows.first;
       final previousMarker = previous?['update_marker'] as String?;
-      changed = _hasSameVersionMarkerChanged(previousMarker, updateMarker);
+      final trackingTransaction = _SqliteTrackingApplyTransaction(
+        _db,
+        begin: false,
+      );
+      final trackingResult =
+          TrackingApplyService(
+            _SqliteTrackingApplyStore(_db),
+            diagnostics: trackingDiagnostics,
+          ).applyInTransaction(
+            trackingTransaction,
+            TrackingObservation(
+              origin: TrackingObservationOrigin.localDetail,
+              revision: 'local',
+              artifact: TrackingArtifactIdentity(
+                sourceKey: sourceKey,
+                fileName: '$sourceKey.js',
+              ),
+              comicId: comicId,
+              observedAt: finishedAt,
+              validUntil: finishedAt,
+              state: updateState,
+              marker: updateMarker,
+            ),
+          );
+      changed = trackingResult.decision.contentChange == ContentChange.changed;
+      final acceptedUpdateMarker = trackingResult.baselinePersisted
+          ? updateMarker
+          : previousMarker;
+      final acceptedLastUpdateTime = trackingResult.baselinePersisted
+          ? updateState?.updatedAt?.toIso8601String() ?? updateTime
+          : previous?['last_update_time'] as String?;
       final previousActivity = _dateTimeFromRow(
         previous?['source_activity_at'],
       );
-      final acceptedActivity = candidateActivity == null
+      final acceptedActivity = !trackingResult.baselinePersisted
+          ? previousActivity
+          : candidateActivity == null
           ? previousActivity
           : previousActivity == null ||
                 candidateActivity.isAfter(previousActivity)
@@ -3429,20 +3652,16 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
              manual_hot_enabled, old_schedule_jitter_applied)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(source_key, comic_id) DO UPDATE SET
-             last_update_time = COALESCE(
-               excluded.last_update_time, comic_check_state.last_update_time),
-             update_marker = COALESCE(
-               excluded.update_marker, comic_check_state.update_marker),
+             last_update_time = excluded.last_update_time,
+             update_marker = excluded.update_marker,
              last_check_time = excluded.last_check_time,
              retry_after = NULL,
              check_failures = 0,
              check_not_found_count = 0,
              check_suspect_gone = 0,
-             has_new_update = CASE WHEN ? THEN 1
-                                   ELSE comic_check_state.has_new_update END,
+             has_new_update = excluded.has_new_update,
              baseline_at = excluded.baseline_at,
-             source_activity_at = COALESCE(
-               excluded.source_activity_at, comic_check_state.source_activity_at),
+             source_activity_at = excluded.source_activity_at,
              next_check_at = excluded.next_check_at,
              auto_hot_until = excluded.auto_hot_until,
              manual_hot_until = excluded.manual_hot_until,
@@ -3451,10 +3670,10 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         [
           sourceKey,
           comicId,
-          updateTime,
-          updateMarker,
+          acceptedLastUpdateTime,
+          acceptedUpdateMarker,
           finishedAt.millisecondsSinceEpoch,
-          changed ? 1 : 0,
+          trackingResult.hasNewUpdate ? 1 : 0,
           baseline.millisecondsSinceEpoch,
           acceptedActivity?.millisecondsSinceEpoch,
           decision.nextCheckAt.millisecondsSinceEpoch,
@@ -3462,7 +3681,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
           manualUntil?.millisecondsSinceEpoch,
           manualEnabled ? 1 : 0,
           jitterApplied ? 1 : 0,
-          changed ? 1 : 0,
         ],
       );
       for (final folder in folders) {
@@ -3484,18 +3702,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     return changed;
   }
 
-  static bool _hasSameVersionMarkerChanged(
-    String? previousMarker,
-    String? updateMarker,
-  ) {
-    if (previousMarker == null || updateMarker == null) return false;
-    final previousVersion = previousMarker.startsWith('v2|') ? 'v2' : 'v1';
-    final updateVersion = updateMarker.startsWith('v2|') ? 'v2' : 'v1';
-    // A marker format migration establishes a new baseline. This prevents
-    // the first v2 scan from reporting every existing comic as changed.
-    return previousVersion == updateVersion && previousMarker != updateMarker;
-  }
-
   /// Records a completed detail check in the comic-level state table. The
   /// first marker only establishes a baseline; later marker changes are
   /// actual updates. A successful check clears every delist/retry marker.
@@ -3503,6 +3709,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     String sourceKey,
     String comicId, {
     String? updateTime,
+    UpdateState? updateState,
     DateTime? sourceActivityAt,
     DateTime? completedAt,
     String? updateMarker,
@@ -3510,6 +3717,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     final finishedAt = completedAt ?? DateTime.now();
     final candidateActivity =
         sourceActivityAt ??
+        updateState?.updatedAt ??
         parseFollowUpdateActivityTime(updateTime, now: finishedAt);
     _db.execute('BEGIN');
     try {
@@ -3519,14 +3727,45 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         [sourceKey, comicId],
       );
       final previous = rows.isEmpty ? null : rows.first;
-      final changed = _hasSameVersionMarkerChanged(
-        previous?['update_marker'] as String?,
-        updateMarker,
+      final previousMarker = previous?['update_marker'] as String?;
+      final trackingTransaction = _SqliteTrackingApplyTransaction(
+        _db,
+        begin: false,
       );
+      final trackingResult =
+          TrackingApplyService(
+            _SqliteTrackingApplyStore(_db),
+            diagnostics: trackingDiagnostics,
+          ).applyInTransaction(
+            trackingTransaction,
+            TrackingObservation(
+              origin: TrackingObservationOrigin.localDetail,
+              revision: 'local',
+              artifact: TrackingArtifactIdentity(
+                sourceKey: sourceKey,
+                fileName: '$sourceKey.js',
+              ),
+              comicId: comicId,
+              observedAt: finishedAt,
+              validUntil: finishedAt,
+              state: updateState,
+              marker: updateMarker,
+            ),
+          );
+      final changed =
+          trackingResult.decision.contentChange == ContentChange.changed;
+      final acceptedUpdateMarker = trackingResult.baselinePersisted
+          ? updateMarker
+          : previousMarker;
+      final acceptedLastUpdateTime = trackingResult.baselinePersisted
+          ? updateState?.updatedAt?.toIso8601String() ?? updateTime
+          : previous?['last_update_time'] as String?;
       final previousActivity = _dateTimeFromRow(
         previous?['source_activity_at'],
       );
-      final acceptedActivity = candidateActivity == null
+      final acceptedActivity = !trackingResult.baselinePersisted
+          ? previousActivity
+          : candidateActivity == null
           ? previousActivity
           : previousActivity == null ||
                 candidateActivity.isAfter(previousActivity)
@@ -3570,20 +3809,16 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
              manual_hot_enabled, old_schedule_jitter_applied)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(source_key, comic_id) DO UPDATE SET
-             last_update_time = COALESCE(
-               excluded.last_update_time, comic_check_state.last_update_time),
-             update_marker = COALESCE(
-               excluded.update_marker, comic_check_state.update_marker),
+             last_update_time = excluded.last_update_time,
+             update_marker = excluded.update_marker,
              last_check_time = excluded.last_check_time,
              retry_after = NULL,
              check_failures = 0,
              check_not_found_count = 0,
              check_suspect_gone = 0,
-             has_new_update = CASE WHEN ? THEN 1
-                                   ELSE comic_check_state.has_new_update END,
+             has_new_update = excluded.has_new_update,
              baseline_at = excluded.baseline_at,
-             source_activity_at = COALESCE(
-               excluded.source_activity_at, comic_check_state.source_activity_at),
+             source_activity_at = excluded.source_activity_at,
              next_check_at = excluded.next_check_at,
              auto_hot_until = excluded.auto_hot_until,
              manual_hot_until = excluded.manual_hot_until,
@@ -3592,10 +3827,10 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         [
           sourceKey,
           comicId,
-          updateTime,
-          updateMarker,
+          acceptedLastUpdateTime,
+          acceptedUpdateMarker,
           finishedAt.millisecondsSinceEpoch,
-          changed ? 1 : 0,
+          trackingResult.hasNewUpdate ? 1 : 0,
           baseline.millisecondsSinceEpoch,
           acceptedActivity?.millisecondsSinceEpoch,
           decision.nextCheckAt.millisecondsSinceEpoch,
@@ -3603,7 +3838,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
           manualUntil?.millisecondsSinceEpoch,
           manualEnabled ? 1 : 0,
           decision.appliedOldScheduleJitter ? 1 : 0,
-          changed ? 1 : 0,
         ],
       );
       _db.execute('COMMIT');
@@ -3834,6 +4068,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         UPDATE comic_check_state
         SET last_check_time = NULL,
             last_update_time = NULL,
+            update_state = NULL,
             update_marker = NULL,
             has_new_update = 0,
             retry_after = NULL,
@@ -3890,6 +4125,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       _db.execute(
         '''UPDATE comic_check_state
            SET last_update_time = NULL,
+               update_state = NULL,
                update_marker = NULL,
                last_check_time = NULL,
                has_new_update = 0,

@@ -214,7 +214,13 @@ class DataSync with ChangeNotifier {
         Log.info("Data Sync", "Downloading data from WebDAV server");
         var localFile = File(FilePath.join(App.cachePath, file.name!));
         await client.read2File(file.name!, localFile.path);
-        await importAppData(localFile, true);
+        final result = await importAppData(localFile, true);
+        if (result.sourceSkipped) {
+          Log.info(
+            "Data Sync",
+            "Source scripts were not imported while Cloud owns runtimes.",
+          );
+        }
         await localFile.delete();
         Log.info("Data Sync", "Data downloaded successfully");
         return const Res(true);

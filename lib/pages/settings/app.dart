@@ -8,15 +8,71 @@ class AppSettings extends StatefulWidget {
 }
 
 class _AppSettingsState extends State<AppSettings> {
+  Future<List<TrackingArtifactStatus>> _trackingStatusFuture = App.cloudTracking
+      .statuses();
+
+  @override
+  void initState() {
+    super.initState();
+    App.cloudTracking.addListener(_onTrackingChanged);
+  }
+
+  @override
+  void dispose() {
+    App.cloudTracking.removeListener(_onTrackingChanged);
+    super.dispose();
+  }
+
+  void _onTrackingChanged() {
+    if (!mounted) return;
+    setState(() {
+      _trackingStatusFuture = App.cloudTracking.statuses();
+    });
+  }
+
+  Widget _trackingArtifactStatusSliver(
+    AsyncSnapshot<List<TrackingArtifactStatus>> snapshot,
+  ) {
+    final statuses = snapshot.data;
+    if (statuses == null || statuses.isEmpty) {
+      return SliverToBoxAdapter(
+        child: ListTile(
+          title: Text("Tracking Artifact Status".tl),
+          subtitle: Text("No active source artifacts".tl),
+        ),
+      );
+    }
+    return SliverList(
+      delegate: SliverChildListDelegate([
+        ListTile(title: Text("Tracking Artifact Status".tl)),
+        for (final status in statuses) _artifactStatusTile(status),
+      ]),
+    );
+  }
+
+  Widget _artifactStatusTile(TrackingArtifactStatus status) {
+    final revision = status.revision ?? "Local/custom".tl;
+    final loaded = status.loadedRevision ?? '-';
+    final blocked = status.activationBlocked ? "Blocked".tl : "Admitted".tl;
+    return ListTile(
+      dense: true,
+      title: Text('${status.artifact.sourceKey} · ${status.artifact.fileName}'),
+      subtitle: Text(
+        '${"Strategy".tl}: ${status.strategy.name}\n'
+        '${"Revision".tl}: $revision\n'
+        '${"Loaded Revision".tl}: $loaded\n'
+        '${"Activation Blocked".tl}: $blocked\n'
+        '${"Reason".tl}: ${status.reason.tl}',
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return SmoothCustomScrollView(
       slivers: [
         SliverAppbar(title: Text("App".tl)),
-        _SettingPartTitle(
-          title: "Data".tl,
-          icon: Icons.storage,
-        ),
+        _SettingPartTitle(title: "Data".tl, icon: Icons.storage),
         ListTile(
           title: Text("Storage Path for local comics".tl),
           subtitle: Text(LocalManager().path, softWrap: false),
@@ -112,14 +168,22 @@ class _AppSettingsState extends State<AppSettings> {
             var controller = showLoadingDialog(context);
             var file = await selectFile(ext: ['venera', 'picadata']);
             if (file != null) {
-              var cacheFile =
-                  File(FilePath.join(App.cachePath, "import_data_temp"));
+              var cacheFile = File(
+                FilePath.join(App.cachePath, "import_data_temp"),
+              );
               await file.saveTo(cacheFile.path);
               try {
                 if (file.name.endsWith('picadata')) {
                   await importPicaData(cacheFile);
                 } else {
-                  await importAppData(cacheFile);
+                  final result = await importAppData(cacheFile);
+                  if (result.sourceSkipped && context.mounted) {
+                    context.showMessage(
+                      message:
+                          "Source scripts were not imported while Cloud is enabled."
+                              .tl,
+                    );
+                  }
                 }
               } catch (e, s) {
                 Log.error("Import data", e.toString(), s);
@@ -141,9 +205,130 @@ class _AppSettingsState extends State<AppSettings> {
           actionTitle: 'Set'.tl,
         ).toSliver(),
         _SettingPartTitle(
-          title: "User".tl,
-          icon: Icons.person_outline,
+          title: "Cloud Tracking".tl,
+          icon: Icons.cloud_outlined,
         ),
+        _SwitchSetting(
+          title: "Cloud Tracking".tl,
+          subtitle:
+              "Cloud tracking owns all installed source runtimes; Local-only sources use the pinned Server version."
+                  .tl,
+          settingKey: "cloudTrackingEnabled",
+          onValueChanged: (value) {
+            unawaited(
+              App.cloudTracking
+                  .setCloudEnabled(value)
+                  .then<void>(
+                    (_) {
+                      if (!mounted) return;
+                      setState(() {
+                        _trackingStatusFuture = App.cloudTracking.statuses();
+                      });
+                    },
+                    onError: (Object error, StackTrace stack) {
+                      if (!mounted) return;
+                      setState(() {
+                        _trackingStatusFuture = App.cloudTracking.statuses();
+                      });
+                      context.showMessage(message: error.toString());
+                    },
+                  ),
+            );
+            setState(() {
+              _trackingStatusFuture = App.cloudTracking.statuses();
+            });
+          },
+        ).toSliver(),
+        _CallbackSetting(
+          title: "Cloud Tracking Server URL".tl,
+          subtitle:
+              (appdata.settings['cloudTrackingServerUrl'] as String?)
+                      ?.trim()
+                      .isEmpty ==
+                  false
+              ? appdata.settings['cloudTrackingServerUrl'] as String
+              : "Not configured".tl,
+          actionTitle: "Set".tl,
+          callback: () {
+            showInputDialog(
+              context: context,
+              title: "Cloud Tracking Server URL".tl,
+              hintText: "https://server.example".tl,
+              initialValue:
+                  appdata.settings['cloudTrackingServerUrl'] as String?,
+              inputValidator: RegExp(
+                r'^https?://[^\s]+$',
+                caseSensitive: false,
+              ),
+              onConfirm: (value) {
+                appdata.settings['cloudTrackingServerUrl'] = value.trim();
+                appdata.saveData();
+                unawaited(App.cloudTracking.onSettingsChanged());
+                setState(() {});
+                return null;
+              },
+            );
+          },
+        ).toSliver(),
+        _CallbackSetting(
+          title: "Cloud Tracking Access Token".tl,
+          subtitle:
+              ((appdata.settings['cloudTrackingAccessToken'] as String?)
+                      ?.isNotEmpty ??
+                  false)
+              ? "Configured".tl
+              : "Not configured".tl,
+          actionTitle: "Set".tl,
+          callback: () {
+            showInputDialog(
+              context: context,
+              title: "Cloud Tracking Access Token".tl,
+              hintText: "Bearer token".tl,
+              initialValue:
+                  appdata.settings['cloudTrackingAccessToken'] as String?,
+              onConfirm: (value) {
+                appdata.settings['cloudTrackingAccessToken'] = value.trim();
+                appdata.saveData();
+                unawaited(App.cloudTracking.onSettingsChanged());
+                setState(() {});
+                return null;
+              },
+            );
+          },
+        ).toSliver(),
+        if (appdata.settings['cloudTrackingEnabled'] == true)
+          ListTile(
+            leading: Icon(
+              (appdata.settings['cloudTrackingServerUrl'] as String?)
+                          ?.trim()
+                          .isNotEmpty ==
+                      true
+                  ? Icons.info_outline
+                  : Icons.pause_circle_outline,
+            ),
+            title: Text(
+              ((appdata.settings['cloudTrackingServerUrl'] as String?)
+                              ?.trim()
+                              .isNotEmpty ==
+                          true
+                      ? "Cloud tracking pauses during revision alignment and never falls back silently."
+                      : "Cloud tracking is paused until a Server URL is configured.")
+                  .tl,
+            ),
+          ).toSliver(),
+        if (appdata.settings['cloudTrackingEnabled'] != true)
+          ListTile(
+            title: Text(
+              "Cloud is off; old custom scripts are not restored automatically."
+                  .tl,
+            ),
+          ).toSliver(),
+        FutureBuilder<List<TrackingArtifactStatus>>(
+          future: _trackingStatusFuture,
+          builder: (context, snapshot) =>
+              _trackingArtifactStatusSliver(snapshot),
+        ),
+        _SettingPartTitle(title: "User".tl, icon: Icons.person_outline),
         SelectSetting(
           title: "Language".tl,
           settingKey: "language",
@@ -167,7 +352,8 @@ class _AppSettingsState extends State<AppSettings> {
                 final auth = LocalAuthentication();
                 final bool canAuthenticateWithBiometrics =
                     await auth.canCheckBiometrics;
-                final bool canAuthenticate = canAuthenticateWithBiometrics ||
+                final bool canAuthenticate =
+                    canAuthenticateWithBiometrics ||
                     await auth.isDeviceSupported();
                 if (!canAuthenticate) {
                   context.showMessage(message: "Biometrics not supported".tl);
@@ -205,62 +391,72 @@ class _LogsPageState extends State<LogsPage> {
         title: Text("Logs".tl),
         actions: [
           IconButton(
-              onPressed: () => setState(() {
-                    final RelativeRect position = RelativeRect.fromLTRB(
-                      MediaQuery.of(context).size.width,
-                      MediaQuery.of(context).padding.top + kToolbarHeight,
-                      0.0,
-                      0.0,
-                    );
-                    showMenu(context: context, position: position, items: [
-                      PopupMenuItem(
-                          child: Text("all"),
-                          onTap: () => setState(() => logLevelToShow = "all")
-                      ),
-                      PopupMenuItem(
-                          child: Text("info"),
-                          onTap: () => setState(() => logLevelToShow = "info")
-                      ),
-                      PopupMenuItem(
-                          child: Text("warning"),
-                          onTap: () => setState(() => logLevelToShow = "warning")
-                      ),
-                      PopupMenuItem(
-                          child: Text("error"),
-                          onTap: () => setState(() => logLevelToShow = "error")
-                      ),
-                    ]);
-              }),
-              icon: const Icon(Icons.filter_list_outlined)
+            onPressed: () => setState(() {
+              final RelativeRect position = RelativeRect.fromLTRB(
+                MediaQuery.of(context).size.width,
+                MediaQuery.of(context).padding.top + kToolbarHeight,
+                0.0,
+                0.0,
+              );
+              showMenu(
+                context: context,
+                position: position,
+                items: [
+                  PopupMenuItem(
+                    child: Text("all"),
+                    onTap: () => setState(() => logLevelToShow = "all"),
+                  ),
+                  PopupMenuItem(
+                    child: Text("info"),
+                    onTap: () => setState(() => logLevelToShow = "info"),
+                  ),
+                  PopupMenuItem(
+                    child: Text("warning"),
+                    onTap: () => setState(() => logLevelToShow = "warning"),
+                  ),
+                  PopupMenuItem(
+                    child: Text("error"),
+                    onTap: () => setState(() => logLevelToShow = "error"),
+                  ),
+                ],
+              );
+            }),
+            icon: const Icon(Icons.filter_list_outlined),
           ),
           IconButton(
-              onPressed: () => setState(() {
-                    final RelativeRect position = RelativeRect.fromLTRB(
-                      MediaQuery.of(context).size.width,
-                      MediaQuery.of(context).padding.top + kToolbarHeight,
-                      0.0,
-                      0.0,
-                    );
-                    showMenu(context: context, position: position, items: [
-                      PopupMenuItem(
-                        child: Text("Clear".tl),
-                        onTap: () => setState(() => Log.clear()),
-                      ),
-                      PopupMenuItem(
-                        child: Text("Disable Length Limitation".tl),
-                        onTap: () {
-                          Log.ignoreLimitation = true;
-                          context.showMessage(
-                              message: "Only valid for this run".tl);
-                        },
-                      ),
-                      PopupMenuItem(
-                        child: Text("Export".tl),
-                        onTap: () => Log.exportLog(),
-                      ),
-                    ]);
-                  }),
-              icon: const Icon(Icons.more_horiz))
+            onPressed: () => setState(() {
+              final RelativeRect position = RelativeRect.fromLTRB(
+                MediaQuery.of(context).size.width,
+                MediaQuery.of(context).padding.top + kToolbarHeight,
+                0.0,
+                0.0,
+              );
+              showMenu(
+                context: context,
+                position: position,
+                items: [
+                  PopupMenuItem(
+                    child: Text("Clear".tl),
+                    onTap: () => setState(() => Log.clear()),
+                  ),
+                  PopupMenuItem(
+                    child: Text("Disable Length Limitation".tl),
+                    onTap: () {
+                      Log.ignoreLimitation = true;
+                      context.showMessage(
+                        message: "Only valid for this run".tl,
+                      );
+                    },
+                  ),
+                  PopupMenuItem(
+                    child: Text("Export".tl),
+                    onTap: () => Log.exportLog(),
+                  ),
+                ],
+              );
+            }),
+            icon: const Icon(Icons.more_horiz),
+          ),
         ],
       ),
       body: ListView.builder(
@@ -279,51 +475,56 @@ class _LogsPageState extends State<LogsPage> {
                     children: [
                       Container(
                         decoration: BoxDecoration(
-                          color: Theme.of(context)
-                              .colorScheme
-                              .surfaceContainerHighest,
-                          borderRadius:
-                              const BorderRadius.all(Radius.circular(16)),
+                          color: Theme.of(
+                            context,
+                          ).colorScheme.surfaceContainerHighest,
+                          borderRadius: const BorderRadius.all(
+                            Radius.circular(16),
+                          ),
                         ),
                         child: Padding(
                           padding: const EdgeInsets.fromLTRB(5, 0, 5, 1),
                           child: Text(logToShow[index].title),
                         ),
                       ),
-                      const SizedBox(
-                        width: 3,
-                      ),
+                      const SizedBox(width: 3),
                       Container(
                         decoration: BoxDecoration(
                           color: [
                             Theme.of(context).colorScheme.error,
                             Theme.of(context).colorScheme.errorContainer,
-                            Theme.of(context).colorScheme.primaryContainer
+                            Theme.of(context).colorScheme.primaryContainer,
                           ][logToShow[index].level.index],
-                          borderRadius:
-                              const BorderRadius.all(Radius.circular(16)),
+                          borderRadius: const BorderRadius.all(
+                            Radius.circular(16),
+                          ),
                         ),
                         child: Padding(
                           padding: const EdgeInsets.fromLTRB(5, 0, 5, 1),
                           child: Text(
                             logToShow[index].level.name,
                             style: TextStyle(
-                                color: logToShow[index].level.index == 0
-                                    ? Colors.white
-                                    : Colors.black),
+                              color: logToShow[index].level.index == 0
+                                  ? Colors.white
+                                  : Colors.black,
+                            ),
                           ),
                         ),
                       ),
                     ],
                   ),
                   Text(logToShow[index].content),
-                  Text(logToShow[index].time
-                      .toString()
-                      .replaceAll(RegExp(r"\.\w+"), "")),
+                  Text(
+                    logToShow[index].time.toString().replaceAll(
+                      RegExp(r"\.\w+"),
+                      "",
+                    ),
+                  ),
                   TextButton(
                     onPressed: () {
                       Clipboard.setData(
-                          ClipboardData(text: logToShow[index].content));
+                        ClipboardData(text: logToShow[index].content),
+                      );
                     },
                     child: Text("Copy".tl),
                   ),
@@ -437,7 +638,8 @@ class _WebdavSettingState extends State<_WebdavSetting> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              "When sync data, skip certain setting fields, which means these won't be uploaded / override.".tl,
+                              "When sync data, skip certain setting fields, which means these won't be uploaded / override."
+                                  .tl,
                             ),
                             const SizedBox(height: 12),
                             Row(
@@ -452,7 +654,9 @@ class _WebdavSettingState extends State<_WebdavSetting> {
                                   child: IconButton(
                                     icon: const Icon(Icons.open_in_new),
                                     onPressed: () {
-                                      launchUrlString("https://github.com/venera-app/venera/blob/b08f11f6ac49bd07d34b4fcde233ed07e86efbc9/lib/foundation/appdata.dart#L138");
+                                      launchUrlString(
+                                        "https://github.com/venera-app/venera/blob/b08f11f6ac49bd07d34b4fcde233ed07e86efbc9/lib/foundation/appdata.dart#L138",
+                                      );
                                     },
                                   ),
                                 ),
@@ -473,10 +677,7 @@ class _WebdavSettingState extends State<_WebdavSetting> {
               leading: Icon(Icons.sync),
               title: Text("Auto Sync Data".tl),
               contentPadding: EdgeInsets.zero,
-              trailing: Switch(
-                value: autoSync,
-                onChanged: onAutoSyncChanged,
-              ),
+              trailing: Switch(value: autoSync, onChanged: onAutoSyncChanged),
             ),
             const SizedBox(height: 12),
             RadioGroup<bool>(
@@ -489,13 +690,9 @@ class _WebdavSettingState extends State<_WebdavSetting> {
               child: Row(
                 children: [
                   Text("Operation".tl),
-                  Radio<bool>(
-                    value: true,
-                  ),
+                  Radio<bool>(value: true),
                   Text("Upload".tl),
-                  Radio<bool>(
-                    value: false,
-                  ),
+                  Radio<bool>(value: false),
                   Text("Download".tl),
                 ],
               ),
@@ -516,8 +713,9 @@ class _WebdavSettingState extends State<_WebdavSetting> {
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
-                                "Once the operation is successful, app will automatically sync data with the server."
-                                    .tl),
+                              "Once the operation is successful, app will automatically sync data with the server."
+                                  .tl,
+                            ),
                           ),
                         ],
                       ),
@@ -580,7 +778,7 @@ class _WebdavSettingState extends State<_WebdavSetting> {
                 },
                 child: Text("Continue".tl),
               ),
-            )
+            ),
           ],
         ).paddingHorizontal(16),
       ),

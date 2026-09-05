@@ -5,6 +5,7 @@ class _SwitchSetting extends StatefulWidget {
     required this.title,
     required this.settingKey,
     this.onChanged,
+    this.onValueChanged,
     this.subtitle,
     this.comicId,
     this.comicSource,
@@ -16,6 +17,10 @@ class _SwitchSetting extends StatefulWidget {
   final String settingKey;
 
   final VoidCallback? onChanged;
+
+  /// Lets a process-wide owner fence work before the persisted setting is
+  /// changed.  Normal settings keep the legacy save-then-callback path.
+  final void Function(bool value)? onValueChanged;
 
   final String? subtitle;
 
@@ -50,6 +55,11 @@ class _SwitchSettingState extends State<_SwitchSetting> {
       trailing: Switch(
         value: value,
         onChanged: (value) {
+          if (widget.onValueChanged != null) {
+            setState(() {});
+            widget.onValueChanged!(value);
+            return;
+          }
           setState(() {
             if (widget.comicId != null) {
               appdata.settings.setReaderSetting(

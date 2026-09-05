@@ -8,6 +8,7 @@ import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_updates.dart';
 import 'package:venera/foundation/res.dart';
+import 'package:venera/foundation/tracking/normalizer.dart';
 
 FavoriteItem _comic(
   String id, {
@@ -2652,27 +2653,27 @@ void main() {
         'chapters': <String, String>{'1': 'Chapter 1'},
         'sourceKey': 'test-source',
         'comicId': 'one',
-        'updateTime': '2026-08-03 10:00:00',
+        'updateTime': '2026-08-03T10:00:00Z',
       });
       cache.recordComicCheckEverywhere(
         'test-source',
         'one',
         updateTime: '2026-8-3',
-        updateMarker: 'time:2026-8-3|chapters:1',
+        updateMarker: 'baseline-marker',
       );
       expect(
         cache.applySuccessfulComicCheck(
           folder,
           'one',
           updateTime: baseline.findUpdateTime(),
-          updateMarker: comicUpdateMarker(baseline),
+          updateMarker: 'baseline-marker',
           title: baseline.title,
           author: baseline.subTitle,
           chapterCount: baseline.chapters?.length,
           cover: baseline.cover,
         ),
         isFalse,
-        reason: 'v1 to v2 migration must establish a baseline',
+        reason: 'an equal opaque marker is unchanged',
       );
       expect(
         cache.getComicsWithUpdatesInfo(folder).single.autoHotUntil,
@@ -2682,8 +2683,7 @@ void main() {
       for (final f in [folder, folderB]) {
         final item = cache.getComicsWithUpdatesInfo(f).single;
         expect(item.name, 'Baseline');
-        // v1 -> v2 establishes a baseline, so the signed cover remains the
-        // existing cache value until a same-version change is confirmed.
+        // An unchanged opaque marker keeps the existing cached cover.
         expect(item.coverPath, contains('one.jpg'));
         expect(item.hasNewUpdate, isFalse);
       }
@@ -2703,14 +2703,14 @@ void main() {
         'chapters': <String, String>{'2': 'Chapter 2'},
         'sourceKey': 'test-source',
         'comicId': 'one',
-        'updateTime': '2026-08-04',
+        'updateTime': '2026-08-04T00:00:00Z',
       });
       expect(
         () => cache.applySuccessfulComicCheck(
           folder,
           'one',
           updateTime: changed.findUpdateTime(),
-          updateMarker: comicUpdateMarker(changed),
+          updateMarker: 'changed-marker',
           title: changed.title,
           author: changed.subTitle,
           chapterCount: changed.chapters?.length,
@@ -2728,14 +2728,14 @@ void main() {
           'SELECT update_marker FROM comic_check_state WHERE source_key = ? AND comic_id = ?',
           ['test-source', 'one'],
         );
-        expect(state.single['update_marker'], comicUpdateMarker(baseline));
+        expect(state.single['update_marker'], 'baseline-marker');
       } finally {
         stateDb.dispose();
       }
     },
   );
 
-  test('update marker includes the date and chapter count', () {
+  test('detail evidence projects into standard UpdateState', () {
     final info = ComicDetails.fromJson({
       'title': 'Comic',
       'subtitle': 'Author',
@@ -2744,51 +2744,13 @@ void main() {
       'chapters': <String, String>{'1': 'Chapter 1', '2': 'Chapter 2'},
       'sourceKey': 'test-source',
       'comicId': 'one',
-      'updateTime': '2026-08-03 10:00:00',
+      'updateTime': '2026-08-03T10:00:00Z',
     });
-    final marker = comicUpdateMarker(info)!;
-    expect(marker, startsWith('v2|time:2026-08-03|chapters:2|recent:'));
-    expect(marker, comicUpdateMarker(info));
-
-    final replacement = ComicDetails.fromJson({
-      'title': 'Comic',
-      'subtitle': 'Author',
-      'cover': '',
-      'tags': <String, List<String>>{},
-      'chapters': <String, String>{'1': 'Renamed', '2': 'Chapter 2'},
-      'sourceKey': 'test-source',
-      'comicId': 'one',
-      'updateTime': '2026-08-03 10:00:00',
-    });
-    expect(comicUpdateMarker(replacement), isNot(marker));
-
-    final grouped = ComicDetails.fromJson({
-      'title': 'Comic',
-      'subtitle': 'Author',
-      'cover': '',
-      'tags': <String, List<String>>{},
-      'chapters': <String, Map<String, String>>{
-        'main': {'1': 'Chapter 1', '2': 'Chapter 2'},
-      },
-      'sourceKey': 'test-source',
-      'comicId': 'one',
-      'updateTime': '2026-08-03',
-    });
-    final groupedMarker = comicUpdateMarker(grouped);
-    expect(groupedMarker, comicUpdateMarker(grouped));
-    final reorderedGrouped = ComicDetails.fromJson({
-      'title': 'Comic',
-      'subtitle': 'Author',
-      'cover': '',
-      'tags': <String, List<String>>{},
-      'chapters': <String, Map<String, String>>{
-        'main': {'2': 'Chapter 2', '1': 'Chapter 1'},
-      },
-      'sourceKey': 'test-source',
-      'comicId': 'one',
-      'updateTime': '2026-08-03',
-    });
-    expect(comicUpdateMarker(reorderedGrouped), isNot(groupedMarker));
+    final state = TrackingNormalizer.fromComicDetails(info).state!;
+    expect(state.updatedAt, DateTime.utc(2026, 8, 3, 10));
+    expect(state.latestChapterId, '1');
+    expect(state.chapterCount, 2);
+    expect(state.recentChapterIds, ['1', '2']);
   });
 
   test('only a legacy folder_sync relation migrates follow updates', () {

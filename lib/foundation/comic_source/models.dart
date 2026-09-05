@@ -127,42 +127,79 @@ class Comic {
 }
 
 class FavoriteUpdateHint {
-  final String marker;
-  final String? updateTime;
-  final bool? isNew;
+  const FavoriteUpdateHint({
+    this.state,
+    this.sourceUnread,
+    this.marker,
+    this.metadata,
+    @Deprecated('Use state.updatedAt instead') this.updateTime,
+    @Deprecated('Use sourceUnread instead') this.isNew,
+  });
+
+  final UpdateState? state;
+  final bool? sourceUnread;
+  final String? marker;
   final Map<String, dynamic>? metadata;
 
-  const FavoriteUpdateHint({
-    required this.marker,
-    this.updateTime,
-    this.isNew,
-    this.metadata,
-  }) : assert(marker != '');
+  /// Legacy input-only aliases retained during the compatibility window.
+  @Deprecated('Use state.updatedAt instead')
+  final String? updateTime;
+
+  @Deprecated('Use sourceUnread instead')
+  final bool? isNew;
+
+  bool? get effectiveSourceUnread => sourceUnread ?? isNew;
 
   Map<String, dynamic> toJson() => {
-    "marker": marker,
-    "updateTime": updateTime,
-    "isNew": isNew,
+    if (state != null) "state": state!.toJson(),
+    if (sourceUnread != null) "sourceUnread": sourceUnread,
+    if (marker != null) "marker": marker,
     if (metadata != null) "metadata": metadata,
+    // Keep explicitly constructed legacy values serializable for old callers;
+    // new source configs use the fields above and never emit these aliases.
+    if (state == null && updateTime != null) "updateTime": updateTime,
+    if (sourceUnread == null && isNew != null) "isNew": isNew,
   };
 
   static FavoriteUpdateHint? fromJson(dynamic value) {
     if (value is! Map) return null;
-    final marker = value["marker"];
-    if (marker is! String || marker.trim().isEmpty) return null;
+
+    final hasNewState = value.containsKey("state");
+    var state = UpdateState.fromJson(value["state"]);
+    final rawUpdateTime = value["updateTime"];
+    if (!hasNewState && state == null && rawUpdateTime is String) {
+      state = UpdateState.fromJson({"updatedAt": rawUpdateTime});
+    }
+
+    final hasNewUnread = value.containsKey("sourceUnread");
+    final rawSourceUnread = value["sourceUnread"];
+    final sourceUnread = hasNewUnread
+        ? rawSourceUnread is bool
+              ? rawSourceUnread
+              : null
+        : value["isNew"] is bool
+        ? value["isNew"] as bool
+        : null;
+
+    String? marker;
+    final rawMarker = value["marker"];
+    if (rawMarker is String &&
+        rawMarker.trim().isNotEmpty &&
+        utf8.encode(rawMarker.trim()).length <= 4096) {
+      marker = rawMarker.trim();
+    }
 
     Map<String, dynamic>? metadata;
     final rawMetadata = value["metadata"];
     if (rawMetadata is Map) {
       try {
         final candidate = Map<String, dynamic>.from(rawMetadata);
-        final encoded = jsonEncode(candidate);
-        if (encoded.length <= 4096) {
+        if (utf8.encode(jsonEncode(candidate)).length <= 4096) {
           metadata = candidate;
         } else {
           Log.warning(
             "FavoriteUpdate",
-            "Dropped metadata exceeding the 4096 UTF-16 code-unit limit",
+            "Dropped metadata exceeding the 4096 UTF-8 byte limit",
           );
         }
       } catch (e) {
@@ -170,11 +207,25 @@ class FavoriteUpdateHint {
       }
     }
 
+    final rawLegacyIsNew = value["isNew"];
+    final hasAnyValue =
+        state != null ||
+        sourceUnread != null ||
+        marker != null ||
+        metadata != null ||
+        rawUpdateTime is String ||
+        rawLegacyIsNew is bool;
+    // An empty object is a valid, explicitly supplied hint. It carries no
+    // usable evidence, so the tracking layer will classify it as unknown.
+    if (!hasAnyValue) return const FavoriteUpdateHint();
+
     return FavoriteUpdateHint(
+      state: state,
+      sourceUnread: sourceUnread,
       marker: marker,
-      updateTime: value["updateTime"] is String ? value["updateTime"] : null,
-      isNew: value["isNew"] is bool ? value["isNew"] : null,
       metadata: metadata,
+      updateTime: rawUpdateTime is String ? rawUpdateTime : null,
+      isNew: rawLegacyIsNew is bool ? rawLegacyIsNew : null,
     );
   }
 }

@@ -304,7 +304,7 @@ function Cookie({name, value, domain}) {
  * @param language {string?}
  * @param favoriteId {string?} - Only set this field if the comic is from favorites page
  * @param stars {number?} - 0-5, double
- * @param favoriteUpdate {{marker: string, updateTime?: string, isNew?: boolean | null, metadata?: object}?}
+ * @param favoriteUpdate {{state?: {updatedAt?: string, latestChapterId?: string, chapterCount?: number, recentChapterIds?: string[]}, sourceUnread?: boolean, marker?: string, metadata?: object}?}
  * @constructor
  */
 function Comic({id, title, subtitle, subTitle, cover, tags, description, maxPage, language, favoriteId, stars, favoriteUpdate}) {
@@ -322,6 +322,11 @@ function Comic({id, title, subtitle, subTitle, cover, tags, description, maxPage
     this.favoriteUpdate = favoriteUpdate;
 }
 ```
+
+`favoriteUpdate` 是可选的事实扩展。`state` 是通用内容证据，`sourceUnread` 是账号/源站未读
+事实，`marker` 是 Host 不解析的不透明回退值，`metadata` 只用于有界诊断。新源不应生成
+`updateTime`、`isNew` 或 `markerScheme`；App 在兼容窗口内仍可读取旧别名，但会将它们转换为
+通用字段并记录兼容诊断。详情页未实现该扩展的源仍按 `ComicDetails` 归一化。
 
 ### `ComicDetails`
 ```javascript

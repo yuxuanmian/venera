@@ -2,6 +2,11 @@
 
 Venera's headless mode allows you to run key features from the command line, making it easy to automate tasks and integrate with other tools. This document outlines the available commands and their usage.
 
+Headless uses the same bootstrap as the GUI: appdata and required components are initialized first,
+then the source registry is discovered without executing legacy JavaScript, Cloud admission is
+prepared, and only after that are the JS engine, source manager, and Cloud coordinator started.
+The follow-up master switch does not relax source ownership.
+
 ## How to Use
 
 To activate headless mode, use the `--headless` flag when running the Venera executable, followed by the desired command.
@@ -34,6 +39,11 @@ venera --headless webdav up
 Update comic source scripts.
 
 - **`updatescript all`**: Checks for and applies all available updates for your comic source scripts.
+
+With Cloud enabled, managed updates are limited to the current trusted authority `activeRevision`
+and the exact installed catalog artifacts. The command cannot install a custom URL or silently
+restore a legacy custom script. Cloud-off keeps the verified pinned selection; an old custom script
+requires an explicit recovery/edit action through the same mutation service.
 
 **Example:**
 
@@ -91,6 +101,20 @@ Update your subscribed comics and retrieve a list of updated comics.
 
 - **`updatesubscribe`**: Checks all subscribed comics for updates.
 - **`updatesubscribe --update-comic-by-id-type <id> <type>`**: Updates a single comic specified by its `id` and `type`.
+
+Scanning follows the runtime admission and generation fence prepared during startup. A Local-only
+artifact uses its pinned script locally; a Cloud-capable artifact contributes interests only after
+exact revision/path/hash admission. Missing, blocked, or authority-unavailable artifacts remain
+paused instead of falling back to a custom or stale runtime.
+
+## Data sync and source import boundaries
+
+WebDAV/app-data import still handles the ordinary app, history, and cookie data according to the
+existing validation rules. When an archive contains `comic_source/` files and Cloud is enabled (or
+is being enabled), source scripts and registry replacement are skipped and the import result marks
+the source portion as not imported; existing active files are not deleted first. Cloud-off import
+uses the shared mutation fence and reload path, and a mode change during the operation aborts and
+restores the previous source directory.
 
 **Example:**
 

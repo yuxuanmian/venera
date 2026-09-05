@@ -22,15 +22,57 @@ main
   -> init
        -> App.init (确定 dataPath/cachePath)
        -> CookieJar
-       -> Rhttp / Appdata / History / Favorites / Local
+       -> Rhttp
+       -> App.initComponents (Appdata，再初始化 History / Favorites / Local)
        -> translation / tags / OpenCC
        -> JsEngine
+       -> Cloud runtime admission（无执行 registry discovery、接管 block/recovery）
        -> ComicSourceManager
+       -> CloudTrackingCoordinator.start（authority 对齐与 poll）
   -> runApp(MyApp)
   -> MainPage (Home / Favorites / Explore / Categories)
 ```
 
 `lib/utils/init.dart` 的 `Init` mixin 用于协调异步初始化。调用方若依赖初始化结果，应调用 `init()` 或 `ensureInit()`，不要通过延时或轮询猜测组件是否可用。
+
+### Tracking 证据迁移与降级
+
+收藏跟踪的 `comic_check_state.update_state` 是可选的加法字段。启动时通过
+`tracking_evidence_migration_v1` 一次性清除旧的派生 marker/比较诊断，保留收藏、
+`has_new_update`、调度、失败、热状态和下架确认字段。迁移在单事务中完成；事务中断时不
+写完成标记，下一次启动可安全重试。
+
+旧版本程序不理解新列，因此降级运行只在应用版本本身支持新 schema 时保证；不要通过删除
+数据库或清空收藏来恢复。升级后的 `UpdateState`/opaque marker 不会因重复启动再次失效。
+
+### Source revision 与 Cloud Tracking
+
+`comic_source/.managed/active-artifacts.json` 是已安装制品的激活指针；`.managed/<revision>/`
+保存按完整 commit 固定的受信任源制品，旧的根目录 `.js` 会迁移为 custom Local 制品。
+registry 的 `activationBlocked` 不是运行许可；`recoverableArtifacts` 保留接管前 custom 的
+精确 identity/path/hash。Cloud-on 启动先无执行地发现 registry、校验/落盘 block 与恢复引用，
+再初始化 JS/source manager；因此 root、恢复目录和编辑草稿都不会作为补扫入口。加载时验证
+注册表和 active 文件哈希，并且只允许当前 trusted authority revision 的 managed 选择。
+Cloud authority 只公布 catalog、active revision 和精确 artifact 能力，不公布可执行下载地址。
+
+Cloud 接管枚举所有已安装的 `(sourceKey,fileName)`，包括 Local-only、旧 custom 和目录中缺少
+可信 entry 的 artifact；只对 authority/catalog 中的 exact match 下载并替换。Local-only 仍在
+固定 revision 上由 App 本地扫描，Cloud-capable 才可产生 Server interests。缺源、hash/parse/
+reload/恢复失败只暂停该 artifact。关闭 Cloud 保留最后验证的 pinned selection，不自动恢复旧
+custom；用户必须在 Cloud-off 下从恢复列表明确选择并再次验证。
+
+所有自定义编辑、URL/file 安装、恢复和 archive source 导入都经过共享 mutation service。
+Cloud-on 会拒绝这些操作而不改 active bytes/registry/全局开关；编辑会话只写隔离 draft，
+提交前重新检查模式和 exact selection。WebDAV/headless 与 GUI 共用同一启动门禁和更新规则。
+
+追更策略由全局 Cloud 开关、追更总开关、精确制品能力和 revision 对齐共同决定：`off`、
+`local`、`cloud` 或 `pausedCloud`。设置页展示每个 active artifact 的策略、revision 与暂停
+原因，但不增加逐源 Cloud 开关。revision 变化会提升 runtime generation；旧异步结果在写入
+baseline、Updates 资格、调度状态或缓存摘要前必须被拒绝。
+
+Developer Mode 的漫画 Debug 页读取同一条当前会话诊断轨迹，展示 Runtime、Raw Observation、
+Normalized UpdateState、Comparison、Presentation 和 Rejection 六个阶段；轨迹有大小上限，
+不会建立第二份持久化 tracking 表。
 
 ## 分层与职责
 
@@ -85,6 +127,7 @@ main
 - `network_favorite_cache.db`：远端收藏夹、分页漫画摘要和追更状态的设备级缓存；不参与导入导出或 WebDAV 同步。
 - `cookie.db`：网络 Cookie。
 - `comic_source/*.js`：用户安装的漫画源。
+- `comic_source/.managed/`：按完整 catalog revision 固定的受信任源制品与激活注册表。
 
 本地漫画数据库和内容目录还受用户选择的本地存储路径影响。导入导出和 WebDAV 同步逻辑集中在 `lib/utils/data.dart` 与 `lib/utils/data_sync.dart`。
 
@@ -100,18 +143,20 @@ main
 
 项目依赖多个自维护 Git fork，并包含 Rust 原生依赖，因此“Dart 分析通过”不能替代平台构建验证。
 
-## 测试现状与开发切入点
+## 测试与已知本地基线
 
-截至 2026-07-23，仓库只有 `test/channel_test.dart`，覆盖 `lib/utils/channel.dart` 的并发行为。核心持久化、漫画源解析、网络、下载和 UI 尚缺少系统化回归测试。
-
-后续开发建议按改动点补齐小范围测试：
-
-- 纯模型/转换：普通 Dart/Flutter 单元测试。
-- SQLite：使用临时数据库覆盖建表、读写和迁移。
-- 漫画源：用最小 JS fixture 覆盖解析、空值、Promise 和异常。
-- 网络：用可控 adapter 或本地 fixture 验证请求/响应，不依赖真实漫画站点。
-- UI：为关键状态添加 widget test，并保留必要的移动端/桌面端手动检查。
+Cloud ownership 的 registry、admission、coordinator、mutation、interest、observation、
+状态 UI 和 Server scheduler/race 测试位于 `venera/test/tracking/`、
+`venera/test/settings_app_tracking_test.dart` 与 `venera-server/internal/tracking/`。完整的
+实现证据和每个 SC-011 场景的当前结果见
+`doc/reviews/2026-09-05-cloud-runtime-ownership-validation.md`；该记录区分通过、skipped 和
+平台基线，不以 helper 测试替代 native runtime/UI 验收。
 
 ## 已知本地基线
 
-2026-07-23 的本地环境是 Flutter 3.44.7 / Dart 3.12.2，高于 `pubspec.yaml` 固定的 Flutter 3.41.4。现有测试全部通过；静态分析有 1 条 unused import warning 和 9 条较新 SDK 暴露的 deprecated API info，没有 error。依赖解析还会受当前 Pub 镜像影响，因此无依赖改动时应使用 `--no-pub` 并避免提交锁文件噪音。
+2026-09-05 的本地环境是 Flutter 3.44.7 / Dart 3.12.2，高于 `pubspec.yaml` 固定的 Flutter
+3.41.4。`flutter analyze --no-pub` 无 analyzer error；现有 8 条 SDK deprecation info 会使
+命令退出码为 1。Windows Debug 构建目录提供 `flutter_qjs_plugin.dll` 与 `zip_flutter.dll`，
+加入其搜索路径后 QuickJS parser/runtime、archive import 和 tracking 聚焦测试均通过；全量
+测试目前只剩既有 `favorites_page_test.dart` fake-timer 基线。无依赖变更时继续使用
+`--no-pub`，并避免提交锁文件噪音。

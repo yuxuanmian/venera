@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'package:crypto/crypto.dart';
@@ -25,6 +26,7 @@ import 'package:uuid/uuid.dart';
 import 'package:venera/components/js_ui.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/js_pool.dart';
+import 'package:venera/foundation/tracking/source_runtime_policy.dart';
 import 'package:venera/network/app_dio.dart';
 import 'package:venera/network/cookie_jar.dart';
 import 'package:venera/network/proxy.dart';
@@ -53,6 +55,8 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
   JsEngine._create();
 
   FlutterQjs? _engine;
+  final _sourceDomains = <SourceRuntimeExecutionContext, _SourceJsDomain>{};
+  String? _initSource;
 
   bool _closed = true;
 
@@ -65,8 +69,12 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
   }
 
   void resetDio() {
-    _dio = AppDio(BaseOptions(
-        responseType: ResponseType.plain, validateStatus: (status) => true));
+    _dio = AppDio(
+      BaseOptions(
+        responseType: ResponseType.plain,
+        validateStatus: (status) => true,
+      ),
+    );
   }
 
   static Uint8List? _jsInitCache;
@@ -85,13 +93,18 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
       if (App.isInitialized) {
         _cookieJar ??= await SingleInstanceCookieJar.createInstance();
       }
-      _dio ??= AppDio(BaseOptions(
-          responseType: ResponseType.plain, validateStatus: (status) => true));
+      _dio ??= AppDio(
+        BaseOptions(
+          responseType: ResponseType.plain,
+          validateStatus: (status) => true,
+        ),
+      );
       _closed = false;
       _engine = FlutterQjs();
       _engine!.dispatch();
-      var setGlobalFunc =
-          _engine!.evaluate("(key, value) => { this[key] = value; }");
+      var setGlobalFunc = _engine!.evaluate(
+        "(key, value) => { this[key] = value; }",
+      );
       (setGlobalFunc as JSInvokable)(["sendMessage", _messageReceiver]);
       setGlobalFunc(["appVersion", App.version]);
       setGlobalFunc.free();
@@ -102,15 +115,23 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
         var buffer = await rootBundle.load("assets/init.js");
         jsInit = buffer.buffer.asUint8List();
       }
-      _engine!
-          .evaluate(utf8.decode(jsInit), name: "<init>");
+      _engine!.evaluate(utf8.decode(jsInit), name: "<init>");
+      _initSource = utf8.decode(jsInit);
     } catch (e, s) {
       Log.error('JS Engine', 'JS Engine Init Error:\n$e\n$s');
     }
   }
 
-  Object? _messageReceiver(dynamic message) {
+  Object? _messageReceiver(
+    dynamic message, [
+    SourceRuntimeExecutionContext? domainContext,
+  ]) {
     try {
+      // Context is supplied by the owning engine's host closure, never by a
+      // field in an untrusted source message.
+      final executionContext =
+          domainContext ?? sourceRuntimePolicy.currentExecutionContext;
+      _requireExecutionContext(executionContext);
       if (message is Map<dynamic, dynamic>) {
         if (message["method"] == null) return null;
         String method = message["method"] as String;
@@ -118,14 +139,15 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
           case "log":
             String level = message["level"];
             Log.addLog(
-                switch (level) {
-                  "error" => LogLevel.error,
-                  "warning" => LogLevel.warning,
-                  "info" => LogLevel.info,
-                  _ => LogLevel.warning
-                },
-                message["title"],
-                message["content"].toString());
+              switch (level) {
+                "error" => LogLevel.error,
+                "warning" => LogLevel.warning,
+                "info" => LogLevel.info,
+                _ => LogLevel.warning,
+              },
+              message["title"],
+              message["content"].toString(),
+            );
           case 'load_data':
             String key = message["key"];
             String dataKey = message["data_key"];
@@ -139,15 +161,15 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
             var data = message["data"];
             var source = ComicSource.find(key)!;
             source.data[dataKey] = data;
-            source.saveData();
+            return source.saveData(runtimeContext: executionContext);
           case 'delete_data':
             String key = message["key"];
             String dataKey = message["data_key"];
             var source = ComicSource.find(key);
             source?.data.remove(dataKey);
-            source?.saveData();
+            source?.saveData(runtimeContext: executionContext);
           case 'http':
-            return _http(Map.from(message));
+            return _http(Map.from(message), executionContext);
           case 'html':
             return handleHtmlCallback(Map.from(message));
           case 'convert':
@@ -174,7 +196,10 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
           // temporary solution for [setTimeout] function
           // TODO: implement [setTimeout] in quickjs project
           case "delay":
-            return Future.delayed(Duration(milliseconds: message["time"]));
+            return _guardFuture(
+              executionContext,
+              Future.delayed(Duration(milliseconds: message["time"])),
+            );
           case "UI":
             return handleUIMessage(Map.from(message));
           case "getLocale":
@@ -201,7 +226,13 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
             if (args != null && args is! List) {
               throw "Args must be a list";
             }
-            return JSPool().execute(func, args ?? []);
+            final result = JSPool().execute(
+              func,
+              args ?? [],
+              context: executionContext,
+            );
+            _requireExecutionContext(executionContext);
+            return result;
         }
       }
       return null;
@@ -211,7 +242,11 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
     }
   }
 
-  Future<Map<String, dynamic>> _http(Map<String, dynamic> req) async {
+  Future<Map<String, dynamic>> _http(
+    Map<String, dynamic> req,
+    SourceRuntimeExecutionContext? executionContext,
+  ) async {
+    _requireExecutionContext(executionContext);
     Response? response;
     String? error;
 
@@ -223,10 +258,12 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
       }
       var dio = _dio;
       if (headers['http_client'] == "dart:io") {
-        dio = Dio(BaseOptions(
-          responseType: ResponseType.plain,
-          validateStatus: (status) => true,
-        ));
+        dio = Dio(
+          BaseOptions(
+            responseType: ResponseType.plain,
+            validateStatus: (status) => true,
+          ),
+        );
         var proxy = await getProxy();
         dio.httpClientAdapter = IOHttpClientAdapter(
           createHttpClient: () {
@@ -234,29 +271,41 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
               ..findProxy = (uri) => proxy == null ? "DIRECT" : "PROXY $proxy";
           },
         );
-        dio.interceptors
-            .add(CookieManagerSql(SingleInstanceCookieJar.instance!));
+        dio.interceptors.add(
+          CookieManagerSql(SingleInstanceCookieJar.instance!),
+        );
         dio.interceptors.add(LogInterceptor());
       }
-      response = await dio!.request(req["url"],
-          data: req["data"],
-          options: Options(
-              method: req['http_method'],
-              responseType: req["bytes"] == true
-                  ? ResponseType.bytes
-                  : ResponseType.plain,
-              headers: headers,
-              extra: extra,
-          )
+      _requireExecutionContext(executionContext);
+      final cancellation = CancelToken();
+      executionContext?.onRevoke(
+        () => cancellation.cancel('Source execution revoked'),
       );
+      response = await dio!.request(
+        req["url"],
+        cancelToken: cancellation,
+        data: req["data"],
+        options: Options(
+          method: req['http_method'],
+          responseType: req["bytes"] == true
+              ? ResponseType.bytes
+              : ResponseType.plain,
+          headers: headers,
+          extra: extra,
+        ),
+      );
+      _requireExecutionContext(executionContext);
+    } on SourceRuntimeDenied {
+      rethrow;
     } catch (e) {
       error = e.toString();
     }
 
     Map<String, String> headers = {};
 
-    response?.headers
-        .forEach((name, values) => headers[name] = values.join(','));
+    response?.headers.forEach(
+      (name, values) => headers[name] = values.join(','),
+    );
 
     dynamic body = response?.data;
     if (body is! Uint8List && body is List<int>) {
@@ -271,16 +320,232 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
     };
   }
 
-  dynamic runCode(String js, [String? name]) {
-    return _engine!.evaluate(js, name: name);
+  dynamic runCode(
+    String js, [
+    String? name,
+    SourceRuntimeExecutionContext? runtimeContext,
+  ]) {
+    final executionContext =
+        runtimeContext ??
+        sourceRuntimePolicy.currentExecutionContext ??
+        sourceRuntimePolicy.contextForCode(js);
+    _requireExecutionContext(executionContext);
+    if (executionContext != null) {
+      final domain = _sourceDomains.putIfAbsent(executionContext, () {
+        final created = _SourceJsDomain(
+          executionContext,
+          _initSource ?? (throw StateError('JS engine is not initialized.')),
+          (message) => _messageReceiver(message, executionContext),
+        );
+        executionContext.onRevoke(() {
+          _sourceDomains.remove(executionContext);
+        });
+        return created;
+      });
+      return domain.evaluate(js, name);
+    }
+    final result = _engine!.evaluate(js, name: name);
+    if (result is Future) {
+      return result.then((value) {
+        _requireExecutionContext(executionContext);
+        return value;
+      });
+    }
+    _requireExecutionContext(executionContext);
+    return result;
+  }
+
+  Future<T> _guardFuture<T>(
+    SourceRuntimeExecutionContext? executionContext,
+    Future<T> future,
+  ) async {
+    final result = await future;
+    _requireExecutionContext(executionContext);
+    return result;
+  }
+
+  void _requireExecutionContext(SourceRuntimeExecutionContext? context) {
+    if (context != null) context.policy.requireExecutionContext(context);
   }
 
   void dispose() {
+    for (final domain in _sourceDomains.values.toList()) {
+      domain.close();
+    }
+    _sourceDomains.clear();
     _cache = null;
     _closed = true;
     _engine?.close();
     _engine?.port.close();
   }
+}
+
+/// Each source parse owns a native job queue. Revocation destroys this queue,
+/// including then/catch/finally and timer jobs, instead of rejecting a Promise
+/// inside an otherwise live custom runtime.
+class _SourceJsDomain {
+  _SourceJsDomain(this.context, String init, Object? Function(dynamic) host) {
+    engine.dispatch();
+    final setGlobal =
+        engine.evaluate('(key, value) => { this[key] = value; }')
+            as JSInvokable;
+    setGlobal([
+      'sendMessage',
+      (dynamic message) {
+        requireCurrent();
+        final result = context.policy.runWithExecutionContext(
+          context,
+          () => host(wrap(message)),
+        );
+        return gateHostResult(result);
+      },
+    ]);
+    setGlobal(['appVersion', App.version]);
+    setGlobal.free();
+    engine.evaluate(init, name: '<init>');
+    context.onRevoke(close);
+  }
+
+  final SourceRuntimeExecutionContext context;
+  final engine = FlutterQjs();
+  bool closed = false;
+  final _pending = <Completer<dynamic>>{};
+  final _functions = <_AdmittedJsFunction>{};
+
+  dynamic gateHostResult(dynamic result) {
+    if (result is! Future) return result;
+    // The native Promise resolvers cannot be called after engine destruction.
+    final completer = Completer<dynamic>();
+    result.then(
+      (value) {
+        if (!closed) completer.complete(value);
+      },
+      onError: (Object error, StackTrace stack) {
+        if (!closed) completer.completeError(error, stack);
+      },
+    );
+    return completer.future;
+  }
+
+  void requireCurrent() {
+    if (closed) {
+      throw const SourceRuntimeDenied('Source execution domain was destroyed.');
+    }
+    context.policy.requireExecutionContext(context);
+  }
+
+  dynamic evaluate(String code, String? name) {
+    requireCurrent();
+    return wrap(engine.evaluate(code, name: name));
+  }
+
+  dynamic wrap(dynamic result) {
+    if (result is JSInvokable) {
+      final function = _AdmittedJsFunction(this, result);
+      _functions.add(function);
+      return function;
+    }
+    if (result is Uint8List) return result;
+    if (result is Future) {
+      final completer = Completer<dynamic>();
+      _pending.add(completer);
+      result.then(
+        (value) {
+          if (_pending.remove(completer)) {
+            try {
+              requireCurrent();
+              completer.complete(wrap(value));
+            } catch (error, stack) {
+              completer.completeError(error, stack);
+            }
+          }
+        },
+        onError: (Object error, StackTrace stack) {
+          if (_pending.remove(completer)) completer.completeError(error, stack);
+        },
+      );
+      return completer.future;
+    }
+    if (result is List) return result.map(wrap).toList();
+    if (result is Map) {
+      if (result.keys.every((key) => key is String)) {
+        return <String, dynamic>{
+          for (final entry in result.entries)
+            entry.key as String: wrap(entry.value),
+        };
+      }
+      return <dynamic, dynamic>{
+        for (final entry in result.entries) entry.key: wrap(entry.value),
+      };
+    }
+    return result;
+  }
+
+  void close() {
+    if (closed) return;
+    for (final function in _functions.toList()) {
+      function.destroy();
+    }
+    closed = true;
+    engine.port.close();
+    engine.close();
+    for (final pending in _pending) {
+      pending.completeError(
+        const SourceRuntimeDenied('Source execution was revoked.'),
+      );
+    }
+    _pending.clear();
+  }
+}
+
+class _AdmittedJsFunction extends JSInvokable {
+  _AdmittedJsFunction(this.domain, this.function);
+  final _SourceJsDomain domain;
+  final JSInvokable function;
+  bool released = false;
+  @override
+  dynamic invoke(List args, [dynamic thisVal]) {
+    domain.requireCurrent();
+    if (released) {
+      throw const SourceRuntimeDenied('Source function was released.');
+    }
+    return domain.context.policy.runWithExecutionContext(
+      domain.context,
+      () => domain.wrap(
+        function.invoke(
+          args.map((arg) {
+            if (arg is Function) {
+              return _DomainHostFunction(domain, arg);
+            }
+            return arg;
+          }).toList(),
+          thisVal,
+        ),
+      ),
+    );
+  }
+
+  @override
+  void destroy() {
+    if (released) return;
+    released = true;
+    domain._functions.remove(this);
+    if (!domain.closed) function.free();
+  }
+}
+
+class _DomainHostFunction extends JSInvokable {
+  _DomainHostFunction(this.domain, this.callback);
+  final _SourceJsDomain domain;
+  final Function callback;
+  @override
+  dynamic invoke(List args, [dynamic thisVal]) {
+    domain.requireCurrent();
+    return domain.gateHostResult(Function.apply(callback, args));
+  }
+
+  @override
+  void destroy() {}
 }
 
 mixin class _JSEngineApi {
@@ -361,29 +626,32 @@ mixin class _JSEngineApi {
     switch (data["function"]) {
       case "set":
         _cookieJar!.saveFromResponse(
-            Uri.parse(data["url"]),
-            (data["cookies"] as List).map((e) {
-              var c = Cookie(e["name"], e["value"]);
-              if (e['domain'] != null) {
-                c.domain = e['domain'];
-              }
-              return c;
-            }).toList());
+          Uri.parse(data["url"]),
+          (data["cookies"] as List).map((e) {
+            var c = Cookie(e["name"], e["value"]);
+            if (e['domain'] != null) {
+              c.domain = e['domain'];
+            }
+            return c;
+          }).toList(),
+        );
         return null;
       case "get":
         var cookies = _cookieJar!.loadForRequest(Uri.parse(data["url"]));
         return cookies
-            .map((e) => {
-                  "name": e.name,
-                  "value": e.value,
-                  "domain": e.domain,
-                  "path": e.path,
-                  "expires": e.expires,
-                  "max-age": e.maxAge,
-                  "secure": e.secure,
-                  "httpOnly": e.httpOnly,
-                  "session": e.expires == null,
-                })
+            .map(
+              (e) => {
+                "name": e.name,
+                "value": e.value,
+                "domain": e.domain,
+                "path": e.path,
+                "expires": e.expires,
+                "max-age": e.maxAge,
+                "secure": e.secure,
+                "httpOnly": e.httpOnly,
+                "session": e.expires == null,
+              },
+            )
             .toList();
       case "delete":
         clearCookies([data["url"]]);
@@ -425,15 +693,13 @@ mixin class _JSEngineApi {
         case "hmac":
           var key = data["key"];
           var hash = data["hash"];
-          var hmac = Hmac(
-              switch (hash) {
-                "md5" => md5,
-                "sha1" => sha1,
-                "sha256" => sha256,
-                "sha512" => sha512,
-                _ => throw "Unsupported hash: $hash"
-              },
-              key);
+          var hmac = Hmac(switch (hash) {
+            "md5" => md5,
+            "sha1" => sha1,
+            "sha256" => sha256,
+            "sha512" => sha512,
+            _ => throw "Unsupported hash: $hash",
+          }, key);
           if (data['isString'] == true) {
             return hmac.convert(value).toString();
           } else {
@@ -442,19 +708,11 @@ mixin class _JSEngineApi {
         case "aes-ecb":
           var key = data["key"];
           var cipher = ECBBlockCipher(AESEngine());
-          cipher.init(
-            isEncode,
-            KeyParameter(key),
-          );
+          cipher.init(isEncode, KeyParameter(key));
           var offset = 0;
           var result = Uint8List(value.length);
           while (offset < value.length) {
-            offset += cipher.processBlock(
-              value,
-              offset,
-              result,
-              offset,
-            );
+            offset += cipher.processBlock(value, offset, result, offset);
           }
           return result;
         case "aes-cbc":
@@ -465,12 +723,7 @@ mixin class _JSEngineApi {
           var offset = 0;
           var result = Uint8List(value.length);
           while (offset < value.length) {
-            offset += cipher.processBlock(
-              value,
-              offset,
-              result,
-              offset,
-            );
+            offset += cipher.processBlock(value, offset, result, offset);
           }
           return result;
         case "aes-cfb":
@@ -482,12 +735,7 @@ mixin class _JSEngineApi {
           var offset = 0;
           var result = Uint8List(value.length);
           while (offset < value.length) {
-            offset += cipher.processBlock(
-              value,
-              offset,
-              result,
-              offset,
-            );
+            offset += cipher.processBlock(value, offset, result, offset);
           }
           return result;
         case "aes-ofb":
@@ -498,20 +746,17 @@ mixin class _JSEngineApi {
           var offset = 0;
           var result = Uint8List(value.length);
           while (offset < value.length) {
-            offset += cipher.processBlock(
-              value,
-              offset,
-              result,
-              offset,
-            );
+            offset += cipher.processBlock(value, offset, result, offset);
           }
           return result;
         case "rsa":
           if (!isEncode) {
             var key = data["key"];
             final cipher = PKCS1Encoding(RSAEngine());
-            cipher.init(false,
-                PrivateKeyParameter<RSAPrivateKey>(_parsePrivateKey(key)));
+            cipher.init(
+              false,
+              PrivateKeyParameter<RSAPrivateKey>(_parsePrivateKey(key)),
+            );
             return _processInBlocks(cipher, value);
           }
           return null;
@@ -539,11 +784,16 @@ mixin class _JSEngineApi {
     final q = pkSeq.elements![5] as ASN1Integer;
 
     return RSAPrivateKey(
-        modulus.integer!, privateExponent.integer!, p.integer!, q.integer!);
+      modulus.integer!,
+      privateExponent.integer!,
+      p.integer!,
+      q.integer!,
+    );
   }
 
   Uint8List _processInBlocks(AsymmetricBlockCipher engine, Uint8List input) {
-    final numBlocks = input.length ~/ engine.inputBlockSize +
+    final numBlocks =
+        input.length ~/ engine.inputBlockSize +
         ((input.length % engine.inputBlockSize != 0) ? 1 : 0);
 
     final output = Uint8List(numBlocks * engine.outputBlockSize);
@@ -556,7 +806,12 @@ mixin class _JSEngineApi {
           : input.length - inputOffset;
 
       outputOffset += engine.processBlock(
-          input, inputOffset, chunkSize, output, outputOffset);
+        input,
+        inputOffset,
+        chunkSize,
+        output,
+        outputOffset,
+      );
 
       inputOffset += chunkSize;
     }
@@ -606,11 +861,8 @@ class DocumentWrapper {
 
   Map<String, String> elementGetAttributes(int key) {
     return elements[key].attributes.map(
-          (key, value) => MapEntry(
-            key.toString(),
-            value,
-          ),
-        );
+      (key, value) => MapEntry(key.toString(), value),
+    );
   }
 
   String? elementGetInnerHTML(int key) {
@@ -671,7 +923,7 @@ class DocumentWrapper {
       dom.Node.TEXT_NODE => "text",
       dom.Node.COMMENT_NODE => "comment",
       dom.Node.DOCUMENT_NODE => "document",
-      _ => "unknown"
+      _ => "unknown",
     };
   }
 
