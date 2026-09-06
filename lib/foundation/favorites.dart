@@ -965,28 +965,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   /// callers cannot bypass the cache's schema boundary.
   TrackingApplyStore get trackingApplyStore => _SqliteTrackingApplyStore(_db);
 
-  /// Builds the exact local favorite interest set from cached membership.
-  /// [fileNameForSource] is supplied by the loaded runtime so same-key source
-  /// variants do not silently inherit one another's identity.
-  List<TrackingFavoriteRef> getTrackingFavoriteRefs({
-    String? Function(String sourceKey)? fileNameForSource,
-  }) {
-    final rows = _db.select('''
-      SELECT source_key, comic_id FROM favorite_membership
-      UNION
-      SELECT source_key, comic_id FROM favorite_items
-      ORDER BY source_key, comic_id
-    ''');
-    return List.unmodifiable([
-      for (final row in rows)
-        TrackingFavoriteRef(
-          sourceKey: row['source_key'] as String,
-          comicId: row['comic_id'] as String,
-          fileName: fileNameForSource?.call(row['source_key'] as String),
-        ),
-    ]);
-  }
-
   void _writeFollowScheduleBackfillStatus(String status) {
     _db.execute('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)', [
       _followScheduleBackfillKey,
@@ -2946,68 +2924,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       [sourceKey, comicId],
     );
     return rows.isNotEmpty;
-  }
-
-  /// Returns the source-scoped favorite identities that should be sent as
-  /// Cloud demand. Membership is the durable source of truth; the cached
-  /// item union keeps the method useful while an older cache is being
-  /// upgraded or while a page snapshot is being rebuilt.
-  List<TrackingFavoriteRef> getCloudTrackingFavoriteRefs() {
-    final rows = _db.select('''
-      SELECT source_key, comic_id FROM favorite_membership
-      UNION
-      SELECT source_key, comic_id FROM favorite_items
-      ORDER BY source_key, comic_id
-    ''');
-    return List.unmodifiable(
-      rows.map(
-        (row) => TrackingFavoriteRef(
-          sourceKey: row['source_key'] as String,
-          comicId: row['comic_id'] as String,
-          fileName: _loadedArtifactFileName(row['source_key'] as String),
-        ),
-      ),
-    );
-  }
-
-  /// Builds exact `(sourceKey, fileName, comicId)` Cloud interests from the
-  /// active registry. Sources with a managed artifact that is not advertised
-  /// by the Server are filtered by [capableArtifacts].
-  List<TrackingInterest> buildCloudTrackingInterests(
-    ActiveArtifactRegistry registry, {
-    Iterable<TrustedArtifact>? capableArtifacts,
-  }) {
-    return const CloudInterestSync().buildInterests(
-      getCloudTrackingFavoriteRefs(),
-      registry: registry,
-      capableArtifacts: capableArtifacts,
-    );
-  }
-
-  /// Synchronizes the canonical interest set through the existing client.
-  /// This method is intentionally a full replacement: removing a local
-  /// favorite must remove its Server demand in the same idempotent update.
-  Future<CloudClientState> syncCloudTrackingInterests({
-    required CloudTrackingClient client,
-    required ActiveArtifactRegistry registry,
-    required bool cloudEnabled,
-    Iterable<TrustedArtifact>? capableArtifacts,
-  }) {
-    return const CloudInterestSync().synchronize(
-      client: client,
-      cloudEnabled: cloudEnabled,
-      favorites: getCloudTrackingFavoriteRefs(),
-      registry: registry,
-      capableArtifacts: capableArtifacts,
-    );
-  }
-
-  String? _loadedArtifactFileName(String sourceKey) {
-    final source = ComicSource.find(sourceKey);
-    if (source == null) return null;
-    final normalized = source.filePath.replaceAll('\\', '/');
-    final fileName = normalized.split('/').last.trim();
-    return fileName.isEmpty ? null : fileName;
   }
 
   String? _cachedFavoriteId(String sourceKey, String folderId, String comicId) {

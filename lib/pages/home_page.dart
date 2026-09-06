@@ -3,6 +3,7 @@ import 'package:sliver_tools/sliver_tools.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
+import 'package:venera/foundation/catalog/source_preferences.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/consts.dart';
 import 'package:venera/foundation/history.dart';
@@ -628,13 +629,19 @@ class _ComicSourceWidgetState extends State<_ComicSourceWidget> {
 
   void onComicSourceChange() {
     setState(() {
-      comicSources = ComicSource.all().map((e) => e.name).toList();
+      comicSources = ComicSource.all()
+          .where((source) => isSourceEnabled(source.key))
+          .map((e) => e.name)
+          .toList();
     });
   }
 
   @override
   void initState() {
-    comicSources = ComicSource.all().map((e) => e.name).toList();
+    comicSources = ComicSource.all()
+        .where((source) => isSourceEnabled(source.key))
+        .map((e) => e.name)
+        .toList();
     ComicSourceManager().addListener(onComicSourceChange);
     super.initState();
   }

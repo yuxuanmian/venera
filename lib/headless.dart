@@ -1,11 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/widgets.dart';
-import 'package:venera/foundation/app.dart';
 import 'package:venera/utils/data_sync.dart';
-import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/log.dart';
-import 'package:venera/pages/comic_source_page.dart';
 import 'package:venera/init.dart';
 import 'package:venera/foundation/follow_updates.dart';
 import 'package:venera/foundation/favorites.dart';
@@ -33,7 +30,14 @@ Future<void> runHeadlessMode(List<String> args) async {
   }
 
   // Need to initialize the app for some features to work
-  await init();
+  if (!await init()) {
+    cliPrint({
+      'status': 'error',
+      'message':
+          'Catalog Runtime is not ready; initialize Venera Server first.',
+    });
+    exit(2);
+  }
 
   var command = args[commandIndex];
   var subCommand = (commandIndex + 1 < args.length)
@@ -57,72 +61,6 @@ Future<void> runHeadlessMode(List<String> args) async {
         cliPrint({
           'status': 'error',
           'message': 'Invalid webdav command. Use "up" or "down".',
-        });
-        exit(1);
-      }
-      break;
-    case 'updatescript':
-      if (subCommand == 'all') {
-        cliPrint({
-          'status': 'running',
-          'message': 'Checking for comic source script updates...',
-        });
-        await ComicSourcePage.checkComicSourceUpdate();
-        var updates = ComicSourceManager().availableUpdates;
-        if (updates.isEmpty) {
-          cliPrint({'status': 'success', 'message': 'No updates found.'});
-        } else {
-          var total = updates.length;
-          var current = 0;
-          var errors = 0;
-          var updated = 0;
-          cliPrint({
-            'status': 'running',
-            'message': 'Updating all comic source scripts...',
-            'data': {'total': total, 'current': 0, 'updated': 0, 'errors': 0},
-          });
-          for (var key in updates.keys) {
-            var source = ComicSource.find(key);
-            if (source != null) {
-              current++;
-              var data = {
-                'current': current,
-                'total': total,
-                'source': {
-                  'key': source.key,
-                  'name': source.name,
-                  'version': source.version,
-                  'url': source.url,
-                },
-              };
-              try {
-                await ComicSourcePage.update(source, false);
-                updated++;
-                cliPrint({
-                  'status': 'running',
-                  'message': 'Progress',
-                  'data': data,
-                });
-              } catch (e) {
-                errors++;
-                cliPrint({
-                  'status': 'running',
-                  'message': 'ProgressError',
-                  'data': {...data, 'error': e.toString()},
-                });
-              }
-            }
-          }
-          cliPrint({
-            'status': 'success',
-            'message': 'All scripts updated.',
-            'data': {'total': total, 'updated': updated, 'errors': errors},
-          });
-        }
-      } else {
-        cliPrint({
-          'status': 'error',
-          'message': 'Invalid updatescript command. Use "all".',
         });
         exit(1);
       }
@@ -153,9 +91,7 @@ Future<void> runHeadlessMode(List<String> args) async {
         var type = args[updateIndex + 2];
         FavoriteItemWithUpdateInfo? comic;
         NetworkFavoriteFolderRef? folder;
-        for (final candidate in App.cloudTracking.localFolders(
-          getFollowUpdateFolders(),
-        )) {
+        for (final candidate in getFollowUpdateFolders()) {
           var comics = NetworkFavoriteCacheManager().getComicsWithUpdatesInfo(
             candidate,
           );
@@ -176,14 +112,7 @@ Future<void> runHeadlessMode(List<String> args) async {
           exit(1);
         }
 
-        var result = await updateComic(
-          comic,
-          folder,
-          cancellationToken: generationScanTokenForSource(
-            type,
-            App.cloudTracking.generations,
-          ),
-        );
+        var result = await updateComic(comic, folder);
 
         Map<String, dynamic> data = {
           'current': 1,
@@ -231,10 +160,9 @@ Future<void> runHeadlessMode(List<String> args) async {
         int updated = 0;
         int errors = 0;
         await for (var progress in scanFollowUpdates(
-          App.cloudTracking.localFolders(getFollowUpdateFolders()),
+          getFollowUpdateFolders(),
           FollowUpdateMode.force,
           ignoreRetryAfter: true,
-          generationController: App.cloudTracking.generations,
         )) {
           total = progress.total;
           updated = progress.updated;

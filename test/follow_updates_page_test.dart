@@ -12,19 +12,21 @@ import 'package:venera/foundation/res.dart';
 import 'package:venera/pages/follow_updates_page.dart';
 import 'package:venera/utils/translations.dart';
 
+const _testSourceKey = 'test_source';
+
 FavoriteItem _comic(String id) => FavoriteItem(
   id: id,
   name: 'Comic $id',
   coverPath: 'https://example.invalid/$id.jpg',
   author: 'Author',
-  sourceKeyValue: 'test-source',
+  sourceKeyValue: _testSourceKey,
   tags: const ['tag'],
 );
 
 FavoriteData _numericData(
   Future<Res<List<Comic>>> Function(int page, [String? folder]) loader,
 ) => FavoriteData(
-  key: 'test-source',
+  key: _testSourceKey,
   title: 'Test source',
   multiFolder: true,
   loadComic: loader,
@@ -36,7 +38,7 @@ FavoriteData _numericData(
 ComicSource _detailSource() {
   return ComicSource(
     'Test source',
-    'test-source',
+    _testSourceKey,
     null,
     null,
     null,
@@ -51,7 +53,7 @@ ComicSource _detailSource() {
         'cover': '',
         'tags': <String, List<String>>{},
         'chapters': <String, String>{'1': 'Chapter 1'},
-        'sourceKey': 'test-source',
+        'sourceKey': _testSourceKey,
         'comicId': id,
       }),
     ),
@@ -85,13 +87,18 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   late Directory tempDir;
+  late Object? previousEnabledSources;
+  late Object? previousFavorites;
   const folder = NetworkFavoriteFolderRef(
-    sourceKey: 'test-source',
+    sourceKey: _testSourceKey,
     folderId: 'remote',
     title: 'Remote',
   );
 
   setUpAll(() async {
+    previousEnabledSources = appdata.settings['enabledSources'];
+    previousFavorites = appdata.settings['favorites'];
+    appdata.settings['enabledSources'] = <String>[_testSourceKey];
     await AppTranslation.init();
     tempDir = await Directory.systemTemp.createTemp('venera-follow-ui-');
     final cache = NetworkFavoriteCacheManager();
@@ -115,7 +122,7 @@ void main() {
             retry_after, check_suspect_gone)
            VALUES (?, ?, ?, ?, ?, ?)''',
         [
-          'test-source',
+          _testSourceKey,
           id,
           1,
           DateTime.now().add(const Duration(days: 1)).millisecondsSinceEpoch,
@@ -129,7 +136,7 @@ void main() {
     expect(cache.countUncheckedComicsInFolders([folder]), 0);
 
     appdata.settings['followUpdatesEnabled'] = true;
-    appdata.settings['favorites'] = ['test-source'];
+    appdata.settings['favorites'] = [_testSourceKey];
     appdata.settings['language'] = 'system';
     final source = _detailSource();
     source.data['account'] = <String, dynamic>{};
@@ -138,7 +145,9 @@ void main() {
 
   tearDownAll(() {
     appdata.settings['followUpdatesEnabled'] = false;
-    ComicSourceManager().remove('test-source');
+    ComicSourceManager().remove(_testSourceKey);
+    appdata.settings['enabledSources'] = previousEnabledSources;
+    appdata.settings['favorites'] = previousFavorites;
     NetworkFavoriteCacheManager().close();
     tempDir.deleteSync(recursive: true);
   });

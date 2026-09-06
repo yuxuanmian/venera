@@ -1,0 +1,542 @@
+{
+  "fixtureVersion": 1,
+  "note": "合成合同数据，a/b SHA 不是实际GitHub发布。以下JS是测试样例，不代表真实Catalog原生验收已通过。hash按UTF-8原始文本含末尾换行计算。",
+  "pointers": {
+    "A": {
+      "catalogId": "yuxuanmian/venera-configs",
+      "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "indexUrl": "https://raw.githubusercontent.com/yuxuanmian/venera-configs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/index.json"
+    },
+    "B": {
+      "catalogId": "yuxuanmian/venera-configs",
+      "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "indexUrl": "https://raw.githubusercontent.com/yuxuanmian/venera-configs/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/index.json"
+    }
+  },
+  "authorityCases": [
+    {
+      "id": "authority-a",
+      "valid": true,
+      "value": {
+        "catalogId": "yuxuanmian/venera-configs",
+        "activeRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "indexUrl": "https://raw.githubusercontent.com/yuxuanmian/venera-configs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/index.json"
+      }
+    },
+    {
+      "id": "authority-b",
+      "valid": true,
+      "value": {
+        "catalogId": "yuxuanmian/venera-configs",
+        "activeRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "indexUrl": "https://raw.githubusercontent.com/yuxuanmian/venera-configs/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/index.json"
+      }
+    },
+    {
+      "id": "short-sha",
+      "valid": false,
+      "value": {
+        "catalogId": "yuxuanmian/venera-configs",
+        "activeRevision": "aaaaaaa",
+        "indexUrl": "https://raw.githubusercontent.com/yuxuanmian/venera-configs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/index.json"
+      }
+    },
+    {
+      "id": "revision-url-mismatch",
+      "valid": false,
+      "value": {
+        "catalogId": "yuxuanmian/venera-configs",
+        "activeRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "indexUrl": "https://raw.githubusercontent.com/yuxuanmian/venera-configs/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/index.json"
+      }
+    },
+    {
+      "id": "floating-index-url",
+      "valid": false,
+      "value": {
+        "catalogId": "yuxuanmian/venera-configs",
+        "activeRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "indexUrl": "https://raw.githubusercontent.com/yuxuanmian/venera-configs/yxm/index.json"
+      }
+    },
+    {
+      "id": "wrong-host",
+      "valid": false,
+      "value": {
+        "catalogId": "yuxuanmian/venera-configs",
+        "activeRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "indexUrl": "https://example.com/yuxuanmian/venera-configs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/index.json"
+      }
+    },
+    {
+      "id": "query-in-index",
+      "valid": false,
+      "value": {
+        "catalogId": "yuxuanmian/venera-configs",
+        "activeRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "indexUrl": "https://raw.githubusercontent.com/yuxuanmian/venera-configs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/index.json?x=1"
+      }
+    },
+    {
+      "id": "missing-wire-field",
+      "valid": false,
+      "value": {
+        "catalogId": "yuxuanmian/venera-configs",
+        "indexUrl": "https://raw.githubusercontent.com/yuxuanmian/venera-configs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/index.json"
+      }
+    },
+    {
+      "id": "nonstring-sha",
+      "valid": false,
+      "value": {
+        "catalogId": "yuxuanmian/venera-configs",
+        "activeRevision": 7,
+        "indexUrl": "https://raw.githubusercontent.com/yuxuanmian/venera-configs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/index.json"
+      }
+    }
+  ],
+  "indexCases": [
+    {
+      "id": "index-two-entries",
+      "valid": true,
+      "value": [
+        {
+          "name": "示例漫画源",
+          "fileName": "example_source.js",
+          "key": "example_source",
+          "version": "1.0.0"
+        },
+        {
+          "name": "Komiic",
+          "fileName": "komiic.js",
+          "key": "Komiic",
+          "version": "1.0.0",
+          "description": "大小写测试"
+        }
+      ]
+    },
+    {
+      "id": "index-empty-valid",
+      "valid": true,
+      "value": []
+    },
+    {
+      "id": "unknown-optional-ignored",
+      "valid": true,
+      "value": [
+        {
+          "name": "示例漫画源",
+          "fileName": "example_source.js",
+          "key": "example_source",
+          "version": "1.0.0",
+          "unknownMetadata": {
+            "future": "ignored"
+          }
+        },
+        {
+          "name": "Komiic",
+          "fileName": "komiic.js",
+          "key": "Komiic",
+          "version": "1.0.0",
+          "description": "大小写测试"
+        }
+      ]
+    },
+    {
+      "id": "duplicate-key",
+      "valid": false,
+      "value": [
+        {
+          "name": "示例漫画源",
+          "fileName": "example_source.js",
+          "key": "example_source",
+          "version": "1.0.0"
+        },
+        {
+          "name": "Komiic",
+          "fileName": "komiic.js",
+          "key": "example_source",
+          "version": "1.0.0",
+          "description": "大小写测试"
+        }
+      ]
+    },
+    {
+      "id": "duplicate-filename-case-insensitive",
+      "valid": false,
+      "value": [
+        {
+          "name": "示例漫画源",
+          "fileName": "example_source.js",
+          "key": "example_source",
+          "version": "1.0.0"
+        },
+        {
+          "name": "Komiic",
+          "fileName": "EXAMPLE_SOURCE.js",
+          "key": "Komiic",
+          "version": "1.0.0",
+          "description": "大小写测试"
+        }
+      ]
+    },
+    {
+      "id": "empty-key",
+      "valid": false,
+      "value": [
+        {
+          "name": "示例漫画源",
+          "fileName": "example_source.js",
+          "key": "",
+          "version": "1.0.0"
+        },
+        {
+          "name": "Komiic",
+          "fileName": "komiic.js",
+          "key": "Komiic",
+          "version": "1.0.0",
+          "description": "大小写测试"
+        }
+      ]
+    },
+    {
+      "id": "unsafe-source-key",
+      "valid": false,
+      "value": [
+        {
+          "name": "示例漫画源",
+          "fileName": "example_source.js",
+          "key": "1-invalid",
+          "version": "1.0.0"
+        },
+        {
+          "name": "Komiic",
+          "fileName": "komiic.js",
+          "key": "Komiic",
+          "version": "1.0.0",
+          "description": "大小写测试"
+        }
+      ]
+    },
+    {
+      "id": "traversal-file",
+      "valid": false,
+      "value": [
+        {
+          "name": "示例漫画源",
+          "fileName": "../example_source.js",
+          "key": "example_source",
+          "version": "1.0.0"
+        },
+        {
+          "name": "Komiic",
+          "fileName": "komiic.js",
+          "key": "Komiic",
+          "version": "1.0.0",
+          "description": "大小写测试"
+        }
+      ]
+    },
+    {
+      "id": "absolute-file",
+      "valid": false,
+      "value": [
+        {
+          "name": "示例漫画源",
+          "fileName": "/example_source.js",
+          "key": "example_source",
+          "version": "1.0.0"
+        },
+        {
+          "name": "Komiic",
+          "fileName": "komiic.js",
+          "key": "Komiic",
+          "version": "1.0.0",
+          "description": "大小写测试"
+        }
+      ]
+    },
+    {
+      "id": "subdirectory-file",
+      "valid": false,
+      "value": [
+        {
+          "name": "示例漫画源",
+          "fileName": "sources/example_source.js",
+          "key": "example_source",
+          "version": "1.0.0"
+        },
+        {
+          "name": "Komiic",
+          "fileName": "komiic.js",
+          "key": "Komiic",
+          "version": "1.0.0",
+          "description": "大小写测试"
+        }
+      ]
+    },
+    {
+      "id": "wrong-extension",
+      "valid": false,
+      "value": [
+        {
+          "name": "示例漫画源",
+          "fileName": "example_source.txt",
+          "key": "example_source",
+          "version": "1.0.0"
+        },
+        {
+          "name": "Komiic",
+          "fileName": "komiic.js",
+          "key": "Komiic",
+          "version": "1.0.0",
+          "description": "大小写测试"
+        }
+      ]
+    },
+    {
+      "id": "missing-version",
+      "valid": false,
+      "value": [
+        {
+          "name": "示例漫画源",
+          "fileName": "example_source.js",
+          "key": "example_source"
+        },
+        {
+          "name": "Komiic",
+          "fileName": "komiic.js",
+          "key": "Komiic",
+          "version": "1.0.0",
+          "description": "大小写测试"
+        }
+      ]
+    },
+    {
+      "id": "wrong-description-type",
+      "valid": false,
+      "value": [
+        {
+          "name": "示例漫画源",
+          "fileName": "example_source.js",
+          "key": "example_source",
+          "version": "1.0.0",
+          "description": 5
+        },
+        {
+          "name": "Komiic",
+          "fileName": "komiic.js",
+          "key": "Komiic",
+          "version": "1.0.0",
+          "description": "大小写测试"
+        }
+      ]
+    },
+    {
+      "id": "index-object-not-array",
+      "valid": false,
+      "value": {
+        "sources": [
+          {
+            "name": "示例漫画源",
+            "fileName": "example_source.js",
+            "key": "example_source",
+            "version": "1.0.0"
+          },
+          {
+            "name": "Komiic",
+            "fileName": "komiic.js",
+            "key": "Komiic",
+            "version": "1.0.0",
+            "description": "大小写测试"
+          }
+        ]
+      }
+    }
+  ],
+  "serverUrlCases": [
+    {
+      "input": " http://127.0.0.1:8080 ",
+      "valid": true,
+      "normalized": "http://127.0.0.1:8080/",
+      "authorityUrl": "http://127.0.0.1:8080/api/catalog/authority"
+    },
+    {
+      "input": "https://venera.example.com/base",
+      "valid": true,
+      "normalized": "https://venera.example.com/base/",
+      "authorityUrl": "https://venera.example.com/base/api/catalog/authority"
+    },
+    {
+      "input": "ftp://venera.example.com",
+      "valid": false
+    },
+    {
+      "input": "https://u:p@venera.example.com",
+      "valid": false
+    },
+    {
+      "input": "https://venera.example.com?foo=1",
+      "valid": false
+    },
+    {
+      "input": "https://venera.example.com/api/catalog/authority",
+      "valid": false
+    },
+    {
+      "input": "https://raw.githubusercontent.com/yuxuanmian/venera-configs/yxm/index.json",
+      "valid": false
+    }
+  ],
+  "selectionCases": [
+    {
+      "id": "uninitialized",
+      "input": null,
+      "previous": null,
+      "normalized": null
+    },
+    {
+      "id": "empty-is-intentional",
+      "input": [],
+      "previous": [
+        "Komiic"
+      ],
+      "normalized": []
+    },
+    {
+      "id": "case-and-dedup",
+      "input": [
+        "Komiic",
+        "example_source",
+        "Komiic"
+      ],
+      "previous": null,
+      "normalized": [
+        "Komiic",
+        "example_source"
+      ]
+    },
+    {
+      "id": "unknown-preserved",
+      "input": [
+        "new_source"
+      ],
+      "previous": [],
+      "normalized": [
+        "new_source"
+      ],
+      "effectiveAgainstExample": []
+    }
+  ],
+  "transitionCases": [
+    {
+      "id": "authority-removal",
+      "oldKeys": [
+        "foo",
+        "manwa"
+      ],
+      "newKeys": [
+        "manwa",
+        "bar"
+      ],
+      "enabled": [
+        "foo",
+        "manwa",
+        "new_on_other_device"
+      ],
+      "isAuthorityTransition": true,
+      "expected": [
+        "manwa",
+        "new_on_other_device"
+      ]
+    },
+    {
+      "id": "local-fallback-preserves-intent",
+      "oldKeys": [
+        "foo",
+        "manwa"
+      ],
+      "newKeys": [
+        "manwa"
+      ],
+      "enabled": [
+        "foo",
+        "manwa"
+      ],
+      "isAuthorityTransition": false,
+      "expected": [
+        "foo",
+        "manwa"
+      ]
+    },
+    {
+      "id": "readd-not-auto-enable",
+      "oldKeys": [
+        "manwa"
+      ],
+      "newKeys": [
+        "foo",
+        "manwa"
+      ],
+      "enabled": [
+        "manwa"
+      ],
+      "isAuthorityTransition": true,
+      "expected": [
+        "manwa"
+      ]
+    }
+  ],
+  "snapshotExample": {
+    "indexText": "[\n  {\n    \"name\": \"示例漫画源\",\n    \"fileName\": \"example_source.js\",\n    \"key\": \"example_source\",\n    \"version\": \"1.0.0\"\n  },\n  {\n    \"name\": \"Komiic\",\n    \"fileName\": \"komiic.js\",\n    \"key\": \"Komiic\",\n    \"version\": \"1.0.0\",\n    \"description\": \"大小写测试\"\n  }\n]\n",
+    "sources": [
+      {
+        "sourceKey": "example_source",
+        "fileName": "example_source.js",
+        "text": "class ExampleSource extends ComicSource {\n  name = \"示例漫画源\";\n  key = \"example_source\";\n  version = \"1.0.0\";\n}\n"
+      },
+      {
+        "sourceKey": "Komiic",
+        "fileName": "komiic.js",
+        "text": "class KomiicSample extends ComicSource {\n  name = \"Komiic\";\n  key = \"Komiic\";\n  version = \"1.0.0\";\n}\n"
+      }
+    ],
+    "manifest": {
+      "schemaVersion": 1,
+      "catalog": {
+        "catalogId": "yuxuanmian/venera-configs",
+        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "indexUrl": "https://raw.githubusercontent.com/yuxuanmian/venera-configs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/index.json"
+      },
+      "indexSha256": "8c6a43c27d11966dbcc0d15eaa21971885d7031ef3f74f5ea596385ef11aa0ab",
+      "files": [
+        {
+          "sourceKey": "example_source",
+          "fileName": "example_source.js",
+          "size": 119,
+          "sha256": "2705feae0a81c2531849d7cb881cc14de18ef1e1a0b9f419af7ee0708b7960b7"
+        },
+        {
+          "sourceKey": "Komiic",
+          "fileName": "komiic.js",
+          "size": 101,
+          "sha256": "e2e90b899d99c298b69a1e08475857ce9eb3ed098df799a45b40a7a60aa34731"
+        }
+      ]
+    }
+  },
+  "errors": {
+    "notActivated": {
+      "error": {
+        "code": "catalog_not_activated",
+        "message": "尚未激活漫画源配置"
+      }
+    },
+    "busy": {
+      "error": {
+        "code": "catalog_busy",
+        "message": "已有操作正在进行"
+      }
+    }
+  }
+}

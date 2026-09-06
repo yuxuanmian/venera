@@ -165,7 +165,7 @@ class NaviPaneState extends State<NaviPane>
   /// the metrics that matter (size / viewPadding / systemGestureInsets)
   /// actually change, e.g. rotation or window resize.
   ({Size size, EdgeInsets viewPadding, EdgeInsets systemGestureInsets})?
-      _layoutMetrics;
+  _layoutMetrics;
 
   MediaQueryData? _mediaQueryData() =>
       context.getInheritedWidgetOfExactType<MediaQuery>()?.data;
@@ -189,7 +189,7 @@ class NaviPaneState extends State<NaviPane>
   }
 
   ({Size size, EdgeInsets viewPadding, EdgeInsets systemGestureInsets})?
-      _readLayoutMetrics() {
+  _readLayoutMetrics() {
     // Read from the platform dispatcher: [didChangeMetrics] fires before the
     // widget tree is rebuilt with the new metrics, so the inherited
     // [MediaQuery] would still hold the stale snapshot at that point.
@@ -199,11 +199,11 @@ class NaviPaneState extends State<NaviPane>
     }
     final dpr = view.devicePixelRatio;
     EdgeInsets divide(ui.ViewPadding padding) => EdgeInsets.fromLTRB(
-          padding.left / dpr,
-          padding.top / dpr,
-          padding.right / dpr,
-          padding.bottom / dpr,
-        );
+      padding.left / dpr,
+      padding.top / dpr,
+      padding.right / dpr,
+      padding.bottom / dpr,
+    );
     return (
       size: view.physicalSize / dpr,
       viewPadding: divide(view.viewPadding),

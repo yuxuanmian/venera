@@ -21,11 +21,19 @@ class SharedRhttpClientManager {
 
   rhttp.RhttpClient? _client;
 
+  // Catalog requests share proxy, DNS and TLS settings with normal traffic,
+  // but use a separate client because redirect policy is client-scoped in
+  // rhttp. Keeping it cached avoids rebuilding native clients per source
+  // file while leaving ordinary requests unchanged.
+  rhttp.RhttpClient? _catalogClient;
+
   /// Fingerprint of the settings the current [_client] was created with.
   Object? _fingerprint;
+  Object? _catalogFingerprint;
 
   /// Coalesces concurrent rebuilds so racing requests create only one client.
   Future<void>? _rebuilding;
+  Future<void>? _catalogRebuilding;
 
   /// Returns the shared client, creating or rebuilding it when the settings
   /// it depends on have changed.
@@ -45,6 +53,20 @@ class SharedRhttpClientManager {
     return _client!;
   }
 
+  /// Returns a client with the application's current proxy/DNS/TLS policy
+  /// and an explicit no-redirect policy for immutable Catalog resources.
+  Future<rhttp.RhttpClient> getCatalogClient() async {
+    final fingerprint = await _computeFingerprint();
+    final client = _catalogClient;
+    if (client != null && fingerprint == _catalogFingerprint) {
+      return client;
+    }
+    final rebuilding = _catalogRebuilding ??= _rebuildCatalog(fingerprint);
+    await rebuilding;
+    if (fingerprint != _catalogFingerprint) return getCatalogClient();
+    return _catalogClient!;
+  }
+
   Future<void> _rebuild(Object fingerprint) async {
     try {
       final client = await rhttp.RhttpClient.create(
@@ -54,6 +76,17 @@ class SharedRhttpClientManager {
       _fingerprint = fingerprint;
     } finally {
       _rebuilding = null;
+    }
+  }
+
+  Future<void> _rebuildCatalog(Object fingerprint) async {
+    try {
+      _catalogClient = await rhttp.RhttpClient.create(
+        settings: await _buildSettings(catalogNoRedirect: true),
+      );
+      _catalogFingerprint = fingerprint;
+    } finally {
+      _catalogRebuilding = null;
     }
   }
 
@@ -68,13 +101,17 @@ class SharedRhttpClientManager {
     );
   }
 
-  Future<rhttp.ClientSettings> _buildSettings() async {
+  Future<rhttp.ClientSettings> _buildSettings({
+    bool catalogNoRedirect = false,
+  }) async {
     var proxy = await getProxy();
     return rhttp.ClientSettings(
       proxySettings: proxy == null
           ? const rhttp.ProxySettings.noProxy()
           : rhttp.ProxySettings.proxy(proxy),
-      redirectSettings: const rhttp.RedirectSettings.limited(5),
+      redirectSettings: catalogNoRedirect
+          ? const rhttp.RedirectSettings.none()
+          : const rhttp.RedirectSettings.limited(5),
       timeoutSettings: const rhttp.TimeoutSettings(
         connectTimeout: Duration(seconds: 15),
         keepAliveTimeout: Duration(seconds: 60),

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
+import 'package:venera/foundation/catalog/source_preferences.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/consts.dart';
 import 'package:venera/foundation/favorites.dart';
@@ -25,6 +26,7 @@ class _FavoritesPageState extends State<FavoritesPage> {
     return enabled
         .map(getFavoriteDataOrNull)
         .whereType<FavoriteData>()
+        .where((source) => isSourceEnabled(source.key))
         .toList();
   }
 
@@ -34,7 +36,18 @@ class _FavoritesPageState extends State<FavoritesPage> {
     if (stored is Map && stored['sourceKey'] is String) {
       _selectedSource = stored['sourceKey'] as String;
     }
+    appdata.settings.addListener(_onSettingsChanged);
     super.initState();
+  }
+
+  void _onSettingsChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    appdata.settings.removeListener(_onSettingsChanged);
+    super.dispose();
   }
 
   void _select(String sourceKey) {

@@ -33,19 +33,22 @@ ToastHandle? showToast({
   bool followTheme = false,
 }) {
   var newEntry = OverlayEntry(
-      builder: (context) => _ToastOverlay(
-            message: message,
-            icon: icon,
-            trailing: trailing,
-            followTheme: followTheme,
-          ));
+    builder: (context) => _ToastOverlay(
+      message: message,
+      icon: icon,
+      trailing: trailing,
+      followTheme: followTheme,
+    ),
+  );
 
   var state = context.findAncestorStateOfType<OverlayWidgetState>();
 
   state?.addOverlay(newEntry);
 
-  var timer =
-      Timer(Duration(seconds: seconds ?? 2), () => state?.remove(newEntry));
+  var timer = Timer(
+    Duration(seconds: seconds ?? 2),
+    () => state?.remove(newEntry),
+  );
 
   return ToastHandle._(timer, state, newEntry);
 }
@@ -90,11 +93,11 @@ class _ToastOverlay extends StatelessWidget {
             data: IconThemeData(color: foreground),
             child: IntrinsicWidth(
               child: Container(
-                padding:
-                    const EdgeInsets.symmetric(vertical: 6, horizontal: 16),
-                constraints: BoxConstraints(
-                  maxWidth: context.width - 32,
+                padding: const EdgeInsets.symmetric(
+                  vertical: 6,
+                  horizontal: 16,
                 ),
+                constraints: BoxConstraints(maxWidth: context.width - 32),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -103,12 +106,14 @@ class _ToastOverlay extends StatelessWidget {
                       child: Text(
                         message,
                         style: const TextStyle(
-                            fontSize: 16, fontWeight: FontWeight.w500),
+                          fontSize: 16,
+                          fontWeight: FontWeight.w500,
+                        ),
                         maxLines: 3,
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                    if (trailing != null) trailing!.paddingLeft(8)
+                    if (trailing != null) trailing!.paddingLeft(8),
                   ],
                 ),
               ),
@@ -169,12 +174,7 @@ void showDialogMessage(BuildContext context, String title, String message) {
     builder: (context) => ContentDialog(
       title: title,
       content: Text(message).paddingHorizontal(16),
-      actions: [
-        FilledButton(
-          onPressed: context.pop,
-          child: Text("OK".tl),
-        )
-      ],
+      actions: [FilledButton(onPressed: context.pop, child: Text("OK".tl))],
     ),
   );
 }
@@ -198,9 +198,7 @@ Future<void> showConfirmDialog({
             context.pop();
             onConfirm();
           },
-          style: FilledButton.styleFrom(
-            backgroundColor: btnColor,
-          ),
+          style: FilledButton.styleFrom(backgroundColor: btnColor),
           child: Text(confirmText.tl),
         ),
       ],
@@ -268,36 +266,38 @@ LoadingDialogController showLoadingDialog(
     context: context,
     barrierDismissible: barrierDismissible,
     builder: (BuildContext context) {
-      return StatefulBuilder(builder: (context, setState) {
-        controller._serProgress = (value) {
-          setState(() {
-            controller._progress = value;
-          });
-        };
-        controller._setMessage = (message) {
-          setState(() {
-            controller._message = message;
-          });
-        };
-        return ContentDialog(
-          title: controller._message ?? 'Loading',
-          content: LinearProgressIndicator(
-            value: controller._progress,
-            backgroundColor: context.colorScheme.surfaceContainer,
-          ).paddingHorizontal(16).paddingVertical(16),
-          actions: [
-            FilledButton(
-              onPressed: allowCancel
-                  ? () {
-                      controller.close();
-                      onCancel?.call();
-                    }
-                  : null,
-              child: Text(cancelButtonText.tl),
-            )
-          ],
-        );
-      });
+      return StatefulBuilder(
+        builder: (context, setState) {
+          controller._serProgress = (value) {
+            setState(() {
+              controller._progress = value;
+            });
+          };
+          controller._setMessage = (message) {
+            setState(() {
+              controller._message = message;
+            });
+          };
+          return ContentDialog(
+            title: controller._message ?? 'Loading',
+            content: LinearProgressIndicator(
+              value: controller._progress,
+              backgroundColor: context.colorScheme.surfaceContainer,
+            ).paddingHorizontal(16).paddingVertical(16),
+            actions: [
+              FilledButton(
+                onPressed: allowCancel
+                    ? () {
+                        controller.close();
+                        onCancel?.call();
+                      }
+                    : null,
+                child: Text(cancelButtonText.tl),
+              ),
+            ],
+          );
+        },
+      );
     },
   );
 
@@ -338,13 +338,13 @@ class ContentDialog extends StatelessWidget {
         children: [
           title != null
               ? Appbar(
-            leading: IconButton(
-              icon: const Icon(Icons.close),
-              onPressed: dismissible ? context.pop : null,
-            ),
-            title: Text(title!),
-            backgroundColor: Colors.transparent,
-          )
+                  leading: IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: dismissible ? context.pop : null,
+                  ),
+                  title: Text(title!),
+                  backgroundColor: Colors.transparent,
+                )
               : const SizedBox.shrink(),
           this.content,
           const SizedBox(height: 16),
@@ -483,10 +483,7 @@ void showInfoDialog({
         title: title,
         content: Text(content).paddingHorizontal(16).paddingVertical(8),
         actions: [
-          Button.filled(
-            onPressed: context.pop,
-            child: Text(confirmText.tl),
-          ),
+          Button.filled(onPressed: context.pop, child: Text(confirmText.tl)),
         ],
       );
     },
@@ -521,7 +518,7 @@ Future<int?> showSelectDialog({
                         current = i;
                       });
                     },
-                  )
+                  ),
                 ],
               ),
             ),

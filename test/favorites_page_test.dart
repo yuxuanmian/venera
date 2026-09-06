@@ -560,5 +560,15 @@ void main() {
     expect(find.text('Page 1 / 2'), findsOneWidget);
     expect(find.text('folder-b-page-1'), findsOneWidget);
     expect(find.text('folder-a-page-2'), findsNothing);
+
+    // Dispose the page before the binding verifies that no image retries are
+    // still pending. The providers may already be waiting on their bounded
+    // retry delays, so advance fake time far enough for those futures to
+    // observe cancellation.
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+    );
+    await tester.pump(const Duration(seconds: 10));
   });
 }

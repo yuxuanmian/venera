@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
+import 'package:venera/foundation/appdata.dart';
+import 'package:venera/foundation/catalog/source_preferences.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/history.dart';
@@ -16,19 +18,22 @@ class HistoryPage extends StatefulWidget {
 class _HistoryPageState extends State<HistoryPage> {
   @override
   void initState() {
+    comics = _visibleHistories();
     HistoryManager().addListener(onUpdate);
+    appdata.settings.addListener(onUpdate);
     super.initState();
   }
 
   @override
   void dispose() {
     HistoryManager().removeListener(onUpdate);
+    appdata.settings.removeListener(onUpdate);
     super.dispose();
   }
 
   void onUpdate() {
     setState(() {
-      comics = HistoryManager().getAll();
+      comics = _visibleHistories();
       if (multiSelectMode) {
         selectedComics.removeWhere((comic, _) => !comics.contains(comic));
         if (selectedComics.isEmpty) {
@@ -38,11 +43,20 @@ class _HistoryPageState extends State<HistoryPage> {
     });
   }
 
-  var comics = HistoryManager().getAll();
+  late List<History> comics;
   var controller = FlyoutController();
 
   bool multiSelectMode = false;
   Map<History, bool> selectedComics = {};
+
+  List<History> _visibleHistories() {
+    return HistoryManager().getAll().where((history) {
+      final source = history.sourceKey;
+      return source == 'local' ||
+          source.startsWith('Unknown') ||
+          isSourceEnabled(source);
+    }).toList();
+  }
 
   void selectAll() {
     setState(() {

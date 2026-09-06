@@ -1,4 +1,11 @@
-import 'dart:async' show Future, FutureOr, StreamController, scheduleMicrotask;
+import 'dart:async'
+    show
+        Completer,
+        Future,
+        FutureOr,
+        StreamController,
+        Timer,
+        scheduleMicrotask;
 import 'dart:convert';
 import 'dart:math';
 import 'dart:ui' as ui show Codec;
@@ -258,6 +265,43 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
     StreamController<ImageChunkEvent> chunkEvents,
     void Function() checkStop,
   );
+
+  /// Waits for [duration] while allowing an image-stream cancellation to
+  /// interrupt the timer immediately. Providers that throttle their own
+  /// requests should use this instead of an uncancellable `Future.delayed`.
+  @protected
+  Future<void> waitForCancellationAwareDelay(
+    StreamController<ImageChunkEvent> chunkEvents,
+    Duration duration,
+    void Function() checkStop,
+  ) async {
+    final done = Completer<void>();
+    Timer? timer;
+    final previousOnCancel = chunkEvents.onCancel;
+
+    void completeOnCancel() {
+      previousOnCancel?.call();
+      if (!done.isCompleted) {
+        done.complete();
+      }
+    }
+
+    chunkEvents.onCancel = completeOnCancel;
+    timer = Timer(duration, () {
+      if (!done.isCompleted) {
+        done.complete();
+      }
+    });
+    try {
+      await done.future;
+      checkStop();
+    } finally {
+      timer.cancel();
+      if (identical(chunkEvents.onCancel, completeOnCancel)) {
+        chunkEvents.onCancel = previousOnCancel;
+      }
+    }
+  }
 
   /// Whether failures from [load] should use the generic image retry policy.
   /// Providers with their own bounded recovery state machine can disable it.

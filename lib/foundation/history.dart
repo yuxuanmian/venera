@@ -183,7 +183,20 @@ class HistoryManager with ChangeNotifier {
   factory HistoryManager() =>
       cache == null ? (cache = HistoryManager.create()) : cache!;
 
-  late Database _db;
+  Database? _connection;
+
+  /// The currently owned SQLite connection. Keep the existing private member
+  /// shape for the `image_favorites.dart` part file, but make access fail
+  /// clearly when initialization only opened (or has already closed) a DB.
+  Database get _db {
+    final connection = _connection;
+    if (connection == null) {
+      throw StateError('history database is not initialized');
+    }
+    return connection;
+  }
+
+  bool get hasOpenConnection => _connection != null;
 
   int get length => _db.select("select count(*) from history;").first[0] as int;
 
@@ -199,32 +212,59 @@ class HistoryManager with ChangeNotifier {
     if (isInitialized) {
       return;
     }
-    _db = sqlite3.open("${App.dataPath}/history.db");
-
-    _db.execute("""
-        create table if not exists history  (
-          id text primary key,
-          title text,
-          subtitle text,
-          cover text,
-          time int,
-          type int,
-          ep int,
-          page int,
-          readEpisode text,
-          max_page int,
-          chapter_group int
-        );
-      """);
-
-    var columns = _db.select("PRAGMA table_info(history);");
-    if (!columns.any((element) => element["name"] == "chapter_group")) {
-      _db.execute("alter table history add column chapter_group int;");
+    // A previous failed init may have left a connection behind. It is safe to
+    // close it before retrying and prevents replacing the ownership reference
+    // while the old native handle is still alive.
+    if (_connection != null) {
+      close();
     }
+    final connection = sqlite3.open("${App.dataPath}/history.db");
+    _connection = connection;
+    try {
+      connection.execute("""
+          create table if not exists history  (
+            id text primary key,
+            title text,
+            subtitle text,
+            cover text,
+            time int,
+            type int,
+            ep int,
+            page int,
+            readEpisode text,
+            max_page int,
+            chapter_group int
+          );
+        """);
 
-    notifyListeners();
-    ImageFavoriteManager().init();
-    isInitialized = true;
+      var columns = connection.select("PRAGMA table_info(history);");
+      if (!columns.any((element) => element["name"] == "chapter_group")) {
+        connection.execute("alter table history add column chapter_group int;");
+      }
+
+      ImageFavoriteManager().init();
+      isInitialized = true;
+      notifyListeners();
+    } catch (error, stack) {
+      // Drop ownership before disposing so a reentrant close/retry cannot see
+      // a stale native handle. Preserve the original initialization error.
+      if (identical(_connection, connection)) {
+        _connection = null;
+      }
+      isInitialized = false;
+      _cachedHistoryIds = null;
+      cachedHistories.clear();
+      try {
+        connection.dispose();
+      } catch (disposeError, disposeStack) {
+        Log.error(
+          'History',
+          'Failed to dispose database after init error: $disposeError',
+          disposeStack,
+        );
+      }
+      Error.throwWithStackTrace(error, stack);
+    }
   }
 
   static const _insertHistorySql = """
@@ -424,7 +464,17 @@ class HistoryManager with ChangeNotifier {
 
   void close() {
     isInitialized = false;
-    _db.dispose();
+    _cachedHistoryIds = null;
+    cachedHistories.clear();
+    final connection = _connection;
+    _connection = null;
+    if (connection != null) {
+      try {
+        connection.dispose();
+      } catch (error, stack) {
+        Log.error('History', 'Failed to close database: $error', stack);
+      }
+    }
   }
 
   void batchDeleteHistories(List<ComicID> histories) {

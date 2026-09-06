@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:display_mode/display_mode.dart';
 import 'package:flutter/services.dart';
@@ -7,14 +8,17 @@ import 'package:flutter_saf/flutter_saf.dart';
 import 'package:rhttp/rhttp.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/cache_manager.dart';
+import 'package:venera/foundation/catalog/controller.dart';
+import 'package:venera/foundation/catalog/runtime_loader.dart';
+import 'package:venera/foundation/catalog/store.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/js_engine.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/network/cookie_jar.dart';
-import 'package:venera/pages/comic_source_page.dart';
 import 'package:venera/pages/follow_updates_page.dart';
 import 'package:venera/pages/settings/settings_page.dart';
 import 'package:venera/utils/app_links.dart';
+import 'package:venera/utils/data_sync.dart';
 import 'package:venera/utils/handle_text_share.dart';
 import 'package:venera/utils/opencc.dart';
 import 'package:venera/utils/tags_translation.dart';
@@ -34,45 +38,54 @@ extension _FutureInit<T> on Future<T> {
   }
 }
 
-Future<void> init() async {
+bool _baseInitialized = false;
+bool _runtimeInitialized = false;
+CatalogController? catalogController;
+
+Future<void> initBase() async {
+  if (_baseInitialized) return;
   await App.init().wait();
   await SingleInstanceCookieJar.createInstance();
   try {
     await Rhttp.init();
-    // Source admission reads the persisted Cloud ownership setting, so load
-    // appdata before initializing the source/runtime boundary.
     await appdata.init();
     await Future.wait([
-      SAFTaskWorker().init().wait(),
       AppTranslation.init().wait(),
       TagsTranslation.readData().wait(),
       OpenCC.init(),
     ]);
-    await JsEngine().init().wait();
-    // Establish the registry and runtime admission boundary before any
-    // source script is parsed.  The same sequence is used by headless mode
-    // because it calls this function as its only application bootstrap.
-    await App.cloudTracking.prepareRuntimeAdmission().wait();
-    await ComicSourceManager().init().wait();
-    // LocalManager restores persisted download tasks by source key, so keep
-    // component initialization after ComicSourceManager is ready.
-    await App.initComponents();
-    App.local.restoreDownloadingTasks();
+    // Do not turn a failed native engine into a successful empty runtime.
+    // The outer base error is logged, and Catalog preparation will surface the
+    // same failure to the Gate instead of publishing partial sources.
+    await JsEngine().init();
   } catch (e, s) {
     Log.error("init", "$e\n$s");
   }
-  // ComicSourceManager has loaded the active artifact registry above, so the
-  // Cloud coordinator can now align exact artifacts before any follow-up
-  // checker starts issuing Local work.
-  await App.cloudTracking.start().wait();
+  catalogController ??= CatalogController(
+    store: CatalogStore(Directory('${App.dataPath}/catalog_runtime')),
+    runtimeLoader: CatalogRuntimeLoader.forComicSources(),
+  );
   CacheManager().setLimitSize(appdata.settings['cacheSize']);
+  _baseInitialized = true;
+}
+
+Future<void> initRuntimeServices() async {
+  if (_runtimeInitialized) return;
+  await SAFTaskWorker().init().wait();
+  // CatalogGate has already published the complete Source assembly. Component
+  // initialization can now restore user data and download tasks safely.
+  await App.initComponents();
+  DataSync.markRuntimeReady();
+  App.local.restoreDownloadingTasks();
+  _checkOldConfigs();
+  checkUpdates();
+  _runtimeInitialized = true;
   // Flush batched cache index updates when the app is backgrounded or
   // killed, so sliding expirations are durable even if the process dies.
   AppLifecycleListener(
     onPause: CacheManager().flushPendingExpiryUpdates,
     onDetach: CacheManager().flushPendingExpiryUpdates,
   );
-  _checkOldConfigs();
   if (App.isAndroid) {
     handleLinks();
     handleTextShare();
@@ -95,6 +108,20 @@ Future<void> init() async {
   }
 }
 
+/// Compatibility entry point for headless callers. The visible UI uses the
+/// split base/Gate/runtime sequence in main.dart.
+Future<bool> init() async {
+  await initBase();
+  final result = await catalogController!.boot();
+  if (result is CatalogReady) {
+    await initRuntimeServices();
+    return true;
+  } else {
+    Log.error('init', 'Catalog is not ready: $result');
+    return false;
+  }
+}
+
 void _checkOldConfigs() {
   if (appdata.settings['searchSources'] == null) {
     appdata.settings['searchSources'] = ComicSource.all()
@@ -114,15 +141,6 @@ void _checkOldConfigs() {
     }
     appdata.writeImplicitData();
   }
-
-  if (appdata.settings['comicSourceListUrl'].toString().contains(
-    "git.nyne.dev",
-  )) {
-    // migrate legacy source list URL
-    appdata.settings['comicSourceListUrl'] =
-        "https://raw.githubusercontent.com/yuxuanmian/venera-configs/yxm/index.json";
-    appdata.saveData();
-  }
 }
 
 Future<void> _checkAppUpdates() async {
@@ -133,7 +151,6 @@ Future<void> _checkAppUpdates() async {
   }
   appdata.implicitData['lastCheckUpdate'] = now;
   appdata.writeImplicitData();
-  ComicSourcePage.checkComicSourceUpdate();
   if (appdata.settings['checkUpdateOnStart']) {
     await checkUpdateUi(false, true);
   }

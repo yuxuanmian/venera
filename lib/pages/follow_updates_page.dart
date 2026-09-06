@@ -5,12 +5,12 @@ import 'package:flutter/material.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
+import 'package:venera/foundation/catalog/source_preferences.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_updates.dart';
 import 'package:venera/foundation/global_state.dart';
 import 'package:venera/foundation/log.dart';
-import 'package:venera/foundation/tracking/runtime_generation.dart';
 import 'package:venera/utils/translations.dart';
 
 class FollowUpdatesWidget extends StatefulWidget {
@@ -848,20 +848,9 @@ abstract class FollowUpdatesService {
   static List<NetworkFavoriteFolderRef> _effectiveLocalFolders(
     List<NetworkFavoriteFolderRef> folders,
   ) {
-    if (!App.isInitialized) return folders;
-    return App.cloudTracking.localFolders(folders);
-  }
-
-  static RuntimeGenerationController? get _generationController =>
-      App.isInitialized ? App.cloudTracking.generations : null;
-
-  static ScanCancellationToken _sourceToken(
-    ScanCancellationToken base,
-    String sourceKey,
-  ) {
-    final controller = _generationController;
-    if (controller == null) return base;
-    return generationScanTokenForSource(sourceKey, controller, base: base);
+    return folders
+        .where((folder) => isSourceEnabled(folder.sourceKey))
+        .toList();
   }
 
   /// Latest progress of the background baseline run, or null when no baseline
@@ -929,7 +918,7 @@ abstract class FollowUpdatesService {
             ),
         };
         for (final folder in listFolders) {
-          final folderToken = _sourceToken(token, folder.sourceKey);
+          final folderToken = token;
           if (!folderToken.canCommit) return;
           if (!cache.tryAcquireFullCacheLock(folder)) {
             completed++;
@@ -1012,7 +1001,7 @@ abstract class FollowUpdatesService {
           }
         }
         for (final item in comics.take(count)) {
-          final itemToken = _sourceToken(token, item.sourceKey);
+          final itemToken = token;
           if (!itemToken.canCommit) return;
           final fresh = cache.getComicUpdateInfo(
             item.sourceKey,
@@ -1222,7 +1211,6 @@ abstract class FollowUpdatesService {
         ignoreRetryAfter: ignoreRetryAfter,
         includeSuspect: includeSuspect,
         forceListSnapshots: forceListSnapshots,
-        generationController: _generationController,
       )) {
         // Empty queue: no plan, keep any previous UI state untouched.
         if (progress.total == 0) continue;

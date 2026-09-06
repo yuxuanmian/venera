@@ -64,7 +64,9 @@ class _ExploreSettingsState extends State<ExploreSettings> {
             '_aggregated_': "Aggregated".tl,
             ...(() {
               var map = <String, String>{};
-              for (var c in ComicSource.all()) {
+              for (var c in ComicSource.all().where(
+                (source) => isSourceEnabled(source.key),
+              )) {
                 map[c.key] = c.name;
               }
               return map;
@@ -198,7 +200,9 @@ class _ManageBlockingWordViewState extends State<_ManageBlockingWordView> {
 
 Widget setExplorePagesWidget() {
   var pages = <String, String>{};
-  for (var c in ComicSource.all()) {
+  for (var c in ComicSource.all().where(
+    (source) => isSourceEnabled(source.key),
+  )) {
     for (var page in c.explorePages) {
       pages[page.title] = page.title.ts(c.key);
     }
@@ -212,7 +216,9 @@ Widget setExplorePagesWidget() {
 
 Widget setCategoryPagesWidget() {
   var pages = <String, String>{};
-  for (var c in ComicSource.all()) {
+  for (var c in ComicSource.all().where(
+    (source) => isSourceEnabled(source.key),
+  )) {
     if (c.categoryData != null) {
       pages[c.categoryData!.key] = c.categoryData!.title;
     }
@@ -226,7 +232,9 @@ Widget setCategoryPagesWidget() {
 
 Widget setFavoritesPagesWidget() {
   var pages = <String, String>{};
-  for (var c in ComicSource.all()) {
+  for (var c in ComicSource.all().where(
+    (source) => isSourceEnabled(source.key),
+  )) {
     if (c.favoriteData != null) {
       pages[c.favoriteData!.key] = c.favoriteData!.title;
     }
@@ -240,7 +248,9 @@ Widget setFavoritesPagesWidget() {
 
 Widget setSearchSourcesWidget() {
   var pages = <String, String>{};
-  for (var c in ComicSource.all()) {
+  for (var c in ComicSource.all().where(
+    (source) => isSourceEnabled(source.key),
+  )) {
     if (c.searchPageData != null) {
       pages[c.key] = c.name;
     }

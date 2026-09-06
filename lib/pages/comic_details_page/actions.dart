@@ -416,9 +416,7 @@ abstract mixin class _ComicPageActions {
 
   void showComments() {
     if (App.isAndroid) {
-      App.rootContext.to(
-        () => CommentsPage(data: comic, source: comicSource),
-      );
+      App.rootContext.to(() => CommentsPage(data: comic, source: comicSource));
     } else {
       showSideBar(
         App.rootContext,

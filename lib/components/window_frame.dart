@@ -217,7 +217,6 @@ Future<void> showDebugMenu(GlobalKey buttonKey) async {
       Offset.zero & overlayBox.size,
     ),
     items: [
-      PopupMenuItem(value: 'reloadSources', child: Text('Reload Sources'.tl)),
       PopupMenuItem(
         value: 'clearFavorites',
         child: Text('Clear Favorites Cache'.tl),
@@ -246,11 +245,6 @@ Future<void> showDebugMenuSheet() async {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          ListTile(
-            leading: const Icon(Icons.refresh),
-            title: Text('Reload Sources'.tl),
-            onTap: () => context.pop('reloadSources'),
-          ),
           ListTile(
             leading: const Icon(Icons.delete_sweep_outlined),
             title: Text('Clear Favorites Cache'.tl),
@@ -282,9 +276,6 @@ Future<void> showDebugMenuSheet() async {
 
 void handleDebugMenuSelected(String value) {
   switch (value) {
-    case 'reloadSources':
-      debug();
-      break;
     case 'clearFavorites':
       App.favorites.clearAllCache();
       App.rootContext.showMessage(message: 'Favorites cache cleared'.tl);
@@ -772,8 +763,4 @@ TransitionBuilder VirtualWindowFrameInit() {
   return (_, Widget? child) {
     return VirtualWindowFrame(child: child!);
   };
-}
-
-void debug() {
-  unawaited(App.cloudTracking.reloadAllSources());
 }

@@ -3,458 +3,66 @@ import 'dart:convert';
 import 'dart:io' as io;
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
-import 'package:path/path.dart' as p;
 import 'package:url_launcher/url_launcher_string.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
+import 'package:venera/foundation/catalog/source_preferences.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/log.dart';
-import 'package:venera/network/app_dio.dart';
 import 'package:venera/network/cookie_jar.dart';
 import 'package:venera/pages/webview.dart';
-import 'package:venera/foundation/tracking/tracking.dart';
-import 'package:venera/utils/ext.dart';
-import 'package:venera/utils/io.dart';
 import 'package:venera/utils/translations.dart';
 
-@visibleForTesting
-bool shouldCommitComicSourceEdit(String initial, String current) {
-  return initial != current;
-}
-
-/// The small commit gate shared by the mobile editor and its regression
-/// tests. Opening an editor is not a runtime mutation; only a changed buffer
-/// writes the file and invokes the reload/fence callback.
-@visibleForTesting
-class ComicSourceEditSession {
-  ComicSourceEditSession({
-    required this.file,
-    required String initialValue,
-    this.onBeforeWrite,
-    required this.onCommit,
-  }) : initial = initialValue,
-       current = initialValue;
-
-  final io.File file;
-  final String initial;
-  String current;
-  final void Function()? onBeforeWrite;
-  final void Function() onCommit;
-
-  void close() {
-    if (!shouldCommitComicSourceEdit(initial, current)) return;
-    onBeforeWrite?.call();
-    file.writeAsStringSync(current);
-    onCommit();
-  }
-}
-
 class ComicSourcePage extends StatelessWidget {
-  const ComicSourcePage({super.key});
+  const ComicSourcePage({super.key, this.preferences});
 
-  static ActiveArtifact? _activeForSource(
-    ActiveArtifactRegistry registry,
-    SourceRevisionStore store,
-    ComicSource source,
-  ) => registry.artifacts.firstWhereOrNull(
-    (artifact) =>
-        artifact.sourceKey == source.key &&
-        p.equals(
-          store.fileForRelativePath(artifact.relativePath).absolute.path,
-          io.File(source.filePath).absolute.path,
-        ),
-  );
-
-  /// Resolves legacy source files without registering a second live runtime.
-  ///
-  /// Migration can run while the existing source manager still owns the same
-  /// key.  Validation-only parsing keeps that lookup side-effect free and
-  /// lets the caller decide when the selected artifact becomes active.
-  static Future<String> _resolveSourceKey(io.File file) async {
-    final parsed = await ComicSourceParser().parse(
-      await file.readAsString(),
-      file.absolute.path,
-      register: false,
-      allowExistingKey: true,
-      loadData: false,
-      scheduleInit: false,
-    );
-    return parsed.key;
-  }
-
-  static Future<void> update(
-    ComicSource source, [
-    bool showLoading = true,
-  ]) async {
-    if (!source.url.isURL) {
-      if (showLoading) {
-        App.rootContext.showMessage(message: "Invalid url config");
-        return;
-      } else {
-        throw Exception("Invalid url config");
-      }
-    }
-    bool cancel = false;
-    LoadingDialogController? controller;
-    if (showLoading) {
-      controller = showLoadingDialog(
-        App.rootContext,
-        onCancel: () => cancel = true,
-        barrierDismissible: false,
-      );
-    }
-    try {
-      final sourceDirectory = Directory(p.join(App.dataPath, 'comic_source'));
-      final store = SourceRevisionStore(sourceDirectory);
-      final registry = await store.load() ?? const ActiveArtifactRegistry();
-      final active = _activeForSource(registry, store, source);
-      if (active?.origin == ArtifactOrigin.managedCatalog) {
-        await _updateManagedSource(source, active!, store);
-        controller?.close();
-        if (showLoading) App.forceRebuild();
-        return;
-      }
-
-      var res = await AppDio().get<String>(
-        source.url,
-        options: Options(
-          responseType: ResponseType.plain,
-          headers: {"cache-time": "no"},
-        ),
-      );
-      if (cancel) {
-        controller?.close();
-        return;
-      }
-      controller?.close();
-      await _updateCustomSource(source, active, store, utf8.encode(res.data!));
-      if (ComicSourceManager().availableUpdates.containsKey(source.key)) {
-        ComicSourceManager().availableUpdates.remove(source.key);
-      }
-    } catch (e) {
-      controller?.close();
-      if (cancel) return;
-      if (showLoading) {
-        App.rootContext.showMessage(message: e.toString());
-      } else {
-        rethrow;
-      }
-    }
-    if (showLoading) {
-      App.forceRebuild();
-    }
-  }
-
-  static Future<void> _updateManagedSource(
-    ComicSource source,
-    ActiveArtifact active,
-    SourceRevisionStore store,
-  ) async {
-    final uri = Uri.tryParse(source.url);
-    if (uri == null) {
-      throw const FormatException('managed catalog URL is invalid');
-    }
-    final revision = await _resolveCatalogRevision(const TrustedCatalog(), uri);
-    if (active.revision != revision) {
-      await App.cloudTracking.activateManagedSource(
-        identity: active.identity,
-        revision: revision,
-        fetch: _fetchCatalogBytes,
-      );
-    }
-    ComicSourceManager().availableUpdates.remove(source.key);
-  }
-
-  static Future<void> _updateCustomSource(
-    ComicSource source,
-    ActiveArtifact? active,
-    SourceRevisionStore store,
-    List<int> bytes,
-  ) async {
-    final registry = await store.load() ?? const ActiveArtifactRegistry();
-    final current = active ?? _activeForSource(registry, store, source);
-    if (current == null || current.origin != ArtifactOrigin.custom) {
-      throw const FormatException('custom source artifact is missing');
-    }
-    await SourceMutationService(
-      store: store,
-      coordinator: App.cloudTracking,
-      resolveSourceKey: ComicSourcePage._resolveSourceKey,
-    ).updateCustom(current.identity, bytes);
-  }
-
-  /// The mutation fence invalidates the old generation even when a source
-  /// update rolls back.  Reconcile the restored runtime so it receives a new
-  /// commit token before Local/Cloud work resumes.
-  static Future<void> _reconcileAfterMutationFailure() async {
-    try {
-      await App.cloudTracking.onSettingsChanged();
-    } catch (error, stack) {
-      Log.error('Reconcile comic source after mutation failure', error, stack);
-    }
-  }
-
-  static Future<bool> _tryAddManagedSource({
-    required String sourceKey,
-    required String fileName,
-    required Uri uri,
-  }) async {
-    const catalog = TrustedCatalog();
-    if (catalog.referenceFromArtifactUri(uri) == null) return false;
-    final revision = await _resolveCatalogRevision(catalog, uri);
-    await App.cloudTracking.activateManagedSource(
-      identity: TrustedArtifact(sourceKey: sourceKey, fileName: fileName),
-      revision: revision,
-      fetch: _fetchCatalogBytes,
-    );
-    App.forceRebuild();
-    return true;
-  }
-
-  static Future<List<int>> _fetchCatalogBytes(Uri uri) async {
-    final response = await AppDio().get<List<int>>(
-      uri.toString(),
-      options: Options(
-        responseType: ResponseType.bytes,
-        headers: const {'cache-time': 'no'},
-      ),
-    );
-    if (response.statusCode != 200 || response.data == null) {
-      throw FormatException(
-        'catalog fetch failed with status ${response.statusCode}',
-      );
-    }
-    return List<int>.from(response.data!);
-  }
-
-  static Future<String> _resolveCatalogRevision(
-    TrustedCatalog catalog,
-    Uri artifactUri,
-  ) async {
-    final reference = catalog.referenceFromArtifactUri(artifactUri);
-    if (reference == null) {
-      throw const FormatException('catalog URL is not trusted');
-    }
-    if (appdata.settings['cloudTrackingEnabled'] == true) {
-      final authority = App.cloudTracking.authority;
-      if (authority == null || !catalog.isTrustedCatalog(authority.catalogId)) {
-        throw const FormatException(
-          'Cloud source updates require the current trusted authority',
-        );
-      }
-      // Cloud-on never follows a branch or a user URL.  The coordinator has
-      // already verified this immutable revision from the trusted profile.
-      return authority.activeRevision;
-    }
-    if (catalog.isValidRevision(reference)) return reference;
-    final response = await AppDio().get<String>(
-      catalog.commitResolverUri(reference).toString(),
-      options: Options(responseType: ResponseType.plain),
-    );
-    if (response.statusCode != 200 || response.data == null) {
-      throw FormatException(
-        'catalog revision resolution failed with status ${response.statusCode}',
-      );
-    }
-    final decoded = jsonDecode(response.data!);
-    final resolved = decoded is Map ? decoded['sha'] : null;
-    if (resolved is! String || !catalog.isValidRevision(resolved)) {
-      throw const FormatException('catalog resolver returned an invalid SHA');
-    }
-    return resolved;
-  }
-
-  static Future<int> checkComicSourceUpdate() async {
-    if (ComicSource.all().isEmpty) {
-      return 0;
-    }
-    if (appdata.settings['cloudTrackingEnabled'] == true) {
-      final authority = App.cloudTracking.authority;
-      final registry = App.cloudTracking.registry;
-      if (authority == null || registry == null) return -1;
-      final updates = <String, String>{};
-      for (final source in ComicSource.all()) {
-        final active = registry.find(source.key, p.basename(source.filePath));
-        if (active?.origin == ArtifactOrigin.managedCatalog &&
-            active?.revision != authority.activeRevision) {
-          updates[source.key] = authority.activeRevision;
-        }
-      }
-      if (updates.isNotEmpty) {
-        ComicSourceManager().updateAvailableUpdates(updates);
-      }
-      return updates.length;
-    }
-    var dio = AppDio();
-    var res = await dio.get<String>(appdata.settings['comicSourceListUrl']);
-    if (res.statusCode != 200) {
-      return -1;
-    }
-    var list = jsonDecode(res.data!) as List;
-    var versions = <String, String>{};
-    for (var source in list) {
-      versions[source['key']] = source['version'];
-    }
-    var shouldUpdate = <String>[];
-    for (var source in ComicSource.all()) {
-      if (versions.containsKey(source.key) &&
-          compareSemVer(versions[source.key]!, source.version)) {
-        shouldUpdate.add(source.key);
-      }
-    }
-    if (shouldUpdate.isNotEmpty) {
-      var updates = <String, String>{};
-      for (var key in shouldUpdate) {
-        updates[key] = versions[key]!;
-      }
-      ComicSourceManager().updateAvailableUpdates(updates);
-    }
-    return shouldUpdate.length;
-  }
+  @visibleForTesting
+  final SourcePreferences? preferences;
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(body: const _Body());
+    return Scaffold(body: _Body(preferences: preferences));
   }
 }
 
 class _Body extends StatefulWidget {
-  const _Body();
+  const _Body({this.preferences});
+
+  final SourcePreferences? preferences;
 
   @override
   State<_Body> createState() => _BodyState();
 }
 
-class _RecoverableSources extends StatefulWidget {
-  const _RecoverableSources({required this.onChanged});
-
-  final VoidCallback onChanged;
-
-  @override
-  State<_RecoverableSources> createState() => _RecoverableSourcesState();
-}
-
-class _RecoverableSourcesState extends State<_RecoverableSources> {
-  late Future<ActiveArtifactRegistry> _registryFuture;
-  TrustedArtifact? _restoring;
-
-  @override
-  void initState() {
-    super.initState();
-    _reload();
-  }
-
-  void _reload() {
-    final directory = Directory(p.join(App.dataPath, 'comic_source'));
-    _registryFuture = SourceRevisionStore(
-      directory,
-    ).load().then((registry) => registry ?? const ActiveArtifactRegistry());
-  }
-
-  Future<void> _restore(ActiveArtifact recovery) async {
-    if (!App.cloudTracking.customizationAllowed) {
-      context.showMessage(
-        message:
-            "Turn off Cloud before editing or installing a custom source.".tl,
-      );
-      return;
-    }
-    setState(() => _restoring = recovery.identity);
-    try {
-      final directory = Directory(p.join(App.dataPath, 'comic_source'));
-      await SourceMutationService(
-        store: SourceRevisionStore(directory),
-        coordinator: App.cloudTracking,
-        resolveSourceKey: ComicSourcePage._resolveSourceKey,
-      ).restoreCustom(recovery);
-      if (!mounted) return;
-      context.showMessage(message: "Custom source restored.".tl);
-      widget.onChanged();
-      setState(() {
-        _restoring = null;
-        _reload();
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => _restoring = null);
-      context.showMessage(message: "Custom source recovery failed.".tl);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return FutureBuilder<ActiveArtifactRegistry>(
-      future: _registryFuture,
-      builder: (context, snapshot) {
-        final recoveries = snapshot.data?.recoverableArtifacts ?? const [];
-        final diagnostics =
-            snapshot.data?.migrationDiagnostics ?? const <String, String>{};
-        if (recoveries.isEmpty && diagnostics.isEmpty) {
-          return const SliverToBoxAdapter();
-        }
-        final cloudBlocked = !App.cloudTracking.customizationAllowed;
-        return SliverToBoxAdapter(
-          child: Card(
-            margin: const EdgeInsets.all(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                for (final diagnostic in diagnostics.entries)
-                  ListTile(
-                    title: Text(diagnostic.key),
-                    subtitle: Text(
-                      '${"Source file preserved; identity unresolved.".tl}\n${diagnostic.value.tl}',
-                    ),
-                  ),
-                ListTile(
-                  title: Text("Custom source recovery".tl),
-                  subtitle: cloudBlocked
-                      ? Text(
-                          "Turn off Cloud before restoring a custom source.".tl,
-                        )
-                      : null,
-                ),
-                for (final recovery in recoveries)
-                  ListTile(
-                    title: Text('${recovery.sourceKey} · ${recovery.fileName}'),
-                    subtitle: Text(
-                      '${recovery.relativePath}\n${recovery.sha256}',
-                    ),
-                    trailing: TextButton(
-                      onPressed: cloudBlocked || _restoring == recovery.identity
-                          ? null
-                          : () => _restore(recovery),
-                      child: Text("Restore".tl),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
 class _BodyState extends State<_Body> {
-  var url = "";
+  late final SourcePreferences _preferences;
+  late final bool _ownsPreferences;
 
   void updateUI() {
+    if (!mounted) return;
     setState(() {});
   }
 
+  Set<String> get _effectiveKeys =>
+      _preferences.effectiveKeysFor(ComicSource.all().map((item) => item.key));
+
   @override
   void initState() {
     super.initState();
+    _preferences = widget.preferences ?? appSourcePreferences();
+    _ownsPreferences = widget.preferences == null;
     ComicSourceManager().addListener(updateUI);
+    _preferences.addListener(updateUI);
   }
 
   @override
   void dispose() {
     super.dispose();
     ComicSourceManager().removeListener(updateUI);
+    _preferences.removeListener(updateUI);
+    if (_ownsPreferences) _preferences.dispose();
   }
 
   @override
@@ -463,150 +71,60 @@ class _BodyState extends State<_Body> {
       slivers: [
         SliverAppbar(title: Text('Comic Source'.tl), style: AppbarStyle.shadow),
         buildCard(context),
-        _RecoverableSources(onChanged: updateUI),
-        for (var source in ComicSource.all())
-          _SliverComicSource(
-            key: ValueKey(source.filePath),
-            source: source,
-            edit: edit,
-            update: update,
-            delete: delete,
+        if (ComicSource.all().isNotEmpty)
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+              child: Text('可选漫画源'.tl, style: ts.s18),
+            ),
           ),
+        for (final source in ComicSource.all())
+          _SourceSelectionTile(
+            key: ValueKey('source-selection-${source.key}'),
+            source: source,
+            enabled: _effectiveKeys.contains(source.key),
+            onChanged: (value) => _setSourceEnabled(source, value),
+          ),
+        for (var source in ComicSource.all().where(
+          (source) => _effectiveKeys.contains(source.key),
+        ))
+          _SliverComicSource(key: ValueKey(source.filePath), source: source),
         SliverPadding(padding: EdgeInsets.only(bottom: context.padding.bottom)),
       ],
     );
   }
 
-  void delete(ComicSource source) {
-    showConfirmDialog(
-      context: App.rootContext,
-      title: "Delete".tl,
-      content: "Delete comic source '@n' ?".tlParams({"n": source.name}),
-      btnColor: context.colorScheme.error,
-      onConfirm: () => unawaited(_deleteSource(source)),
-    );
-  }
-
-  Future<void> _deleteSource(ComicSource source) async {
-    var mutationFenced = false;
+  Future<void> _setSourceEnabled(ComicSource source, bool enabled) async {
     try {
-      final sourceDirectory = Directory(p.join(App.dataPath, 'comic_source'));
-      final store = SourceRevisionStore(sourceDirectory);
-      final registry = await store.load() ?? const ActiveArtifactRegistry();
-      final active = ComicSourcePage._activeForSource(registry, store, source);
-      if (active != null) {
-        // The registry replacement is the first active runtime mutation. Do
-        // not fence merely while resolving the source, and keep the exact
-        // artifact identity for this deletion.
-        App.cloudTracking.beforeArtifactChange(active.identity);
-        mutationFenced = true;
-        await store.save(
-          registry.copyWith(
-            artifacts: [
-              for (final item in registry.artifacts)
-                if (item != active) item,
-            ],
-          ),
-        );
-        if (active.origin == ArtifactOrigin.custom) {
-          final customFile = store.fileForRelativePath(active.relativePath);
-          if (await customFile.exists()) await customFile.delete();
-        }
-      } else {
-        final sourceFile = io.File(source.filePath);
-        if (await sourceFile.exists()) {
-          App.cloudTracking.beforeArtifactsChange();
-          mutationFenced = true;
-          await sourceFile.delete();
-        }
+      await _preferences.setEnabledFor(
+        source.key,
+        enabled,
+        ComicSource.all().map((item) => item.key),
+      );
+      if (enabled) {
+        await _ensureDefaultPages(source);
       }
-      ComicSourceManager().remove(source.key);
-      _validatePages();
-      await App.cloudTracking.onSettingsChanged();
-      App.forceRebuild();
-    } catch (error, stack) {
-      if (mutationFenced) {
-        await ComicSourcePage._reconcileAfterMutationFailure();
-      }
-      Log.error('Delete comic source', error, stack);
-      App.rootContext.showMessage(message: error.toString());
-    }
-  }
-
-  void edit(ComicSource source) async {
-    final sourceDirectory = Directory(p.join(App.dataPath, 'comic_source'));
-    final store = SourceRevisionStore(sourceDirectory);
-    final service = SourceMutationService(
-      store: store,
-      coordinator: App.cloudTracking,
-      resolveSourceKey: ComicSourcePage._resolveSourceKey,
-    );
-    SourceEditSession session;
-    try {
-      final registry = await store.load() ?? const ActiveArtifactRegistry();
-      final active = ComicSourcePage._activeForSource(registry, store, source);
-      if (active == null) {
-        throw const SourceMutationDenied(
-          'Source selection is no longer active.',
-        );
-      }
-      session = await service.openEditor(active.identity);
     } catch (error) {
-      App.rootContext.showMessage(message: error.toString());
-      return;
+      if (mounted) context.showMessage(message: error.toString());
     }
-    if (App.isDesktop) {
-      try {
-        await Process.run("code", [session.draftPath], runInShell: true);
-        var committed = false;
-        await showDialog(
-          context: App.rootContext,
-          builder: (context) => AlertDialog(
-            title: Text("Reload Configs".tl),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: Text("cancel".tl),
-              ),
-              TextButton(
-                onPressed: () async {
-                  try {
-                    await service.commitDraft(session);
-                    committed = true;
-                    App.forceRebuild();
-                    if (context.mounted) Navigator.pop(context);
-                  } catch (error) {
-                    if (context.mounted) {
-                      context.showMessage(message: error.toString());
-                    }
-                  }
-                },
-                child: Text("continue".tl),
-              ),
-            ],
-          ),
-        );
-        if (!committed) await service.cancel(session);
-        return;
-      } catch (_) {
-        // Fall through to the in-app editor when the desktop editor is not
-        // available.  The session still points at the isolated draft.
-      }
-    }
-    if (!mounted) {
-      await service.cancel(session);
-      return;
-    }
-    context.to(
-      () => _EditFilePage(session.draftPath, (value) async {
-        await service.commitBuffer(session, value);
-        if (mounted) setState(() {});
-      }, onCancel: () => service.cancel(session)),
-    );
   }
 
-  void update(ComicSource source, [bool showLoading = true]) {
-    ComicSourcePage.update(source, showLoading);
+  Future<void> _ensureDefaultPages(ComicSource source) async {
+    final explore = appdata.settings['explore_pages'] as List? ?? const [];
+    final categories = appdata.settings['categories'] as List? ?? const [];
+    final favorites = appdata.settings['favorites'] as List? ?? const [];
+    final search = appdata.settings['searchSources'] as List? ?? const [];
+    final hasPage =
+        source.explorePages.any((page) => explore.contains(page.title)) ||
+        (source.categoryData != null &&
+            categories.contains(source.categoryData!.key)) ||
+        (source.favoriteData != null &&
+            favorites.contains(source.favoriteData!.key)) ||
+        (source.searchPageData != null && search.contains(source.key));
+    if (!hasPage) {
+      _addAllPagesWithComicSource(source);
+      await appdata.saveData();
+    }
   }
 
   Widget buildCard(BuildContext context) {
@@ -618,391 +136,59 @@ class _BodyState extends State<_Body> {
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
-              title: Text("Add comic source".tl),
-              leading: const Icon(Icons.dashboard_customize),
+              title: Text("Comic Source".tl),
+              subtitle: Text("选择要显示和用于本地追更的漫画源".tl),
+              leading: const Icon(Icons.source_outlined),
             ),
-            TextField(
-              decoration: InputDecoration(
-                hintText: "URL",
-                border: const UnderlineInputBorder(),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 12),
-                suffix: IconButton(
-                  onPressed: () => handleAddSource(url),
-                  icon: const Icon(Icons.check),
-                ),
-              ),
-              onChanged: (value) {
-                url = value;
-              },
-              onSubmitted: handleAddSource,
-            ).paddingHorizontal(16).paddingBottom(8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                FilledButton.tonalIcon(
-                  icon: Icon(Icons.article_outlined),
-                  label: Text("Comic Source list".tl),
-                  onPressed: () {
-                    showPopUpWidget(
-                      App.rootContext,
-                      _ComicSourceList(handleAddSource),
-                    );
-                  },
-                ),
-                FilledButton.tonalIcon(
-                  icon: Icon(Icons.file_open_outlined),
-                  label: Text("Use a config file".tl),
-                  onPressed: _selectFile,
-                ),
-                FilledButton.tonalIcon(
-                  icon: Icon(Icons.help_outline),
-                  label: Text("Help".tl),
-                  onPressed: help,
-                ),
-                _CheckUpdatesButton(),
-              ],
-            ).paddingHorizontal(12).paddingVertical(8),
             const SizedBox(height: 8),
           ],
         ),
       ),
     );
   }
-
-  void _selectFile() async {
-    if (!App.cloudTracking.customizationAllowed) {
-      context.showMessage(
-        message:
-            "Turn off Cloud before editing or installing a custom source.".tl,
-      );
-      return;
-    }
-    final file = await selectFile(ext: ["js"]);
-    if (file == null) return;
-    try {
-      var fileName = file.name;
-      var bytes = await file.readAsBytes();
-      var content = utf8.decode(bytes);
-      await addSource(content, fileName);
-    } catch (e, s) {
-      App.rootContext.showMessage(message: e.toString());
-      Log.error("Add comic source", "$e\n$s");
-    }
-  }
-
-  void help() {
-    launchUrlString(
-      "https://github.com/venera-app/venera/blob/master/doc/comic_source.md",
-    );
-  }
-
-  Future<void> handleAddSource(
-    String url, {
-    String? sourceKey,
-    String? fileName,
-  }) async {
-    if (url.isEmpty) {
-      return;
-    }
-    final resolvedFileName = fileName ?? _fileNameFromUrl(url);
-    bool cancel = false;
-    var controller = showLoadingDialog(
-      App.rootContext,
-      onCancel: () => cancel = true,
-      barrierDismissible: false,
-    );
-    try {
-      if (sourceKey != null && resolvedFileName != null) {
-        final added = await ComicSourcePage._tryAddManagedSource(
-          sourceKey: sourceKey,
-          fileName: resolvedFileName,
-          uri: Uri.parse(url),
-        );
-        if (added) {
-          controller.close();
-          return;
-        }
-      }
-      var res = await AppDio().get<String>(
-        url,
-        options: Options(
-          responseType: ResponseType.plain,
-          headers: {"cache-time": "no"},
-        ),
-      );
-      if (cancel) return;
-      controller.close();
-      await addSource(res.data!, resolvedFileName ?? 'source.js');
-    } catch (e, s) {
-      if (cancel) return;
-      context.showMessage(message: e.toString());
-      Log.error("Add comic source", "$e\n$s");
-    }
-  }
-
-  String? _fileNameFromUrl(String url) {
-    final uri = Uri.tryParse(url);
-    if (uri == null || uri.pathSegments.isEmpty) return null;
-    final value = uri.pathSegments.last.trim();
-    return value.isEmpty ? null : value;
-  }
-
-  Future<void> addSource(String js, String fileName) async {
-    final sourceDirectory = Directory(p.join(App.dataPath, 'comic_source'));
-    final artifact = await SourceMutationService(
-      store: SourceRevisionStore(sourceDirectory),
-      coordinator: App.cloudTracking,
-      resolveSourceKey: ComicSourcePage._resolveSourceKey,
-    ).addCustom(js, fileName);
-    final comicSource = ComicSource.find(artifact.sourceKey);
-    if (comicSource == null) {
-      throw const FormatException('installed comic source was not loaded');
-    }
-    _addAllPagesWithComicSource(comicSource);
-    appdata.saveData();
-    App.forceRebuild();
-  }
 }
 
-class _ComicSourceList extends StatefulWidget {
-  const _ComicSourceList(this.onAdd);
+class _SourceSelectionTile extends StatelessWidget {
+  const _SourceSelectionTile({
+    super.key,
+    required this.source,
+    required this.enabled,
+    required this.onChanged,
+  });
 
-  final Future<void> Function(String url, {String? sourceKey, String? fileName})
-  onAdd;
-
-  @override
-  State<_ComicSourceList> createState() => _ComicSourceListState();
-}
-
-class _ComicSourceListState extends State<_ComicSourceList> {
-  List? json;
-  bool changed = false;
-  var controller = TextEditingController();
-
-  void load() async {
-    if (json != null) {
-      setState(() {
-        json = null;
-      });
-    }
-    if (controller.text.isEmpty) {
-      setState(() {
-        json = [];
-      });
-      return;
-    }
-    var dio = AppDio();
-    try {
-      var res = await dio.get<String>(controller.text);
-      if (res.statusCode != 200) {
-        throw "error";
-      }
-      if (mounted) {
-        setState(() {
-          json = jsonDecode(res.data!);
-        });
-      }
-    } catch (e) {
-      context.showMessage(message: "Network error".tl);
-      if (mounted) {
-        setState(() {
-          json = [];
-        });
-      }
-    }
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    controller.text = appdata.settings['comicSourceListUrl'];
-    load();
-  }
-
-  @override
-  void dispose() {
-    super.dispose();
-    if (changed) {
-      appdata.settings['comicSourceListUrl'] = controller.text;
-      appdata.saveData();
-    }
-  }
+  final ComicSource source;
+  final bool enabled;
+  final ValueChanged<bool> onChanged;
 
   @override
   Widget build(BuildContext context) {
-    return PopUpWidgetScaffold(title: "Comic Source".tl, body: buildBody());
-  }
-
-  Widget buildBody() {
-    var currentKey = ComicSource.all().map((e) => e.key).toList();
-
-    return ListView.builder(
-      itemCount: (json?.length ?? 1) + 1,
-      itemBuilder: (context, index) {
-        if (index == 0) {
-          return Container(
-            margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-            decoration: BoxDecoration(
-              border: Border.all(
-                color: Theme.of(context).colorScheme.outlineVariant,
-                width: 0.6,
-              ),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                ListTile(
-                  leading: Icon(Icons.source_outlined),
-                  title: Text("Repo URL".tl),
-                ),
-                TextField(
-                  controller: controller,
-                  decoration: InputDecoration(
-                    hintText: "URL",
-                    border: const UnderlineInputBorder(),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12),
-                  ),
-                  onChanged: (value) {
-                    changed = true;
-                  },
-                ).paddingHorizontal(16).paddingBottom(8),
-                Text(
-                  "The URL should point to a 'index.json' file".tl,
-                ).paddingLeft(16),
-                Text(
-                  "Do not report any issues related to sources to App repo.".tl,
-                ).paddingLeft(16),
-                const SizedBox(height: 8),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    TextButton(
-                      onPressed: () {
-                        launchUrlString(
-                          "https://github.com/venera-app/venera/blob/master/doc/comic_source.md",
-                        );
-                      },
-                      child: Text("Help".tl),
-                    ),
-                    FilledButton.tonal(
-                      onPressed: load,
-                      child: Text("Refresh".tl),
-                    ),
-                    const SizedBox(width: 16),
-                  ],
-                ),
-                const SizedBox(height: 16),
-              ],
-            ),
-          );
-        }
-
-        if (index == 1 && json == null) {
-          return Center(
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-            ).fixWidth(24).fixHeight(24),
-          );
-        }
-
-        index--;
-
-        var key = json![index]["key"];
-        var action = currentKey.contains(key)
-            ? const Icon(Icons.check, size: 20).paddingRight(8)
-            : Button.filled(
-                child: Text("Add".tl),
-                onPressed: () async {
-                  var fileName = json![index]["fileName"];
-                  var url = json![index]["url"];
-                  if (url == null || !(url.toString()).isURL) {
-                    var listUrl =
-                        appdata.settings['comicSourceListUrl'] as String;
-                    if (listUrl
-                        .replaceFirst("https://", "")
-                        .replaceFirst("http://", "")
-                        .contains("/")) {
-                      url =
-                          listUrl.substring(0, listUrl.lastIndexOf("/") + 1) +
-                          fileName;
-                    } else {
-                      url = '$listUrl/$fileName';
-                    }
-                  }
-                  await widget.onAdd(
-                    url,
-                    sourceKey: json![index]["key"]?.toString(),
-                    fileName: fileName?.toString(),
-                  );
-                  setState(() {});
-                },
-              ).fixHeight(32);
-
-        var description = json![index]["version"];
-        if (json![index]["description"] != null) {
-          description = "$description\n${json![index]["description"]}";
-        }
-
-        return ListTile(
-          title: Text(json![index]["name"]),
-          subtitle: Text(description),
-          trailing: action,
-        );
-      },
+    return SliverToBoxAdapter(
+      child: ListTile(
+        title: Text(source.name),
+        subtitle: Text(source.version),
+        trailing: Switch(
+          key: Key('source-switch-${source.key}'),
+          value: enabled,
+          onChanged: onChanged,
+        ),
+      ),
     );
   }
 }
 
-void _validatePages() {
-  List explorePages = appdata.settings['explore_pages'];
-  List categoryPages = appdata.settings['categories'];
-  List networkFavorites = appdata.settings['favorites'];
-
-  var totalExplorePages = ComicSource.all()
-      .map((e) => e.explorePages.map((e) => e.title))
-      .expand((element) => element)
-      .toList();
-  var totalCategoryPages = ComicSource.all()
-      .map((e) => e.categoryData?.key)
-      .where((element) => element != null)
-      .map((e) => e!)
-      .toList();
-  var totalNetworkFavorites = ComicSource.all()
-      .map((e) => e.favoriteData?.key)
-      .where((element) => element != null)
-      .map((e) => e!)
-      .toList();
-
-  for (var page in List.from(explorePages)) {
-    if (!totalExplorePages.contains(page)) {
-      explorePages.remove(page);
-    }
-  }
-  for (var page in List.from(categoryPages)) {
-    if (!totalCategoryPages.contains(page)) {
-      categoryPages.remove(page);
-    }
-  }
-  for (var page in List.from(networkFavorites)) {
-    if (!totalNetworkFavorites.contains(page)) {
-      networkFavorites.remove(page);
-    }
-  }
-
-  appdata.settings['explore_pages'] = explorePages.toSet().toList();
-  appdata.settings['categories'] = categoryPages.toSet().toList();
-  appdata.settings['favorites'] = networkFavorites.toSet().toList();
-
-  appdata.saveData();
-}
-
 void _addAllPagesWithComicSource(ComicSource source) {
-  var explorePages = appdata.settings['explore_pages'];
-  var categoryPages = appdata.settings['categories'];
-  var networkFavorites = appdata.settings['favorites'];
-  var searchPages = appdata.settings['searchSources'];
+  final explorePages = appdata.settings['explore_pages'] is List
+      ? appdata.settings['explore_pages'] as List
+      : <dynamic>[];
+  final categoryPages = appdata.settings['categories'] is List
+      ? appdata.settings['categories'] as List
+      : <dynamic>[];
+  final networkFavorites = appdata.settings['favorites'] is List
+      ? appdata.settings['favorites'] as List
+      : <dynamic>[];
+  final searchPages = appdata.settings['searchSources'] is List
+      ? appdata.settings['searchSources'] as List
+      : <dynamic>[];
 
   if (source.explorePages.isNotEmpty) {
     for (var page in source.explorePages) {
@@ -1027,174 +213,6 @@ void _addAllPagesWithComicSource(ComicSource source) {
   appdata.settings['categories'] = categoryPages.toSet().toList();
   appdata.settings['favorites'] = networkFavorites.toSet().toList();
   appdata.settings['searchSources'] = searchPages.toSet().toList();
-
-  appdata.saveData();
-}
-
-class _EditFilePage extends StatefulWidget {
-  const _EditFilePage(this.path, this.onCommit, {this.onCancel});
-
-  final String path;
-
-  final Future<void> Function(String value) onCommit;
-  final Future<void> Function()? onCancel;
-
-  @override
-  State<_EditFilePage> createState() => __EditFilePageState();
-}
-
-class __EditFilePageState extends State<_EditFilePage> {
-  var current = '';
-  var _saving = false;
-
-  @override
-  void initState() {
-    super.initState();
-    current = io.File(widget.path).readAsStringSync();
-  }
-
-  @override
-  void dispose() {
-    if (!_saving) unawaited(widget.onCancel?.call());
-    super.dispose();
-  }
-
-  Future<void> _commit() async {
-    if (_saving) return;
-    setState(() => _saving = true);
-    try {
-      await widget.onCommit(current);
-      if (mounted) Navigator.of(context).pop();
-    } catch (error) {
-      if (mounted) {
-        context.showMessage(message: error.toString());
-        setState(() => _saving = false);
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: Appbar(
-        title: Text("Edit".tl),
-        actions: [
-          IconButton(
-            onPressed: _saving ? null : _commit,
-            icon: _saving
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.save_outlined),
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          Container(height: 0.6, color: context.colorScheme.outlineVariant),
-          Expanded(
-            child: CodeEditor(
-              initialValue: current,
-              onChanged: (value) => current = value,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _CheckUpdatesButton extends StatefulWidget {
-  const _CheckUpdatesButton();
-
-  @override
-  State<_CheckUpdatesButton> createState() => _CheckUpdatesButtonState();
-}
-
-class _CheckUpdatesButtonState extends State<_CheckUpdatesButton> {
-  bool isLoading = false;
-
-  void check() async {
-    setState(() {
-      isLoading = true;
-    });
-    var count = await ComicSourcePage.checkComicSourceUpdate();
-    if (count == -1) {
-      context.showMessage(message: "Network error".tl);
-    } else if (count == 0) {
-      context.showMessage(message: "No updates".tl);
-    } else {
-      showUpdateDialog();
-    }
-    setState(() {
-      isLoading = false;
-    });
-  }
-
-  void showUpdateDialog() async {
-    var text = ComicSourceManager().availableUpdates.entries
-        .map((e) {
-          return "${ComicSource.find(e.key)!.name}: ${e.value}";
-        })
-        .join("\n");
-    bool doUpdate = false;
-    await showDialog(
-      context: App.rootContext,
-      builder: (context) {
-        return ContentDialog(
-          title: "Updates".tl,
-          content: Text(text).paddingHorizontal(16),
-          actions: [
-            FilledButton(
-              onPressed: () {
-                doUpdate = true;
-                context.pop();
-              },
-              child: Text("Update".tl),
-            ),
-          ],
-        );
-      },
-    );
-    if (doUpdate) {
-      var loadingController = showLoadingDialog(
-        context,
-        message: "Updating".tl,
-        withProgress: true,
-      );
-      int current = 0;
-      int total = ComicSourceManager().availableUpdates.length;
-      try {
-        var shouldUpdate = ComicSourceManager().availableUpdates.keys.toList();
-        for (var key in shouldUpdate) {
-          var source = ComicSource.find(key)!;
-          await ComicSourcePage.update(source, false);
-          current++;
-          loadingController.setProgress(current / total);
-        }
-      } catch (e) {
-        context.showMessage(message: e.toString());
-      }
-      loadingController.close();
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return FilledButton.tonalIcon(
-      icon: isLoading
-          ? SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            )
-          : Icon(Icons.update),
-      label: Text("Check updates".tl),
-      onPressed: check,
-    );
-  }
 }
 
 class _CallbackSetting extends StatefulWidget {
@@ -1248,19 +266,9 @@ class _CallbackSettingState extends State<_CallbackSetting> {
 }
 
 class _SliverComicSource extends StatefulWidget {
-  const _SliverComicSource({
-    super.key,
-    required this.source,
-    required this.edit,
-    required this.update,
-    required this.delete,
-  });
+  const _SliverComicSource({super.key, required this.source});
 
   final ComicSource source;
-
-  final void Function(ComicSource source) edit;
-  final void Function(ComicSource source) update;
-  final void Function(ComicSource source) delete;
 
   @override
   State<_SliverComicSource> createState() => _SliverComicSourceState();
@@ -1316,32 +324,6 @@ class _SliverComicSourceState extends State<_SliverComicSource> {
                       ),
                     ),
                   ).paddingLeft(4),
-              ],
-            ),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Tooltip(
-                  message: "Edit".tl,
-                  child: IconButton(
-                    onPressed: () => widget.edit(source),
-                    icon: const Icon(Icons.edit_note),
-                  ),
-                ),
-                Tooltip(
-                  message: "Update".tl,
-                  child: IconButton(
-                    onPressed: () => widget.update(source),
-                    icon: const Icon(Icons.update),
-                  ),
-                ),
-                Tooltip(
-                  message: "Delete".tl,
-                  child: IconButton(
-                    onPressed: () => widget.delete(source),
-                    icon: const Icon(Icons.delete),
-                  ),
-                ),
               ],
             ),
           ),

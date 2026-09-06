@@ -4,11 +4,14 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite3/sqlite3.dart';
+import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_updates.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/foundation/tracking/normalizer.dart';
+
+const _testSourceKey = 'test_source';
 
 FavoriteItem _comic(
   String id, {
@@ -20,14 +23,14 @@ FavoriteItem _comic(
   name: name,
   coverPath: coverPath ?? 'https://example.invalid/$id.jpg',
   author: author,
-  sourceKeyValue: 'test-source',
+  sourceKeyValue: _testSourceKey,
   tags: const ['tag'],
 );
 
 FavoriteData _numericData(
   Future<Res<List<Comic>>> Function(int page, [String? folder]) loader,
 ) => FavoriteData(
-  key: 'test-source',
+  key: _testSourceKey,
   title: 'Test source',
   multiFolder: true,
   loadComic: loader,
@@ -41,7 +44,7 @@ ComicSource _detailSource(
 ) {
   return ComicSource(
     'Test source',
-    'test-source',
+    _testSourceKey,
     null,
     null,
     null,
@@ -80,13 +83,16 @@ void main() {
   late Directory tempDir;
   late NetworkFavoriteCacheManager cache;
   late String databasePath;
+  late Object? previousEnabledSources;
   const folder = NetworkFavoriteFolderRef(
-    sourceKey: 'test-source',
+    sourceKey: _testSourceKey,
     folderId: 'remote',
     title: 'Remote',
   );
 
   setUp(() async {
+    previousEnabledSources = appdata.settings['enabledSources'];
+    appdata.settings['enabledSources'] = <String>[_testSourceKey];
     tempDir = await Directory.systemTemp.createTemp('venera-favorite-cache-');
     cache = NetworkFavoriteCacheManager.forTesting();
     databasePath = '${tempDir.path}${Platform.pathSeparator}cache.db';
@@ -94,6 +100,7 @@ void main() {
   });
 
   tearDown(() async {
+    appdata.settings['enabledSources'] = previousEnabledSources;
     cache.close();
     await tempDir.delete(recursive: true);
   });
@@ -141,7 +148,7 @@ void main() {
   test('tryFromJson tolerates malformed persisted folder data', () {
     expect(
       NetworkFavoriteFolderRef.tryFromJson({
-        'sourceKey': 'test-source',
+        'sourceKey': _testSourceKey,
         'folderId': 'remote',
         'title': 123,
       }),
@@ -157,7 +164,7 @@ void main() {
     await cache.refreshPage(data, folder, 1);
     expect(cache.getCachedPage(folder, 1), isNotNull);
 
-    final beforeEpoch = cache.captureFavoriteSessionEpoch('test-source');
+    final beforeEpoch = cache.captureFavoriteSessionEpoch(_testSourceKey);
     final beforeGeneration = cache.cacheGeneration;
     cache.recordFavoriteUpdateScanAttempt(
       folder,
@@ -165,12 +172,12 @@ void main() {
     );
     cache.clearAllCache();
 
-    expect(cache.captureFavoriteSessionEpoch('test-source'), beforeEpoch + 1);
+    expect(cache.captureFavoriteSessionEpoch(_testSourceKey), beforeEpoch + 1);
     expect(cache.cacheGeneration, beforeGeneration + 1);
-    expect(cache.getCachedFolders('test-source'), isEmpty);
+    expect(cache.getCachedFolders(_testSourceKey), isEmpty);
     expect(cache.getCachedPage(folder, 1), isNull);
     expect(cache.countCachedComics(folder), 0);
-    expect(cache.isFavoriteKnown('test-source', 'one'), isFalse);
+    expect(cache.isFavoriteKnown(_testSourceKey, 'one'), isFalse);
     expect(cache.getFullCacheStatus(folder).isComplete, isFalse);
     expect(cache.getFavoriteUpdateScanState(folder), isNull);
   });
@@ -183,7 +190,7 @@ void main() {
           name: 'One',
           coverPath: 'https://example.invalid/one.jpg',
           author: 'Author',
-          sourceKeyValue: 'test-source',
+          sourceKeyValue: _testSourceKey,
           tags: const ['tag'],
           remoteFavoriteId: 'fav-1',
         ),
@@ -194,7 +201,7 @@ void main() {
 
     String? receivedFavoriteId;
     final mutationData = FavoriteData(
-      key: 'test-source',
+      key: _testSourceKey,
       title: 'Test source',
       multiFolder: true,
       loadComic: data.loadComic,
@@ -207,7 +214,7 @@ void main() {
     );
     final source = ComicSource(
       'Test source',
-      'test-source',
+      _testSourceKey,
       null,
       null,
       null,
@@ -242,7 +249,7 @@ void main() {
     );
     source.data['account'] = ['user'];
     ComicSourceManager().add(source);
-    addTearDown(() => ComicSourceManager().remove('test-source'));
+    addTearDown(() => ComicSourceManager().remove(_testSourceKey));
 
     final result = await cache.changeFavorite(
       data: mutationData,
@@ -259,7 +266,7 @@ void main() {
   test('cursor changes invalidate later cached pages', () async {
     var firstNext = 'next-a';
     final cursorData = FavoriteData(
-      key: 'test-source',
+      key: _testSourceKey,
       title: 'Test source',
       multiFolder: true,
       loadComic: null,
@@ -294,7 +301,7 @@ void main() {
       expect(cache.getCachedPage(folder, 1), isNotNull);
 
       final noFolders = FavoriteData(
-        key: 'test-source',
+        key: _testSourceKey,
         title: 'Test source',
         multiFolder: true,
         loadComic: data.loadComic,
@@ -311,7 +318,7 @@ void main() {
         isAdding: true,
       );
       expect(offline.error, isTrue);
-      expect(cache.isFavoriteKnown('test-source', 'one'), isFalse);
+      expect(cache.isFavoriteKnown(_testSourceKey, 'one'), isFalse);
     },
   );
 
@@ -416,7 +423,7 @@ void main() {
     'manual cursor full cache follows cursors and reports indeterminate',
     () async {
       final data = FavoriteData(
-        key: 'test-source',
+        key: _testSourceKey,
         title: 'Test source',
         multiFolder: true,
         loadComic: null,
@@ -615,7 +622,7 @@ void main() {
             name: 'Alpha Hero',
             coverPath: 'https://example.invalid/first.jpg',
             author: 'Jane Writer',
-            sourceKeyValue: 'test-source',
+            sourceKeyValue: _testSourceKey,
             tags: const ['Action', 'Space'],
           ),
         ], subData: 2);
@@ -626,7 +633,7 @@ void main() {
           name: 'Beta Story',
           coverPath: 'https://example.invalid/second.jpg',
           author: 'Alice Artist',
-          sourceKeyValue: 'test-source',
+          sourceKeyValue: _testSourceKey,
           tags: const ['Mystery', 'School'],
         ),
         FavoriteItem(
@@ -634,7 +641,7 @@ void main() {
           name: 'Alpha Hero',
           coverPath: 'https://example.invalid/duplicate.jpg',
           author: 'Jane Writer',
-          sourceKeyValue: 'test-source',
+          sourceKeyValue: _testSourceKey,
           tags: const ['Action'],
         ),
       ], subData: 2);
@@ -643,7 +650,7 @@ void main() {
     await cache.refreshPage(data, folder, 1);
     await cache.refreshPage(data, folder, 2);
     const otherFolder = NetworkFavoriteFolderRef(
-      sourceKey: 'test-source',
+      sourceKey: _testSourceKey,
       folderId: 'other',
       title: 'Other',
     );
@@ -689,7 +696,7 @@ void main() {
     database.execute(
       'INSERT INTO favorite_items VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [
-        'test-source',
+        _testSourceKey,
         'remote',
         1,
         'old-id',
@@ -710,7 +717,7 @@ void main() {
     expect(cache.searchCachedComics(folder, 'oldtag').single.id, 'old-id');
     expect(cache.searchCachedComics(folder, 'old author').single.id, 'old-id');
 
-    cache.markComicRetryLaterEverywhere('test-source', 'old-id');
+    cache.markComicRetryLaterEverywhere(_testSourceKey, 'old-id');
     expect(cache.getComicsWithUpdatesInfo(folder).single.retryAfter, isNotNull);
   });
 
@@ -739,7 +746,7 @@ void main() {
         '''EXPLAIN QUERY PLAN
            SELECT * FROM favorite_items
            WHERE source_key = ? AND folder_id = ? AND comic_id = ?''',
-        ['test-source', 'remote', 'one'],
+        [_testSourceKey, 'remote', 'one'],
       );
       expect(
         plan.map((row) => row['detail'].toString()).join('\n'),
@@ -758,7 +765,7 @@ void main() {
     await cache.refreshPage(data, folder, 1);
     final t0 = DateTime(2026, 8, 1, 12);
     cache.recordComicCheckEverywhere(
-      'test-source',
+      _testSourceKey,
       'one',
       completedAt: t0,
       updateTime: '2026-08-01',
@@ -766,7 +773,7 @@ void main() {
     );
 
     var info = cache.toggleManualHotWindow(
-      'test-source',
+      _testSourceKey,
       'one',
       enabled: true,
       now: t0,
@@ -775,7 +782,7 @@ void main() {
     expect(deadline, t0.add(const Duration(days: 14)));
 
     info = cache.toggleManualHotWindow(
-      'test-source',
+      _testSourceKey,
       'one',
       enabled: false,
       now: t0.add(const Duration(days: 2)),
@@ -785,7 +792,7 @@ void main() {
     expect(info.isHotActiveAt(t0.add(const Duration(days: 2))), isFalse);
 
     info = cache.toggleManualHotWindow(
-      'test-source',
+      _testSourceKey,
       'one',
       enabled: true,
       now: t0.add(const Duration(days: 3)),
@@ -793,7 +800,7 @@ void main() {
     expect(info.manualHotUntil, deadline);
 
     info = cache.toggleManualHotWindow(
-      'test-source',
+      _testSourceKey,
       'one',
       enabled: true,
       now: t0.add(const Duration(days: 15)),
@@ -813,7 +820,7 @@ void main() {
       final t0 = DateTime.now();
       final sourceActivityAt = t0.subtract(const Duration(days: 1));
       cache.recordComicCheckEverywhere(
-        'test-source',
+        _testSourceKey,
         'restart',
         completedAt: t0,
         sourceActivityAt: sourceActivityAt,
@@ -821,7 +828,7 @@ void main() {
       );
 
       final first = cache.getComicUpdateInfo(
-        'test-source',
+        _testSourceKey,
         'restart',
         'remote',
       )!;
@@ -848,7 +855,7 @@ void main() {
       cache = NetworkFavoriteCacheManager.forTesting();
       await cache.init(databasePath: databasePath, migrateLegacy: false);
       final second = cache.getComicUpdateInfo(
-        'test-source',
+        _testSourceKey,
         'restart',
         'remote',
       )!;
@@ -863,7 +870,7 @@ void main() {
       cache = NetworkFavoriteCacheManager.forTesting();
       await cache.init(databasePath: databasePath, migrateLegacy: false);
       final third = cache.getComicUpdateInfo(
-        'test-source',
+        _testSourceKey,
         'restart',
         'remote',
       )!;
@@ -886,14 +893,14 @@ void main() {
     final completedAt = DateTime.now();
     final activity = completedAt.subtract(const Duration(days: 2));
     cache.recordComicCheckEverywhere(
-      'test-source',
+      _testSourceKey,
       'no-marker',
       completedAt: completedAt,
       sourceActivityAt: activity,
       updateMarker: 'v1|time:${activity.toIso8601String()}',
     );
     final before = cache.getComicUpdateInfo(
-      'test-source',
+      _testSourceKey,
       'no-marker',
       'remote',
     )!;
@@ -917,7 +924,7 @@ void main() {
     cache = NetworkFavoriteCacheManager.forTesting();
     await cache.init(databasePath: databasePath, migrateLegacy: false);
     final after = cache.getComicUpdateInfo(
-      'test-source',
+      _testSourceKey,
       'no-marker',
       'remote',
     )!;
@@ -942,7 +949,7 @@ void main() {
     cache = NetworkFavoriteCacheManager.forTesting();
     await cache.init(databasePath: databasePath, migrateLegacy: false);
     final afterSecondInit = cache.getComicUpdateInfo(
-      'test-source',
+      _testSourceKey,
       'no-marker',
       'remote',
     )!;
@@ -971,7 +978,7 @@ void main() {
             last_check_time, has_new_update)
            VALUES (?, ?, ?, ?, ?, 0)''',
         [
-          'test-source',
+          _testSourceKey,
           'pending-recovery',
           activity.toIso8601String(),
           'v1|time:${activity.toIso8601String()}',
@@ -987,7 +994,7 @@ void main() {
       cache = NetworkFavoriteCacheManager.forTesting();
       await cache.init(databasePath: databasePath, migrateLegacy: false);
       final recovered = cache.getComicUpdateInfo(
-        'test-source',
+        _testSourceKey,
         'pending-recovery',
         'remote',
       )!;
@@ -1031,7 +1038,7 @@ void main() {
       cache = NetworkFavoriteCacheManager.forTesting();
       await cache.init(databasePath: databasePath, migrateLegacy: false);
       final resumed = cache.getComicUpdateInfo(
-        'test-source',
+        _testSourceKey,
         'pending-recovery',
         'remote',
       )!;
@@ -1062,7 +1069,7 @@ void main() {
             last_check_time, has_new_update)
            VALUES (?, ?, ?, ?, ?, 0)''',
       [
-        'test-source',
+        _testSourceKey,
         'runtime-gap',
         '2026-08-01',
         'v1|time:2026-08-01',
@@ -1078,7 +1085,7 @@ void main() {
     cache = NetworkFavoriteCacheManager.forTesting();
     await cache.init(databasePath: databasePath, migrateLegacy: false);
     final info = cache.getComicUpdateInfo(
-      'test-source',
+      _testSourceKey,
       'runtime-gap',
       'remote',
     )!;
@@ -1102,7 +1109,7 @@ void main() {
       final t0 = DateTime(2026, 8, 1, 12);
 
       final enabled = cache.toggleManualHotWindow(
-        'test-source',
+        _testSourceKey,
         'never-checked',
         enabled: true,
         now: t0,
@@ -1128,14 +1135,14 @@ void main() {
 
       final deadline = enabled.manualHotUntil;
       final disabled = cache.toggleManualHotWindow(
-        'test-source',
+        _testSourceKey,
         'never-checked',
         enabled: false,
         now: t0.add(const Duration(days: 2)),
       )!;
       expect(disabled.manualHotUntil, deadline);
       final reopened = cache.toggleManualHotWindow(
-        'test-source',
+        _testSourceKey,
         'never-checked',
         enabled: true,
         now: t0.add(const Duration(days: 3)),
@@ -1154,7 +1161,7 @@ void main() {
       await cache.refreshPage(data, folder, 1);
       final t0 = DateTime(2026, 8, 1, 12);
       cache.recordComicCheckEverywhere(
-        'test-source',
+        _testSourceKey,
         'one',
         completedAt: t0,
         updateTime: '2026-08-01',
@@ -1162,21 +1169,21 @@ void main() {
       );
       final updateAt = t0.add(const Duration(days: 1));
       cache.recordComicCheckEverywhere(
-        'test-source',
+        _testSourceKey,
         'one',
         completedAt: updateAt,
         updateTime: '2026-08-02',
         updateMarker: 'v2|time:2026-08-02|chapters:2',
       );
       var info = cache.toggleManualHotWindow(
-        'test-source',
+        _testSourceKey,
         'one',
         enabled: true,
         now: updateAt,
       )!;
       expect(info.isAutoHotActiveAt(updateAt), isTrue);
       info = cache.toggleManualHotWindow(
-        'test-source',
+        _testSourceKey,
         'one',
         enabled: false,
         now: updateAt.add(const Duration(hours: 1)),
@@ -1239,7 +1246,7 @@ void main() {
            (source_key, folder_id, title, updated_at)
            VALUES (?, ?, ?, ?)''',
         [
-          'test-source',
+          _testSourceKey,
           'remote',
           'Remote',
           migrationNow.millisecondsSinceEpoch,
@@ -1252,7 +1259,7 @@ void main() {
             has_new_update)
            VALUES (?, ?, 1, ?, 0, ?, ?, ?, ?, 0)''',
         [
-          'test-source',
+          _testSourceKey,
           'remote',
           'missing-state',
           jsonEncode(_comic('missing-state').toJson()),
@@ -1262,7 +1269,7 @@ void main() {
         ],
       );
       oldDb.execute('INSERT INTO favorite_membership VALUES (?, ?, ?)', [
-        'test-source',
+        _testSourceKey,
         'remote',
         'missing-state',
       ]);
@@ -1277,7 +1284,7 @@ void main() {
       var migrated = NetworkFavoriteCacheManager.forTesting();
       await migrated.init(databasePath: oldPath, migrateLegacy: false);
       final first = migrated.getComicUpdateInfo(
-        'test-source',
+        _testSourceKey,
         'missing-state',
         'remote',
       )!;
@@ -1322,7 +1329,7 @@ void main() {
       migrated = NetworkFavoriteCacheManager.forTesting();
       await migrated.init(databasePath: oldPath, migrateLegacy: false);
       final second = migrated.getComicUpdateInfo(
-        'test-source',
+        _testSourceKey,
         'missing-state',
         'remote',
       )!;
@@ -1391,7 +1398,7 @@ void main() {
           comic_json, favorite_time, last_update_time, last_check_time)
          VALUES (?, ?, 1, ?, 0, ?, ?, ?, ?)''',
       [
-        'test-source',
+        _testSourceKey,
         'remote',
         'one',
         jsonEncode(_comic('one').toJson()),
@@ -1401,7 +1408,7 @@ void main() {
       ],
     );
     oldDb.execute('INSERT INTO favorite_membership VALUES (?, ?, ?)', [
-      'test-source',
+      _testSourceKey,
       'remote',
       'one',
     ]);
@@ -1410,7 +1417,7 @@ void main() {
          (source_key, comic_id, last_update_time, update_marker, last_check_time)
          VALUES (?, ?, ?, ?, ?)''',
       [
-        'test-source',
+        _testSourceKey,
         'one',
         '2022-01-01',
         'v1|time:2022-01-01',
@@ -1431,7 +1438,7 @@ void main() {
             comic_json, favorite_time, last_update_time, last_check_time)
            VALUES (?, ?, 1, ?, 0, ?, ?, ?, ?)''',
         [
-          'test-source',
+          _testSourceKey,
           'remote',
           fixture.id,
           jsonEncode(_comic(fixture.id).toJson()),
@@ -1441,7 +1448,7 @@ void main() {
         ],
       );
       oldDb.execute('INSERT INTO favorite_membership VALUES (?, ?, ?)', [
-        'test-source',
+        _testSourceKey,
         'remote',
         fixture.id,
       ]);
@@ -1450,7 +1457,7 @@ void main() {
            (source_key, comic_id, last_update_time, update_marker, last_check_time)
            VALUES (?, ?, ?, ?, ?)''',
         [
-          'test-source',
+          _testSourceKey,
           fixture.id,
           activity.toIso8601String(),
           'v1|time:${activity.toIso8601String()}',
@@ -1468,7 +1475,7 @@ void main() {
           comic_json, favorite_time, last_update_time, last_check_time)
          VALUES (?, ?, 1, ?, 0, ?, ?, ?, ?)''',
       [
-        'test-source',
+        _testSourceKey,
         'remote',
         'pending-jitter',
         jsonEncode(_comic('pending-jitter').toJson()),
@@ -1478,7 +1485,7 @@ void main() {
       ],
     );
     oldDb.execute('INSERT INTO favorite_membership VALUES (?, ?, ?)', [
-      'test-source',
+      _testSourceKey,
       'remote',
       'pending-jitter',
     ]);
@@ -1487,7 +1494,7 @@ void main() {
          (source_key, comic_id, last_update_time, update_marker, last_check_time)
          VALUES (?, ?, ?, ?, ?)''',
       [
-        'test-source',
+        _testSourceKey,
         'pending-jitter',
         pendingJitterActivity.toIso8601String(),
         'v1|time:${pendingJitterActivity.toIso8601String()}',
@@ -1498,7 +1505,7 @@ void main() {
 
     var migrated = NetworkFavoriteCacheManager.forTesting();
     await migrated.init(databasePath: oldPath, migrateLegacy: false);
-    final first = migrated.getComicUpdateInfo('test-source', 'one', 'remote')!;
+    final first = migrated.getComicUpdateInfo(_testSourceKey, 'one', 'remote')!;
     expect(
       first.baselineAt,
       DateTime.fromMillisecondsSinceEpoch(checkedAt.millisecondsSinceEpoch),
@@ -1512,7 +1519,7 @@ void main() {
           .getScanCandidates(
             [
               const NetworkFavoriteFolderRef(
-                sourceKey: 'test-source',
+                sourceKey: _testSourceKey,
                 folderId: 'remote',
               ),
             ],
@@ -1531,7 +1538,7 @@ void main() {
     );
     expect(
       migrated
-          .getComicUpdateInfo('test-source', 'recent', 'remote')!
+          .getComicUpdateInfo(_testSourceKey, 'recent', 'remote')!
           .nextCheckAt,
       DateTime.fromMillisecondsSinceEpoch(
         migrationNow.add(const Duration(hours: 1)).millisecondsSinceEpoch,
@@ -1539,7 +1546,7 @@ void main() {
     );
 
     final pendingAfterFirst = migrated.getComicUpdateInfo(
-      'test-source',
+      _testSourceKey,
       'pending-jitter',
       'remote',
     )!;
@@ -1553,7 +1560,7 @@ void main() {
     migrated = NetworkFavoriteCacheManager.forTesting();
     await migrated.init(databasePath: oldPath, migrateLegacy: false);
     final pendingAfterSecond = migrated.getComicUpdateInfo(
-      'test-source',
+      _testSourceKey,
       'pending-jitter',
       'remote',
     )!;
@@ -1562,7 +1569,7 @@ void main() {
 
     final successAt = migrationNow.add(const Duration(days: 1));
     migrated.recordComicCheckEverywhere(
-      'test-source',
+      _testSourceKey,
       'pending-jitter',
       completedAt: successAt,
       sourceActivityAt: pendingJitterActivity,
@@ -1573,11 +1580,11 @@ void main() {
       effectiveActivityAt: pendingJitterActivity,
       manualHotEnabled: false,
       oldScheduleJitterApplied: false,
-      sourceKey: 'test-source',
+      sourceKey: _testSourceKey,
       comicId: 'pending-jitter',
     );
     var pendingAfterSuccess = migrated.getComicUpdateInfo(
-      'test-source',
+      _testSourceKey,
       'pending-jitter',
       'remote',
     )!;
@@ -1588,14 +1595,14 @@ void main() {
     expect(pendingAfterSuccess.oldScheduleJitterApplied, isTrue);
     final pendingSecondSuccessAt = successAt.add(const Duration(days: 1));
     migrated.recordComicCheckEverywhere(
-      'test-source',
+      _testSourceKey,
       'pending-jitter',
       completedAt: pendingSecondSuccessAt,
       sourceActivityAt: pendingJitterActivity,
       updateMarker: 'v1|time:${pendingJitterActivity.toIso8601String()}',
     );
     pendingAfterSuccess = migrated.getComicUpdateInfo(
-      'test-source',
+      _testSourceKey,
       'pending-jitter',
       'remote',
     )!;
@@ -1611,7 +1618,7 @@ void main() {
     )) {
       final activity = migrationNow.subtract(fixture.age);
       migrated.recordComicCheckEverywhere(
-        'test-source',
+        _testSourceKey,
         fixture.id,
         completedAt: successAt,
         sourceActivityAt: activity,
@@ -1622,11 +1629,11 @@ void main() {
         effectiveActivityAt: activity,
         manualHotEnabled: false,
         oldScheduleJitterApplied: false,
-        sourceKey: 'test-source',
+        sourceKey: _testSourceKey,
         comicId: fixture.id,
       );
       final afterSuccess = migrated.getComicUpdateInfo(
-        'test-source',
+        _testSourceKey,
         fixture.id,
         'remote',
       )!;
@@ -1638,7 +1645,7 @@ void main() {
 
       final secondSuccessAt = successAt.add(const Duration(days: 1));
       migrated.recordComicCheckEverywhere(
-        'test-source',
+        _testSourceKey,
         fixture.id,
         completedAt: secondSuccessAt,
         sourceActivityAt: activity,
@@ -1649,12 +1656,12 @@ void main() {
         effectiveActivityAt: activity,
         manualHotEnabled: false,
         oldScheduleJitterApplied: true,
-        sourceKey: 'test-source',
+        sourceKey: _testSourceKey,
         comicId: fixture.id,
       );
       expect(
         migrated
-            .getComicUpdateInfo('test-source', fixture.id, 'remote')!
+            .getComicUpdateInfo(_testSourceKey, fixture.id, 'remote')!
             .nextCheckAt!
             .millisecondsSinceEpoch,
         withoutSecondJitter.nextCheckAt.millisecondsSinceEpoch,
@@ -1666,7 +1673,11 @@ void main() {
 
     migrated = NetworkFavoriteCacheManager.forTesting();
     await migrated.init(databasePath: oldPath, migrateLegacy: false);
-    final second = migrated.getComicUpdateInfo('test-source', 'one', 'remote')!;
+    final second = migrated.getComicUpdateInfo(
+      _testSourceKey,
+      'one',
+      'remote',
+    )!;
     expect(second.nextCheckAt, firstNext);
     expect(second.oldScheduleJitterApplied, firstJitter);
     migrated.close();
@@ -1692,7 +1703,7 @@ void main() {
     await cache.refreshPage(data, folder, 1);
     final t0 = DateTime(2026, 8, 1, 12);
     cache.recordComicCheckEverywhere(
-      'test-source',
+      _testSourceKey,
       'one',
       completedAt: t0,
       updateTime: '2026-08-01',
@@ -1702,7 +1713,7 @@ void main() {
 
     final unchangedAt = t0.add(const Duration(days: 1));
     cache.recordComicCheckEverywhere(
-      'test-source',
+      _testSourceKey,
       'one',
       completedAt: unchangedAt,
       updateTime: '2026-08-01',
@@ -1712,7 +1723,7 @@ void main() {
 
     final changedAt = t0.add(const Duration(days: 2));
     cache.recordComicCheckEverywhere(
-      'test-source',
+      _testSourceKey,
       'one',
       completedAt: changedAt,
       updateTime: '2026-08-02',
@@ -1722,7 +1733,7 @@ void main() {
     expect(hotUntil, changedAt.add(const Duration(days: 14)));
 
     cache.recordComicCheckEverywhere(
-      'test-source',
+      _testSourceKey,
       'one',
       completedAt: changedAt.add(const Duration(days: 1)),
       updateTime: '2026-08-02',
@@ -1745,7 +1756,7 @@ void main() {
       await cache.refreshPage(data, folder, 1);
       final completed = DateTime(2026, 8, 1, 12);
       cache.recordComicCheckEverywhere(
-        'test-source',
+        _testSourceKey,
         'jitter-reset',
         completedAt: completed,
         sourceActivityAt: completed.subtract(const Duration(days: 800)),
@@ -1757,7 +1768,7 @@ void main() {
       );
 
       cache.recordComicCheckEverywhere(
-        'test-source',
+        _testSourceKey,
         'jitter-reset',
         completedAt: completed.add(const Duration(days: 1)),
         sourceActivityAt: completed.subtract(const Duration(days: 700)),
@@ -1780,14 +1791,14 @@ void main() {
       await cache.refreshPage(data, folder, 1);
       final t0 = DateTime(2026, 8, 1, 12);
       cache.recordComicCheckEverywhere(
-        'test-source',
+        _testSourceKey,
         'one',
         completedAt: t0,
         updateTime: '2026-08-01',
         updateMarker: 'v2|time:2026-08-01|chapters:1',
       );
       final enabled = cache.toggleManualHotWindow(
-        'test-source',
+        _testSourceKey,
         'one',
         enabled: true,
         now: t0,
@@ -1819,7 +1830,7 @@ void main() {
     );
     expect(
       cache.recordComicCheckEverywhere(
-        'test-source',
+        _testSourceKey,
         'one',
         updateTime: '2026-8-3',
         updateMarker: 'time:2026-8-3|chapters:12',
@@ -1835,7 +1846,7 @@ void main() {
 
     expect(
       cache.recordComicCheckEverywhere(
-        'test-source',
+        _testSourceKey,
         'one',
         updateTime: '2026-8-3',
         updateMarker: 'time:2026-8-3|chapters:13',
@@ -1864,20 +1875,20 @@ void main() {
       expect(cache.hasUncheckedComics(folder), isTrue);
 
       cache.recordComicCheckEverywhere(
-        'test-source',
+        _testSourceKey,
         'one',
         updateTime: '2026-8-3',
         updateMarker: 'time:2026-8-3|chapters:5',
       );
       expect(cache.countUncheckedComics(folder), 2);
       cache.recordComicCheckEverywhere(
-        'test-source',
+        _testSourceKey,
         'two',
         updateTime: '2026-8-3',
         updateMarker: 'time:2026-8-3|chapters:6',
       );
       cache.recordComicCheckEverywhere(
-        'test-source',
+        _testSourceKey,
         'three',
         updateTime: '2026-8-3',
         updateMarker: 'time:2026-8-3|chapters:7',
@@ -1913,7 +1924,7 @@ void main() {
     await cache.refreshFolders(data);
     await cache.refreshPage(data, folder, 1);
     cache.recordComicCheckEverywhere(
-      'test-source',
+      _testSourceKey,
       'one',
       updateTime: '2026-8-3',
       updateMarker: 'time:2026-8-3|chapters:5',
@@ -1929,13 +1940,13 @@ void main() {
           'cover': '',
           'tags': <String, List<String>>{},
           'chapters': <String, String>{'1': 'Chapter 1'},
-          'sourceKey': 'test-source',
+          'sourceKey': _testSourceKey,
           'comicId': id,
         }),
       );
     });
     ComicSourceManager().add(source);
-    addTearDown(() => ComicSourceManager().remove('test-source'));
+    addTearDown(() => ComicSourceManager().remove(_testSourceKey));
 
     await scanFollowUpdates(
       [folder],
@@ -1964,7 +1975,7 @@ void main() {
     await cache.refreshFolders(data);
     await cache.refreshPage(data, folder, 1);
     cache.recordComicCheckEverywhere(
-      'test-source',
+      _testSourceKey,
       'one',
       updateTime: '2026-8-3',
       updateMarker: 'time:2026-8-3|chapters:5',
@@ -1980,13 +1991,13 @@ void main() {
           'cover': '',
           'tags': <String, List<String>>{},
           'chapters': <String, String>{'1': 'Chapter 1'},
-          'sourceKey': 'test-source',
+          'sourceKey': _testSourceKey,
           'comicId': id,
         }),
       );
     });
     ComicSourceManager().add(source);
-    addTearDown(() => ComicSourceManager().remove('test-source'));
+    addTearDown(() => ComicSourceManager().remove(_testSourceKey));
 
     await scanFollowUpdates(
       [folder],
@@ -2009,7 +2020,7 @@ void main() {
     await cache.refreshPage(data, folder, 1);
     for (final id in ['one', 'two', 'three']) {
       cache.recordComicCheckEverywhere(
-        'test-source',
+        _testSourceKey,
         id,
         updateTime: '2026-8-3',
         updateMarker: 'time:2026-8-3|chapters:5',
@@ -2026,13 +2037,13 @@ void main() {
           'cover': '',
           'tags': <String, List<String>>{},
           'chapters': <String, String>{'1': 'Chapter 1'},
-          'sourceKey': 'test-source',
+          'sourceKey': _testSourceKey,
           'comicId': id,
         }),
       );
     });
     ComicSourceManager().add(source);
-    addTearDown(() => ComicSourceManager().remove('test-source'));
+    addTearDown(() => ComicSourceManager().remove(_testSourceKey));
 
     await scanFollowUpdates(
       [folder],
@@ -2063,13 +2074,13 @@ void main() {
           'cover': '',
           'tags': <String, List<String>>{},
           'chapters': <String, String>{'1': 'Chapter 1'},
-          'sourceKey': 'test-source',
+          'sourceKey': _testSourceKey,
           'comicId': id,
         }),
       );
     });
     ComicSourceManager().add(source);
-    addTearDown(() => ComicSourceManager().remove('test-source'));
+    addTearDown(() => ComicSourceManager().remove(_testSourceKey));
 
     await scanFollowUpdates(
       [folder],
@@ -2119,7 +2130,7 @@ void main() {
     );
     await cache.refreshFolders(data);
     await cache.refreshPage(data, folder, 1);
-    cache.markComicRetryLaterEverywhere('test-source', 'two');
+    cache.markComicRetryLaterEverywhere(_testSourceKey, 'two');
 
     var detailCalls = 0;
     final source = _detailSource((id) async {
@@ -2131,13 +2142,13 @@ void main() {
           'cover': '',
           'tags': <String, List<String>>{},
           'chapters': <String, String>{'1': 'Chapter 1'},
-          'sourceKey': 'test-source',
+          'sourceKey': _testSourceKey,
           'comicId': id,
         }),
       );
     });
     ComicSourceManager().add(source);
-    addTearDown(() => ComicSourceManager().remove('test-source'));
+    addTearDown(() => ComicSourceManager().remove(_testSourceKey));
 
     await scanFollowUpdates(
       [folder],
@@ -2166,13 +2177,13 @@ void main() {
     await cache.refreshFolders(data);
     await cache.refreshPage(data, folder, 1);
     cache.recordComicCheckEverywhere(
-      'test-source',
+      _testSourceKey,
       'one',
       updateTime: '2026-8-3',
       updateMarker: 'time:2026-8-3|chapters:5',
     );
-    cache.markComicRetryLaterEverywhere('test-source', 'two');
-    cache.markComicRetryLaterEverywhere('test-source', 'three');
+    cache.markComicRetryLaterEverywhere(_testSourceKey, 'two');
+    cache.markComicRetryLaterEverywhere(_testSourceKey, 'three');
 
     final progress = await scanFollowUpdates(
       [folder],
@@ -2205,7 +2216,7 @@ void main() {
       await cache.refreshFolders(data);
       await cache.refreshPage(data, folder, 1);
       const otherFolder = NetworkFavoriteFolderRef(
-        sourceKey: 'test-source',
+        sourceKey: _testSourceKey,
         folderId: 'other',
         title: 'Other',
       );
@@ -2219,7 +2230,7 @@ void main() {
 
       // A future cooldown excludes the comic from the pending count; the
       // cooldown is comic-level, so one call cools it in every folder.
-      cache.markComicRetryLaterEverywhere('test-source', 'two');
+      cache.markComicRetryLaterEverywhere(_testSourceKey, 'two');
       expect(
         cache.countPendingUncheckedComicsInFolders([folder, otherFolder]),
         2,
@@ -2227,12 +2238,12 @@ void main() {
 
       // An expired cooldown counts again.
       cache.markComicRetryLaterEverywhere(
-        'test-source',
+        _testSourceKey,
         'two',
         delay: const Duration(seconds: -1),
       );
       cache.markComicRetryLaterEverywhere(
-        'test-source',
+        _testSourceKey,
         'two',
         delay: const Duration(seconds: -1),
       );
@@ -2243,7 +2254,7 @@ void main() {
 
       // A successful check no longer counts as pending (comic-level state).
       cache.recordComicCheckEverywhere(
-        'test-source',
+        _testSourceKey,
         'one',
         updateTime: '2026-8-3',
         updateMarker: 'time:2026-8-3|chapters:5',
@@ -2255,8 +2266,8 @@ void main() {
 
       // Rows of the same comic across folders are counted once, so a
       // comic with every row cooled is no longer pending.
-      cache.markComicRetryLaterEverywhere('test-source', 'two');
-      cache.markComicRetryLaterEverywhere('test-source', 'two');
+      cache.markComicRetryLaterEverywhere(_testSourceKey, 'two');
+      cache.markComicRetryLaterEverywhere(_testSourceKey, 'two');
       expect(
         cache.countPendingUncheckedComicsInFolders([folder, otherFolder]),
         1,
@@ -2266,7 +2277,7 @@ void main() {
 
       // A suspect mark is also a completed attempt: it never counts as an
       // unchecked gap, even after the baseline is reset.
-      cache.markComicSuspectGoneEverywhere('test-source', 'three');
+      cache.markComicSuspectGoneEverywhere(_testSourceKey, 'three');
       expect(cache.countUncheckedComicsInFolders([folder, otherFolder]), 0);
       expect(
         cache.countPendingUncheckedComicsInFolders([folder, otherFolder]),
@@ -2282,7 +2293,7 @@ void main() {
 
   test('aggregate folder queries dedupe and paginate', () async {
     const folderB = NetworkFavoriteFolderRef(
-      sourceKey: 'test-source',
+      sourceKey: _testSourceKey,
       folderId: 'remote-b',
       title: 'Remote B',
     );
@@ -2326,7 +2337,7 @@ void main() {
     expect(page.map((c) => c.id).toSet().length, 2);
 
     cache.recordComicCheckEverywhere(
-      'test-source',
+      _testSourceKey,
       'one',
       updateTime: '2026-8-3',
       updateMarker: 'time:2026-8-3|chapters:5',
@@ -2334,7 +2345,7 @@ void main() {
     expect(cache.countUncheckedComicsInFolders([folder, folderB]), 3);
 
     cache.recordComicCheckEverywhere(
-      'test-source',
+      _testSourceKey,
       'one',
       updateTime: '2026-8-4',
       updateMarker: 'time:2026-8-4|chapters:6',
@@ -2367,7 +2378,7 @@ void main() {
     expect(cache.countCachedComics(folder), 3);
     expect(
       cache.getAllCachedFolders().any(
-        (f) => f.sourceKey == 'test-source' && f.folderId == 'remote',
+        (f) => f.sourceKey == _testSourceKey && f.folderId == 'remote',
       ),
       isTrue,
     );
@@ -2398,7 +2409,7 @@ void main() {
               'cover': '',
               'tags': <String, List<String>>{},
               'chapters': <String, String>{'1': 'Chapter 1'},
-              'sourceKey': 'test-source',
+              'sourceKey': _testSourceKey,
               'comicId': id,
             }),
           );
@@ -2406,7 +2417,7 @@ void main() {
         return Res.error('404 Invalid status code: 404');
       });
       ComicSourceManager().add(source);
-      addTearDown(() => ComicSourceManager().remove('test-source'));
+      addTearDown(() => ComicSourceManager().remove(_testSourceKey));
 
       Future<void> scan() => scanFollowUpdates(
         [folder],
@@ -2456,13 +2467,13 @@ void main() {
           'cover': '',
           'tags': <String, List<String>>{},
           'chapters': <String, String>{'1': 'Chapter 1'},
-          'sourceKey': 'test-source',
+          'sourceKey': _testSourceKey,
           'comicId': id,
         }),
       );
     });
     ComicSourceManager().add(source);
-    addTearDown(() => ComicSourceManager().remove('test-source'));
+    addTearDown(() => ComicSourceManager().remove(_testSourceKey));
 
     await scanFollowUpdates(
       [folder],
@@ -2484,7 +2495,7 @@ void main() {
     );
     await cache.refreshFolders(data);
     await cache.refreshPage(data, folder, 1);
-    cache.markComicSuspectGoneEverywhere('test-source', 'one');
+    cache.markComicSuspectGoneEverywhere(_testSourceKey, 'one');
 
     var detailCalls = 0;
     final source = _detailSource((id) async {
@@ -2492,7 +2503,7 @@ void main() {
       return Res.error('404 Invalid status code: 404');
     });
     ComicSourceManager().add(source);
-    addTearDown(() => ComicSourceManager().remove('test-source'));
+    addTearDown(() => ComicSourceManager().remove(_testSourceKey));
 
     await scanFollowUpdates(
       [folder],
@@ -2517,12 +2528,12 @@ void main() {
     );
     await cache.refreshFolders(data);
     await cache.refreshPage(data, folder, 1);
-    cache.markComicSuspectGoneEverywhere('test-source', 'one');
+    cache.markComicSuspectGoneEverywhere(_testSourceKey, 'one');
 
     // A successful detail load (page path / recordComicCheck) clears the mark
     // and the accumulated hits.
     cache.recordComicCheckEverywhere(
-      'test-source',
+      _testSourceKey,
       'one',
       updateTime: '2026-8-3',
       updateMarker: 'time:2026-8-3|chapters:5',
@@ -2538,7 +2549,7 @@ void main() {
     'clearComicSuspectGoneEverywhere clears and suspect query dedupes',
     () async {
       const folderB = NetworkFavoriteFolderRef(
-        sourceKey: 'test-source',
+        sourceKey: _testSourceKey,
         folderId: 'remote-b',
         title: 'Remote B',
       );
@@ -2549,13 +2560,13 @@ void main() {
       await cache.refreshPage(data, folder, 1);
       await cache.refreshPage(data, folderB, 1);
 
-      cache.markComicSuspectGoneEverywhere('test-source', 'one');
+      cache.markComicSuspectGoneEverywhere(_testSourceKey, 'one');
 
-      expect(cache.isComicSuspectGone('test-source', 'one'), isTrue);
+      expect(cache.isComicSuspectGone(_testSourceKey, 'one'), isTrue);
       expect(cache.getSuspectGoneComicsInFolders([folder, folderB]).length, 1);
 
-      cache.clearComicSuspectGoneEverywhere('test-source', 'one');
-      expect(cache.isComicSuspectGone('test-source', 'one'), isFalse);
+      cache.clearComicSuspectGoneEverywhere(_testSourceKey, 'one');
+      expect(cache.isComicSuspectGone(_testSourceKey, 'one'), isFalse);
       expect(cache.getSuspectGoneComicsInFolders([folder, folderB]), isEmpty);
     },
   );
@@ -2573,7 +2584,7 @@ void main() {
       return Res.error('500 Internal Server Error');
     });
     ComicSourceManager().add(source);
-    addTearDown(() => ComicSourceManager().remove('test-source'));
+    addTearDown(() => ComicSourceManager().remove(_testSourceKey));
 
     await scanFollowUpdates(
       [folder],
@@ -2609,18 +2620,18 @@ void main() {
 
       // The user saw a 404/400 on the detail page first-hand: one response is
       // enough to mark the comic as suspected removed.
-      cache.recordComicNotFoundEverywhere('test-source', 'one');
+      cache.recordComicNotFoundEverywhere(_testSourceKey, 'one');
       var item = cache.getComicsWithUpdatesInfo(folder).single;
       expect(item.isSuspectGone, isTrue);
 
       // Repeated hits stay idempotent (no window, no accumulation).
-      cache.recordComicNotFoundEverywhere('test-source', 'one');
+      cache.recordComicNotFoundEverywhere(_testSourceKey, 'one');
       item = cache.getComicsWithUpdatesInfo(folder).single;
       expect(item.isSuspectGone, isTrue);
 
       // A successful load clears the mark.
       cache.recordComicCheckEverywhere(
-        'test-source',
+        _testSourceKey,
         'one',
         updateTime: '2026-8-3',
         updateMarker: 'time:2026-8-3|chapters:5',
@@ -2634,7 +2645,7 @@ void main() {
     'successful checks commit state and all favorite rows atomically',
     () async {
       const folderB = NetworkFavoriteFolderRef(
-        sourceKey: 'test-source',
+        sourceKey: _testSourceKey,
         folderId: 'remote-b',
         title: 'Remote B',
       );
@@ -2651,12 +2662,12 @@ void main() {
         'cover': 'https://example.invalid/baseline.jpg',
         'tags': <String, List<String>>{},
         'chapters': <String, String>{'1': 'Chapter 1'},
-        'sourceKey': 'test-source',
+        'sourceKey': _testSourceKey,
         'comicId': 'one',
         'updateTime': '2026-08-03T10:00:00Z',
       });
       cache.recordComicCheckEverywhere(
-        'test-source',
+        _testSourceKey,
         'one',
         updateTime: '2026-8-3',
         updateMarker: 'baseline-marker',
@@ -2701,7 +2712,7 @@ void main() {
         'cover': 'https://example.invalid/changed.jpg',
         'tags': <String, List<String>>{},
         'chapters': <String, String>{'2': 'Chapter 2'},
-        'sourceKey': 'test-source',
+        'sourceKey': _testSourceKey,
         'comicId': 'one',
         'updateTime': '2026-08-04T00:00:00Z',
       });
@@ -2726,7 +2737,7 @@ void main() {
       try {
         final state = stateDb.select(
           'SELECT update_marker FROM comic_check_state WHERE source_key = ? AND comic_id = ?',
-          ['test-source', 'one'],
+          [_testSourceKey, 'one'],
         );
         expect(state.single['update_marker'], 'baseline-marker');
       } finally {
@@ -2742,7 +2753,7 @@ void main() {
       'cover': '',
       'tags': <String, List<String>>{},
       'chapters': <String, String>{'1': 'Chapter 1', '2': 'Chapter 2'},
-      'sourceKey': 'test-source',
+      'sourceKey': _testSourceKey,
       'comicId': 'one',
       'updateTime': '2026-08-03T10:00:00Z',
     });
@@ -2765,7 +2776,7 @@ void main() {
     ''');
     db.execute('INSERT INTO folder_sync VALUES (?, ?, ?)', [
       'old-local-folder',
-      'remote-source',
+      'remote_source',
       'remote-folder',
     ]);
     db.dispose();
@@ -2773,7 +2784,7 @@ void main() {
     expect(
       readLegacyFollowUpdatesFolder(database, 'old-local-folder'),
       const NetworkFavoriteFolderRef(
-        sourceKey: 'remote-source',
+        sourceKey: 'remote_source',
         folderId: 'remote-folder',
       ),
     );
@@ -2785,7 +2796,7 @@ void main() {
       mode: 'regular',
       ignoreRetryAfter: true,
       total: 2,
-      items: const [('test-source', 'one'), ('test-source', 'two')],
+      items: const [(_testSourceKey, 'one'), (_testSourceKey, 'two')],
     );
     expect(run.status, 'running');
     expect(run.mode, 'regular');
@@ -2793,8 +2804,8 @@ void main() {
     expect(cache.getCurrentScanRun()!.runId, run.runId);
 
     expect(cache.getDoneScanItems(run.runId), isEmpty);
-    cache.markScanItemDone(run.runId, 'test-source', 'one', result: 'ok');
-    expect(cache.getDoneScanItems(run.runId), {'test-source\u0000one'});
+    cache.markScanItemDone(run.runId, _testSourceKey, 'one', result: 'ok');
+    expect(cache.getDoneScanItems(run.runId), {_testSourceKey + '\u0000one'});
 
     cache.updateScanRunStatus(run.runId, 'finished');
     expect(cache.getCurrentScanRun()!.status, 'finished');
@@ -2808,7 +2819,7 @@ void main() {
       mode: 'missing',
       ignoreRetryAfter: false,
       total: 1,
-      items: const [('test-source', 'three')],
+      items: const [(_testSourceKey, 'three')],
     );
     expect(next.runId, isNot(run.runId));
     expect(cache.getDoneScanItems(next.runId), isEmpty);
@@ -2828,7 +2839,7 @@ void main() {
     'everywhere variants write all folder rows and fall back when membership is empty',
     () async {
       const folderB = NetworkFavoriteFolderRef(
-        sourceKey: 'test-source',
+        sourceKey: _testSourceKey,
         folderId: 'remote-b',
         title: 'Remote B',
       );
@@ -2846,7 +2857,7 @@ void main() {
       }
 
       cache.recordComicCheckEverywhere(
-        'test-source',
+        _testSourceKey,
         'one',
         updateTime: '2026-8-3',
         updateMarker: 'time:2026-8-3|chapters:9',
@@ -2862,21 +2873,21 @@ void main() {
       await cache.refreshPage(
         data,
         const NetworkFavoriteFolderRef(
-          sourceKey: 'test-source',
+          sourceKey: _testSourceKey,
           folderId: 'solo',
           title: 'Solo',
         ),
         1,
       );
       cache.markComicRetryLaterEverywhere(
-        'test-source',
+        _testSourceKey,
         'one',
         delay: const Duration(hours: 2),
       );
       final solo = cache
           .getComicsWithUpdatesInfo(
             const NetworkFavoriteFolderRef(
-              sourceKey: 'test-source',
+              sourceKey: _testSourceKey,
               folderId: 'solo',
               title: 'Solo',
             ),
@@ -2884,15 +2895,15 @@ void main() {
           .single;
       expect(solo.retryAfter, isNotNull);
 
-      cache.markComicSuspectGoneEverywhere('test-source', 'one');
-      expect(cache.isComicSuspectGone('test-source', 'one'), isTrue);
+      cache.markComicSuspectGoneEverywhere(_testSourceKey, 'one');
+      expect(cache.isComicSuspectGone(_testSourceKey, 'one'), isTrue);
     },
   );
 
   test('removal learns the favorite id from a refreshed first page', () async {
     String? receivedFavoriteId;
     final data = FavoriteData(
-      key: 'test-source',
+      key: _testSourceKey,
       title: 'Test source',
       multiFolder: true,
       loadComic: (page, [folder]) async => Res(<Comic>[
@@ -2901,7 +2912,7 @@ void main() {
           name: 'Comic',
           coverPath: 'https://example.invalid/one.jpg',
           author: 'Author',
-          sourceKeyValue: 'test-source',
+          sourceKeyValue: _testSourceKey,
           tags: const ['tag'],
           remoteFavoriteId: 'fav-1',
         ),
@@ -2916,7 +2927,7 @@ void main() {
     );
     final source = ComicSource(
       'Test source',
-      'test-source',
+      _testSourceKey,
       null,
       null,
       null,
@@ -2951,7 +2962,7 @@ void main() {
     );
     source.data['account'] = ['user'];
     ComicSourceManager().add(source);
-    addTearDown(() => ComicSourceManager().remove('test-source'));
+    addTearDown(() => ComicSourceManager().remove(_testSourceKey));
     await cache.refreshFolders(data);
 
     // Panel-style add: only the membership row is written, the folder page
@@ -2964,7 +2975,7 @@ void main() {
     );
     expect(added.success, isTrue);
     expect(cache.countCachedComics(folder), 0);
-    expect(cache.isFavoriteKnown('test-source', 'one'), isTrue);
+    expect(cache.isFavoriteKnown(_testSourceKey, 'one'), isTrue);
 
     // Removal without a cached favorite id refreshes the first page, learns
     // the id from the server list and passes it to the source.
@@ -2976,7 +2987,7 @@ void main() {
     );
     expect(removed.success, isTrue);
     expect(receivedFavoriteId, 'fav-1');
-    expect(cache.isFavoriteKnown('test-source', 'one'), isFalse);
+    expect(cache.isFavoriteKnown(_testSourceKey, 'one'), isFalse);
     expect(cache.countCachedComics(folder), 0);
   });
 

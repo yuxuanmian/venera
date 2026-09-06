@@ -6,6 +6,7 @@ import 'package:sliver_tools/sliver_tools.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
+import 'package:venera/foundation/catalog/source_preferences.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/global_state.dart';
 import 'package:venera/pages/aggregated_search_page.dart';
@@ -84,7 +85,9 @@ class _SearchPageState extends State<SearchPage> {
 
   bool canHandleUrl(String text) {
     if (!text.isURL) return false;
-    for (var source in ComicSource.all()) {
+    for (var source in ComicSource.all().where(
+      (source) => isSourceEnabled(source.key),
+    )) {
       if (source.linkHandler != null) {
         var uri = Uri.parse(text);
         if (source.linkHandler!.domains.contains(uri.host)) {
@@ -106,7 +109,9 @@ class _SearchPageState extends State<SearchPage> {
     } else {
       var text = controller.text;
 
-      for (var comicSource in ComicSource.all()) {
+      for (var comicSource in ComicSource.all().where(
+        (source) => isSourceEnabled(source.key),
+      )) {
         if (comicSource.idMatcher?.hasMatch(text) ?? false) {
           suggestions.add(
             Pair("**${comicSource.key}**", TranslationType.other),
@@ -183,6 +188,7 @@ class _SearchPageState extends State<SearchPage> {
 
   void findSearchSources() {
     var all = ComicSource.all()
+        .where((source) => isSourceEnabled(source.key))
         .where((e) => e.searchPageData != null)
         .map((e) => e.key)
         .toList();

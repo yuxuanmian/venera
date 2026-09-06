@@ -7,73 +7,110 @@ import 'package:venera/foundation/log.dart';
 import 'package:venera/utils/ext.dart';
 
 class CookieJarSql {
-  late Database _db;
+  Database? _connection;
+
+  Database get _db {
+    final connection = _connection;
+    if (connection == null) {
+      throw StateError('cookie database is not initialized');
+    }
+    return connection;
+  }
+
+  bool get hasOpenConnection => _connection != null;
 
   final String path;
 
-  CookieJarSql(this.path){
+  CookieJarSql(this.path) {
     init();
   }
 
   void init() {
-    _db = sqlite3.open(path);
-    _db.execute('''
-      CREATE TABLE IF NOT EXISTS cookies (
-        name TEXT NOT NULL,
-        value TEXT NOT NULL,
-        domain TEXT NOT NULL,
-        path TEXT,
-        expires INTEGER,
-        secure INTEGER,
-        httpOnly INTEGER,
-        PRIMARY KEY (name, domain, path)
-      );
-    ''');
+    if (_connection != null) {
+      dispose();
+    }
+    final connection = sqlite3.open(path);
+    _connection = connection;
+    try {
+      connection.execute('''
+        CREATE TABLE IF NOT EXISTS cookies (
+          name TEXT NOT NULL,
+          value TEXT NOT NULL,
+          domain TEXT NOT NULL,
+          path TEXT,
+          expires INTEGER,
+          secure INTEGER,
+          httpOnly INTEGER,
+          PRIMARY KEY (name, domain, path)
+        );
+      ''');
+    } catch (error, stack) {
+      if (identical(_connection, connection)) {
+        _connection = null;
+      }
+      try {
+        connection.dispose();
+      } catch (disposeError, disposeStack) {
+        Log.error(
+          'Network',
+          'Failed to dispose cookie database after init error: $disposeError',
+          disposeStack,
+        );
+      }
+      Error.throwWithStackTrace(error, stack);
+    }
   }
 
   void saveFromResponse(Uri uri, List<Cookie> cookies) {
     var current = loadForRequest(uri);
     for (var cookie in cookies) {
-      var currentCookie = current.firstWhereOrNull((element) =>
-          element.name == cookie.name &&
-          (cookie.path == null || cookie.path!.startsWith(element.path!)));
+      var currentCookie = current.firstWhereOrNull(
+        (element) =>
+            element.name == cookie.name &&
+            (cookie.path == null || cookie.path!.startsWith(element.path!)),
+      );
       if (currentCookie != null) {
         cookie.domain = currentCookie.domain;
       }
-      _db.execute('''
+      _db.execute(
+        '''
         INSERT OR REPLACE INTO cookies (name, value, domain, path, expires, secure, httpOnly)
         VALUES (?, ?, ?, ?, ?, ?, ?);
-      ''', [
-        cookie.name,
-        cookie.value,
-        cookie.domain ?? uri.host,
-        cookie.path ?? "/",
-        cookie.expires?.millisecondsSinceEpoch,
-        cookie.secure ? 1 : 0,
-        cookie.httpOnly ? 1 : 0
-      ]);
+      ''',
+        [
+          cookie.name,
+          cookie.value,
+          cookie.domain ?? uri.host,
+          cookie.path ?? "/",
+          cookie.expires?.millisecondsSinceEpoch,
+          cookie.secure ? 1 : 0,
+          cookie.httpOnly ? 1 : 0,
+        ],
+      );
     }
   }
 
   List<Cookie> _loadWithDomain(String domain) {
-    var rows = _db.select('''
+    var rows = _db.select(
+      '''
       SELECT name, value, domain, path, expires, secure, httpOnly
       FROM cookies
       WHERE domain = ?;
-    ''', [domain]);
+    ''',
+      [domain],
+    );
 
     return rows
-        .map((row) => Cookie(
-              row["name"] as String,
-              row["value"] as String,
-            )
-              ..domain = row["domain"] as String
-              ..path = row["path"] as String
-              ..expires = row["expires"] == null
-                  ? null
-                  : DateTime.fromMillisecondsSinceEpoch(row["expires"] as int)
-              ..secure = row["secure"] == 1
-              ..httpOnly = row["httpOnly"] == 1)
+        .map(
+          (row) => Cookie(row["name"] as String, row["value"] as String)
+            ..domain = row["domain"] as String
+            ..path = row["path"] as String
+            ..expires = row["expires"] == null
+                ? null
+                : DateTime.fromMillisecondsSinceEpoch(row["expires"] as int)
+            ..secure = row["secure"] == 1
+            ..httpOnly = row["httpOnly"] == 1,
+        )
         .toList();
   }
 
@@ -96,18 +133,25 @@ class CookieJarSql {
     }
 
     // check expires
-    var expires = cookies.where((cookie) =>
-        cookie.expires != null && cookie.expires!.isBefore(DateTime.now()));
+    var expires = cookies.where(
+      (cookie) =>
+          cookie.expires != null && cookie.expires!.isBefore(DateTime.now()),
+    );
     for (var cookie in expires) {
-      _db.execute('''
+      _db.execute(
+        '''
         DELETE FROM cookies
         WHERE name = ? AND domain = ? AND path = ?;
-      ''', [cookie.name, cookie.domain, cookie.path]);
+      ''',
+        [cookie.name, cookie.domain, cookie.path],
+      );
     }
 
     return cookies
-        .where((element) =>
-            !expires.contains(element) && _checkPathMatch(uri, element.path))
+        .where(
+          (element) =>
+              !expires.contains(element) && _checkPathMatch(uri, element.path),
+        )
         .toList();
   }
 
@@ -134,11 +178,10 @@ class CookieJarSql {
   void saveFromResponseCookieHeader(Uri uri, List<String> cookieHeader) {
     var cookies = <Cookie>[];
     for (var header in cookieHeader) {
-      try{
+      try {
         var cookie = Cookie.fromSetCookieValue(header);
         cookies.add(cookie);
-      }
-      catch(_) {
+      } catch (_) {
         Log.warning("Network", "Invalid cookie header: $header");
         continue;
       }
@@ -150,36 +193,44 @@ class CookieJarSql {
     var cookies = loadForRequest(uri);
     var map = <String, Cookie>{};
     for (var cookie in cookies) {
-      if(map.containsKey(cookie.name)) {
-        if(cookie.domain![0] != '.' && map[cookie.name]!.domain![0] == '.') {
+      if (map.containsKey(cookie.name)) {
+        if (cookie.domain![0] != '.' && map[cookie.name]!.domain![0] == '.') {
           map[cookie.name] = cookie;
-        } else if(cookie.domain!.length > map[cookie.name]!.domain!.length) {
+        } else if (cookie.domain!.length > map[cookie.name]!.domain!.length) {
           map[cookie.name] = cookie;
         }
       } else {
         map[cookie.name] = cookie;
       }
     }
-    return map.entries.map((cookie) => "${cookie.value.name}=${cookie.value.value}").join("; ");
+    return map.entries
+        .map((cookie) => "${cookie.value.name}=${cookie.value.value}")
+        .join("; ");
   }
 
   void delete(Uri uri, String name) {
     var acceptedDomains = _getAcceptedDomains(uri.host);
     for (var domain in acceptedDomains) {
-      _db.execute('''
+      _db.execute(
+        '''
         DELETE FROM cookies
         WHERE name = ? AND domain = ? AND path = ?;
-      ''', [name, domain, uri.path]);
+      ''',
+        [name, domain, uri.path],
+      );
     }
   }
 
   void deleteUri(Uri uri) {
     var acceptedDomains = _getAcceptedDomains(uri.host);
     for (var domain in acceptedDomains) {
-      _db.execute('''
+      _db.execute(
+        '''
         DELETE FROM cookies
         WHERE domain = ?;
-      ''', [domain]);
+      ''',
+        [domain],
+      );
     }
   }
 
@@ -190,7 +241,15 @@ class CookieJarSql {
   }
 
   void dispose() {
-    _db.dispose();
+    final connection = _connection;
+    _connection = null;
+    if (connection != null) {
+      try {
+        connection.dispose();
+      } catch (error, stack) {
+        Log.error('Network', 'Failed to close cookie database: $error', stack);
+      }
+    }
   }
 }
 
@@ -201,6 +260,17 @@ class SingleInstanceCookieJar extends CookieJarSql {
   SingleInstanceCookieJar._create(super.path);
 
   static SingleInstanceCookieJar? instance;
+
+  @override
+  void dispose() {
+    // Clear the singleton before releasing the native handle. If a caller
+    // constructs a replacement and that construction fails, a later cleanup
+    // must not dispose this already-closed instance again.
+    if (identical(instance, this)) {
+      instance = null;
+    }
+    super.dispose();
+  }
 
   static Future<SingleInstanceCookieJar> createInstance() async {
     if (instance != null) {
@@ -221,7 +291,7 @@ class CookieManagerSql extends Interceptor {
   void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
     var cookies = cookieJar.loadForRequestCookieHeader(options.uri);
     if (cookies.isNotEmpty) {
-      if(options.headers["cookie"] != null) {
+      if (options.headers["cookie"] != null) {
         cookies = "${options.headers["cookie"]}; $cookies";
       }
       options.headers["cookie"] = cookies;
@@ -232,7 +302,9 @@ class CookieManagerSql extends Interceptor {
   @override
   void onResponse(Response response, ResponseInterceptorHandler handler) {
     cookieJar.saveFromResponseCookieHeader(
-        response.requestOptions.uri, response.headers["set-cookie"] ?? []);
+      response.requestOptions.uri,
+      response.headers["set-cookie"] ?? [],
+    );
     handler.next(response);
   }
 

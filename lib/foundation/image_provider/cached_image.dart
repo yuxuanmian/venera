@@ -40,9 +40,17 @@ class CachedImageProvider
 
   @override
   Future<LoadResult> load(chunkEvents, checkStop) async {
-    while (loadingCount > _kMaxLoadingCount) {
-      await Future.delayed(const Duration(milliseconds: 100));
-      checkStop();
+    // Local covers do not consume network slots, so they should not wait on
+    // the network throttle. This also keeps local/offline pages responsive
+    // when several remote image requests are already in flight.
+    if (!url.startsWith('file://')) {
+      while (loadingCount > _kMaxLoadingCount) {
+        await waitForCancellationAwareDelay(
+          chunkEvents,
+          const Duration(milliseconds: 100),
+          checkStop,
+        );
+      }
     }
     loadingCount++;
     try {

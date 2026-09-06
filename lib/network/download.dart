@@ -117,8 +117,7 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
           }
           try {
             await Directory(path!).delete(recursive: true);
-          }
-          catch(e) {
+          } catch (e) {
             Log.error("Download", "Failed to delete directory: $e");
           }
         });
@@ -209,12 +208,14 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
       }
       Directory saveTo;
       if (comic!.chapters != null) {
-        saveTo = Directory(FilePath.join(
-          path!,
-          LocalManager.getChapterDirectoryName(
-            _images!.keys.elementAt(_chapter),
+        saveTo = Directory(
+          FilePath.join(
+            path!,
+            LocalManager.getChapterDirectoryName(
+              _images!.keys.elementAt(_chapter),
+            ),
           ),
-        ));
+        );
         if (!saveTo.existsSync()) {
           saveTo.createSync(recursive: true);
         }
@@ -294,9 +295,11 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
       notifyListeners();
       var res = await _runWithRetry(() async {
         Uint8List? data;
-        await for (var progress
-            in ImageDownloader.loadThumbnail(
-                comic!.cover, source.key, comicId)) {
+        await for (var progress in ImageDownloader.loadThumbnail(
+          comic!.cover,
+          source.key,
+          comicId,
+        )) {
           if (progress.imageBytes != null) {
             data = progress.imageBytes;
           }
@@ -465,12 +468,13 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
     }
 
     return ImagesDownloadTask(
-      source: ComicSource.find(json["source"])!,
-      comicId: json["comicId"],
-      comic:
-          json["comic"] == null ? null : ComicDetails.fromJson(json["comic"]),
-      chapters: ListOrNull.from(json["chapters"]),
-    )
+        source: ComicSource.find(json["source"])!,
+        comicId: json["comicId"],
+        comic: json["comic"] == null
+            ? null
+            : ComicDetails.fromJson(json["comic"]),
+        chapters: ListOrNull.from(json["chapters"]),
+      )
       ..path = json["path"]
       .._cover = json["cover"]
       .._images = images
@@ -516,8 +520,10 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
   int get hashCode => Object.hash(comicId, source.key);
 }
 
-Future<Res<T>> _runWithRetry<T>(Future<T> Function() task,
-    {int retry = 3}) async {
+Future<Res<T>> _runWithRetry<T>(
+  Future<T> Function() task, {
+  int retry = 3,
+}) async {
   for (var i = 0; i < retry; i++) {
     try {
       return Res(await task());
@@ -570,7 +576,11 @@ class _ImageDownloadWrapper {
     int lastBytes = 0;
     try {
       await for (var p in ImageDownloader.loadComicImageUnwrapped(
-          image, task.source.key, task.comicId, chapter)) {
+        image,
+        task.source.key,
+        task.comicId,
+        chapter,
+      )) {
         if (isCancelled) {
           return;
         }
@@ -758,8 +768,9 @@ class ArchiveDownloadTask extends DownloadTask {
       path = dir.path;
     }
 
-    var archiveFile =
-        File(FilePath.join(App.dataPath, "archive_downloading.zip"));
+    var archiveFile = File(
+      FilePath.join(App.dataPath, "archive_downloading.zip"),
+    );
 
     Log.info("Download", "Downloading $archiveUrl");
 

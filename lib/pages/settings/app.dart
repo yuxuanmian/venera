@@ -8,65 +8,6 @@ class AppSettings extends StatefulWidget {
 }
 
 class _AppSettingsState extends State<AppSettings> {
-  Future<List<TrackingArtifactStatus>> _trackingStatusFuture = App.cloudTracking
-      .statuses();
-
-  @override
-  void initState() {
-    super.initState();
-    App.cloudTracking.addListener(_onTrackingChanged);
-  }
-
-  @override
-  void dispose() {
-    App.cloudTracking.removeListener(_onTrackingChanged);
-    super.dispose();
-  }
-
-  void _onTrackingChanged() {
-    if (!mounted) return;
-    setState(() {
-      _trackingStatusFuture = App.cloudTracking.statuses();
-    });
-  }
-
-  Widget _trackingArtifactStatusSliver(
-    AsyncSnapshot<List<TrackingArtifactStatus>> snapshot,
-  ) {
-    final statuses = snapshot.data;
-    if (statuses == null || statuses.isEmpty) {
-      return SliverToBoxAdapter(
-        child: ListTile(
-          title: Text("Tracking Artifact Status".tl),
-          subtitle: Text("No active source artifacts".tl),
-        ),
-      );
-    }
-    return SliverList(
-      delegate: SliverChildListDelegate([
-        ListTile(title: Text("Tracking Artifact Status".tl)),
-        for (final status in statuses) _artifactStatusTile(status),
-      ]),
-    );
-  }
-
-  Widget _artifactStatusTile(TrackingArtifactStatus status) {
-    final revision = status.revision ?? "Local/custom".tl;
-    final loaded = status.loadedRevision ?? '-';
-    final blocked = status.activationBlocked ? "Blocked".tl : "Admitted".tl;
-    return ListTile(
-      dense: true,
-      title: Text('${status.artifact.sourceKey} · ${status.artifact.fileName}'),
-      subtitle: Text(
-        '${"Strategy".tl}: ${status.strategy.name}\n'
-        '${"Revision".tl}: $revision\n'
-        '${"Loaded Revision".tl}: $loaded\n'
-        '${"Activation Blocked".tl}: $blocked\n'
-        '${"Reason".tl}: ${status.reason.tl}',
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return SmoothCustomScrollView(
@@ -176,14 +117,7 @@ class _AppSettingsState extends State<AppSettings> {
                 if (file.name.endsWith('picadata')) {
                   await importPicaData(cacheFile);
                 } else {
-                  final result = await importAppData(cacheFile);
-                  if (result.sourceSkipped && context.mounted) {
-                    context.showMessage(
-                      message:
-                          "Source scripts were not imported while Cloud is enabled."
-                              .tl,
-                    );
-                  }
+                  await importAppData(cacheFile);
                 }
               } catch (e, s) {
                 Log.error("Import data", e.toString(), s);
@@ -204,130 +138,15 @@ class _AppSettingsState extends State<AppSettings> {
           },
           actionTitle: 'Set'.tl,
         ).toSliver(),
-        _SettingPartTitle(
-          title: "Cloud Tracking".tl,
-          icon: Icons.cloud_outlined,
-        ),
-        _SwitchSetting(
-          title: "Cloud Tracking".tl,
-          subtitle:
-              "Cloud tracking owns all installed source runtimes; Local-only sources use the pinned Server version."
-                  .tl,
-          settingKey: "cloudTrackingEnabled",
-          onValueChanged: (value) {
-            unawaited(
-              App.cloudTracking
-                  .setCloudEnabled(value)
-                  .then<void>(
-                    (_) {
-                      if (!mounted) return;
-                      setState(() {
-                        _trackingStatusFuture = App.cloudTracking.statuses();
-                      });
-                    },
-                    onError: (Object error, StackTrace stack) {
-                      if (!mounted) return;
-                      setState(() {
-                        _trackingStatusFuture = App.cloudTracking.statuses();
-                      });
-                      context.showMessage(message: error.toString());
-                    },
-                  ),
-            );
-            setState(() {
-              _trackingStatusFuture = App.cloudTracking.statuses();
-            });
-          },
-        ).toSliver(),
         _CallbackSetting(
-          title: "Cloud Tracking Server URL".tl,
-          subtitle:
-              (appdata.settings['cloudTrackingServerUrl'] as String?)
-                      ?.trim()
-                      .isEmpty ==
-                  false
-              ? appdata.settings['cloudTrackingServerUrl'] as String
-              : "Not configured".tl,
+          title: "Venera Server".tl,
+          subtitle: _serverSummary(),
           actionTitle: "Set".tl,
-          callback: () {
-            showInputDialog(
-              context: context,
-              title: "Cloud Tracking Server URL".tl,
-              hintText: "https://server.example".tl,
-              initialValue:
-                  appdata.settings['cloudTrackingServerUrl'] as String?,
-              inputValidator: RegExp(
-                r'^https?://[^\s]+$',
-                caseSensitive: false,
-              ),
-              onConfirm: (value) {
-                appdata.settings['cloudTrackingServerUrl'] = value.trim();
-                appdata.saveData();
-                unawaited(App.cloudTracking.onSettingsChanged());
-                setState(() {});
-                return null;
-              },
-            );
+          callback: () async {
+            await context.to(() => const ServerSettings());
+            if (mounted) setState(() {});
           },
         ).toSliver(),
-        _CallbackSetting(
-          title: "Cloud Tracking Access Token".tl,
-          subtitle:
-              ((appdata.settings['cloudTrackingAccessToken'] as String?)
-                      ?.isNotEmpty ??
-                  false)
-              ? "Configured".tl
-              : "Not configured".tl,
-          actionTitle: "Set".tl,
-          callback: () {
-            showInputDialog(
-              context: context,
-              title: "Cloud Tracking Access Token".tl,
-              hintText: "Bearer token".tl,
-              initialValue:
-                  appdata.settings['cloudTrackingAccessToken'] as String?,
-              onConfirm: (value) {
-                appdata.settings['cloudTrackingAccessToken'] = value.trim();
-                appdata.saveData();
-                unawaited(App.cloudTracking.onSettingsChanged());
-                setState(() {});
-                return null;
-              },
-            );
-          },
-        ).toSliver(),
-        if (appdata.settings['cloudTrackingEnabled'] == true)
-          ListTile(
-            leading: Icon(
-              (appdata.settings['cloudTrackingServerUrl'] as String?)
-                          ?.trim()
-                          .isNotEmpty ==
-                      true
-                  ? Icons.info_outline
-                  : Icons.pause_circle_outline,
-            ),
-            title: Text(
-              ((appdata.settings['cloudTrackingServerUrl'] as String?)
-                              ?.trim()
-                              .isNotEmpty ==
-                          true
-                      ? "Cloud tracking pauses during revision alignment and never falls back silently."
-                      : "Cloud tracking is paused until a Server URL is configured.")
-                  .tl,
-            ),
-          ).toSliver(),
-        if (appdata.settings['cloudTrackingEnabled'] != true)
-          ListTile(
-            title: Text(
-              "Cloud is off; old custom scripts are not restored automatically."
-                  .tl,
-            ),
-          ).toSliver(),
-        FutureBuilder<List<TrackingArtifactStatus>>(
-          future: _trackingStatusFuture,
-          builder: (context, snapshot) =>
-              _trackingArtifactStatusSliver(snapshot),
-        ),
         _SettingPartTitle(title: "User".tl, icon: Icons.person_outline),
         SelectSetting(
           title: "Language".tl,
@@ -368,6 +187,12 @@ class _AppSettingsState extends State<AppSettings> {
           ).toSliver(),
       ],
     );
+  }
+
+  String _serverSummary() {
+    final value = appdata.settings['serverUrl'];
+    if (value is String && value.trim().isNotEmpty) return value.trim();
+    return "Not configured".tl;
   }
 }
 

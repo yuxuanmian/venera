@@ -89,16 +89,18 @@ dependencies:
   display_mode: ^0.0.2
   flutter_staggered_grid_view: ^0.7.0
   win32: ^5.15.0
+  archive: any
 
 dev_dependencies:
   flutter_test:
+    sdk: flutter
+  integration_test:
     sdk: flutter
   flutter_lints: ^5.0.0
   flutter_to_arch: ^1.0.1
   flutter_to_debian: 
     git:
       url: https://github.com/venera-app/flutter_to_debian.git
-  archive: any
 
 flutter:
   uses-material-design: true

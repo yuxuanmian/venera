@@ -2,10 +2,14 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_updates.dart';
 import 'package:venera/foundation/res.dart';
+
+const _listSourceKey = 'list_test';
+const _detailSourceKey = 'detail_test';
 
 Comic _comic(String id, String marker, String updateTime, {bool? isNew}) =>
     Comic(
@@ -15,7 +19,7 @@ Comic _comic(String id, String marker, String updateTime, {bool? isNew}) =>
       null,
       const [],
       '',
-      'list-test',
+      _listSourceKey,
       null,
       null,
       favoriteUpdate: FavoriteUpdateHint(
@@ -32,7 +36,7 @@ FavoriteData _data({
   Future<Res<List<Comic>>> Function(String?, [String?])? nextLoader,
   String markerScheme = 'list-v1',
 }) => FavoriteData(
-  key: 'list-test',
+  key: _listSourceKey,
   title: 'List test',
   multiFolder: false,
   loadComic: pageLoader,
@@ -82,7 +86,7 @@ ComicSource _listSource(FavoriteData data) => ComicSource(
 
 ComicSource _detailSource() => ComicSource(
   'Detail test',
-  'detail-test',
+  _detailSourceKey,
   null,
   null,
   null,
@@ -97,7 +101,7 @@ ComicSource _detailSource() => ComicSource(
       'cover': '',
       'tags': <String, List<String>>{},
       'chapters': <String, String>{'1': 'Chapter 1'},
-      'sourceKey': 'detail-test',
+      'sourceKey': _detailSourceKey,
       'comicId': id,
     }),
   ),
@@ -129,7 +133,7 @@ ComicSource _detailSource() => ComicSource(
 Comic _snapshotComic(
   String id,
   String marker, {
-  String sourceKey = 'list-test',
+  String sourceKey = _listSourceKey,
   bool? isNew,
   String? updateTime = '2026-08-01T00:00:00Z',
   bool? fullIsNew = false,
@@ -165,10 +169,16 @@ void main() {
   late Directory directory;
   late NetworkFavoriteCacheManager manager;
   late NetworkFavoriteFolderRef folder;
+  late Object? previousEnabledSources;
 
   setUp(() async {
-    ComicSourceManager().remove('list-test');
-    ComicSourceManager().remove('detail-test');
+    previousEnabledSources = appdata.settings['enabledSources'];
+    appdata.settings['enabledSources'] = <String>[
+      _listSourceKey,
+      _detailSourceKey,
+    ];
+    ComicSourceManager().remove(_listSourceKey);
+    ComicSourceManager().remove(_detailSourceKey);
     directory = await Directory.systemTemp.createTemp('venera-list-update-');
     manager = NetworkFavoriteCacheManager();
     await manager.init(
@@ -176,17 +186,18 @@ void main() {
       migrateLegacy: false,
     );
     folder = const NetworkFavoriteFolderRef(
-      sourceKey: 'list-test',
+      sourceKey: _listSourceKey,
       folderId: '',
       title: 'List test',
     );
     addTearDown(() {
-      ComicSourceManager().remove('list-test');
-      ComicSourceManager().remove('detail-test');
+      ComicSourceManager().remove(_listSourceKey);
+      ComicSourceManager().remove(_detailSourceKey);
     });
   });
 
   tearDown(() async {
+    appdata.settings['enabledSources'] = previousEnabledSources;
     manager.close();
     await directory.delete(recursive: true);
   });
@@ -207,7 +218,7 @@ void main() {
               null,
               [],
               '',
-              'list-test',
+              _listSourceKey,
               null,
               null,
               favoriteUpdate: FavoriteUpdateHint(
@@ -224,7 +235,7 @@ void main() {
               null,
               [],
               '',
-              'list-test',
+              _listSourceKey,
               null,
               null,
               favoriteUpdate: FavoriteUpdateHint(
@@ -245,7 +256,7 @@ void main() {
       expect(manager.getFullCacheStatus(folder).completedAt, isNotNull);
       expect(manager.getFavoriteUpdateScanState(folder)!.markerScheme, isNull);
       expect(
-        manager.getComicUpdateInfo('list-test', 'c1', '')!.updateMarker,
+        manager.getComicUpdateInfo(_listSourceKey, 'c1', '')!.updateMarker,
         'm1',
       );
       expect(
@@ -268,17 +279,17 @@ void main() {
       );
       expect(changed.updatedComicCount, 1);
       expect(
-        manager.getComicUpdateInfo('list-test', 'c1', '')!.hasNewUpdate,
+        manager.getComicUpdateInfo(_listSourceKey, 'c1', '')!.hasNewUpdate,
         isTrue,
       );
       expect(
         manager
-            .getComicUpdateInfo('list-test', 'c1', '')!
+            .getComicUpdateInfo(_listSourceKey, 'c1', '')!
             .sourceUpdateMetadata?['isNew'],
         isNull,
       );
 
-      manager.markReadInAllFolders('list-test', 'c1');
+      manager.markReadInAllFolders(_listSourceKey, 'c1');
       final repeated = manager.applyCompleteFavoriteUpdateSnapshot(
         data,
         folder,
@@ -291,7 +302,7 @@ void main() {
       );
       expect(repeated.updatedComicCount, 0);
       expect(
-        manager.getComicUpdateInfo('list-test', 'c1', '')!.hasNewUpdate,
+        manager.getComicUpdateInfo(_listSourceKey, 'c1', '')!.hasNewUpdate,
         isTrue,
       );
     },
@@ -319,7 +330,7 @@ void main() {
     );
 
     expect(result.updatedComicCount, 0);
-    final info = manager.getComicUpdateInfo('list-test', 'c1', '');
+    final info = manager.getComicUpdateInfo(_listSourceKey, 'c1', '');
     expect(info, isNotNull);
     expect(info!.updateTime, isNull);
     expect(info.sourceActivityAt, isNull);
@@ -352,7 +363,7 @@ void main() {
       ),
       completedAt: completedAt.add(const Duration(days: 1)),
     );
-    final same = manager.getComicUpdateInfo('list-test', 'c1', '')!;
+    final same = manager.getComicUpdateInfo(_listSourceKey, 'c1', '')!;
     expect(same.updateTime, isNull);
     expect(same.sourceActivityAt, isNotNull);
     expect(same.hasNewUpdate, isFalse);
@@ -366,7 +377,7 @@ void main() {
       completedAt: completedAt.add(const Duration(days: 2)),
     );
     expect(changed.updatedComicCount, 1);
-    final changedInfo = manager.getComicUpdateInfo('list-test', 'c1', '')!;
+    final changedInfo = manager.getComicUpdateInfo(_listSourceKey, 'c1', '')!;
     expect(changedInfo.updateTime, isNull);
     expect(changedInfo.sourceActivityAt, isNotNull);
     expect(changedInfo.hasNewUpdate, isTrue);
@@ -398,7 +409,7 @@ void main() {
     );
 
     expect(migrated.updatedComicCount, 1);
-    final info = manager.getComicUpdateInfo('list-test', 'c1', '')!;
+    final info = manager.getComicUpdateInfo(_listSourceKey, 'c1', '')!;
     expect(info.updateTime, isNull);
     expect(info.sourceActivityAt, isNotNull);
     expect(info.hasNewUpdate, isFalse);
@@ -426,15 +437,15 @@ void main() {
       folder,
       attemptedAt: DateTime(2026, 8, 24),
     );
-    final listEpoch = manager.captureFavoriteSessionEpoch('list-test');
-    manager.invalidateFavoriteSessionForSource('list-test');
-    expect(manager.captureFavoriteSessionEpoch('list-test'), listEpoch + 1);
+    final listEpoch = manager.captureFavoriteSessionEpoch(_listSourceKey);
+    manager.invalidateFavoriteSessionForSource(_listSourceKey);
+    expect(manager.captureFavoriteSessionEpoch(_listSourceKey), listEpoch + 1);
     expect(manager.getFavoriteUpdateScanState(folder), isNull);
 
     final detailSource = _detailSource();
     ComicSourceManager().add(detailSource);
     const detailFolder = NetworkFavoriteFolderRef(
-      sourceKey: 'detail-test',
+      sourceKey: _detailSourceKey,
       folderId: 'remote',
     );
     manager.recordFavoriteUpdateScanAttempt(
@@ -442,9 +453,9 @@ void main() {
       attemptedAt: DateTime(2026, 8, 24),
     );
     final detailState = manager.getFavoriteUpdateScanState(detailFolder);
-    final detailEpoch = manager.captureFavoriteSessionEpoch('detail-test');
-    manager.invalidateFavoriteSessionForSource('detail-test');
-    expect(manager.captureFavoriteSessionEpoch('detail-test'), detailEpoch);
+    final detailEpoch = manager.captureFavoriteSessionEpoch(_detailSourceKey);
+    manager.invalidateFavoriteSessionForSource(_detailSourceKey);
+    expect(manager.captureFavoriteSessionEpoch(_detailSourceKey), detailEpoch);
     expect(
       manager.getFavoriteUpdateScanState(detailFolder)!.lastAttemptAt,
       detailState!.lastAttemptAt,
@@ -489,7 +500,7 @@ void main() {
           return Res(_snapshot('must-not-load'));
         },
       );
-      ComicSourceManager().remove('list-test');
+      ComicSourceManager().remove(_listSourceKey);
       ComicSourceManager().add(_listSource(stableData));
       manager.applyCompleteFavoriteUpdateSnapshot(
         stableData,
@@ -535,7 +546,7 @@ void main() {
           return Res(_snapshot('missing-complete'));
         },
       );
-      ComicSourceManager().remove('list-test');
+      ComicSourceManager().remove(_listSourceKey);
       ComicSourceManager().add(_listSource(missingData));
       await scanFollowUpdates(
         [folder],
@@ -568,7 +579,7 @@ void main() {
         _snapshot('m1'),
         completedAt: completedAt,
       );
-      ComicSourceManager().remove('list-test');
+      ComicSourceManager().remove(_listSourceKey);
       ComicSourceManager().add(_listSource(_data(markerScheme: 'list-v2')));
       expect(
         hasPendingFollowUpdateWork(
@@ -590,12 +601,12 @@ void main() {
       final detailSource = _detailSource();
       ComicSourceManager().add(detailSource);
       const detailFolder = NetworkFavoriteFolderRef(
-        sourceKey: 'detail-test',
+        sourceKey: _detailSourceKey,
         folderId: 'remote',
         title: 'Detail test',
       );
       final detailData = FavoriteData(
-        key: 'detail-test',
+        key: _detailSourceKey,
         title: 'Detail test',
         multiFolder: true,
         loadComic: (page, [folder]) async => Res([
@@ -606,7 +617,7 @@ void main() {
             null,
             const [],
             '',
-            'detail-test',
+            _detailSourceKey,
             null,
             null,
           ),
@@ -616,7 +627,7 @@ void main() {
       await manager.refreshFolders(detailData);
       await manager.refreshPage(detailData, detailFolder, 1);
       manager.recordComicCheckEverywhere(
-        'detail-test',
+        _detailSourceKey,
         'c1',
         completedAt: completedAt,
         updateMarker: 'detail-v1|m1',
@@ -660,7 +671,7 @@ void main() {
           return response.future;
         },
       );
-      ComicSourceManager().remove('list-test');
+      ComicSourceManager().remove(_listSourceKey);
       ComicSourceManager().add(_listSource(deferredData));
 
       final scan = scanFollowUpdates(
@@ -671,16 +682,16 @@ void main() {
         delay: (_) async {},
       ).toList();
       await started.future.timeout(const Duration(seconds: 5));
-      final before = manager.captureFavoriteSessionEpoch('list-test');
-      manager.invalidateFavoriteSessionForSource('list-test');
-      expect(manager.captureFavoriteSessionEpoch('list-test'), before + 1);
+      final before = manager.captureFavoriteSessionEpoch(_listSourceKey);
+      manager.invalidateFavoriteSessionForSource(_listSourceKey);
+      expect(manager.captureFavoriteSessionEpoch(_listSourceKey), before + 1);
       response.complete(Res(_snapshot('new-marker')));
       await scan.timeout(const Duration(seconds: 5));
 
       expect(manager.getFavoriteUpdateScanState(folder), isNull);
       expect(manager.isFullCacheRunning(folder), isFalse);
       expect(manager.getCachedPage(folder, 1)!.comics.single.id, 'c1');
-      final staleInfo = manager.getComicUpdateInfo('list-test', 'c1', '');
+      final staleInfo = manager.getComicUpdateInfo(_listSourceKey, 'c1', '');
       expect(staleInfo!.updateMarker, isNull);
       expect(staleInfo.hasNewUpdate, isFalse);
       expect(staleInfo.sourceUpdateMetadata, isNull);
@@ -692,7 +703,7 @@ void main() {
           return Res(_snapshot('fresh-marker'));
         },
       );
-      ComicSourceManager().remove('list-test');
+      ComicSourceManager().remove(_listSourceKey);
       ComicSourceManager().add(_listSource(freshData));
       await scanFollowUpdates(
         [folder],
@@ -707,7 +718,7 @@ void main() {
         isNotNull,
       );
       expect(
-        manager.getComicUpdateInfo('list-test', 'c1', '')!.updateMarker,
+        manager.getComicUpdateInfo(_listSourceKey, 'c1', '')!.updateMarker,
         'fresh-marker',
       );
     },
@@ -733,7 +744,7 @@ void main() {
           return response.future;
         },
       );
-      ComicSourceManager().remove('list-test');
+      ComicSourceManager().remove(_listSourceKey);
       ComicSourceManager().add(_listSource(deferredData));
 
       final scan = scanFollowUpdates(
@@ -746,10 +757,10 @@ void main() {
       await started.future.timeout(const Duration(seconds: 5));
       expect(manager.isFullCacheRunning(folder), isTrue);
 
-      final before = manager.captureFavoriteSessionEpoch('list-test');
+      final before = manager.captureFavoriteSessionEpoch(_listSourceKey);
       manager.clearAllCache();
-      expect(manager.captureFavoriteSessionEpoch('list-test'), before + 1);
-      expect(manager.getCachedFolders('list-test'), isEmpty);
+      expect(manager.captureFavoriteSessionEpoch(_listSourceKey), before + 1);
+      expect(manager.getCachedFolders(_listSourceKey), isEmpty);
       expect(manager.getCachedPage(folder, 1), isNull);
       expect(manager.countCachedComics(folder), 0);
       expect(manager.getFavoriteUpdateScanState(folder), isNull);
@@ -761,7 +772,7 @@ void main() {
       expect(events.every((event) => event.total == 1), isTrue);
       expect(events.every((event) => event.current == 0), isTrue);
       expect(events.every((event) => event.errors == 0), isTrue);
-      expect(manager.getCachedFolders('list-test'), isEmpty);
+      expect(manager.getCachedFolders(_listSourceKey), isEmpty);
       expect(manager.getCachedPage(folder, 1), isNull);
       expect(manager.countCachedComics(folder), 0);
       expect(manager.getFavoriteUpdateScanState(folder), isNull);
@@ -792,7 +803,7 @@ void main() {
     expect(events.single.isCanceled, isTrue);
     expect(events.single.errorMessage, isNull);
     expect(manager.getFavoriteUpdateScanState(folder), isNull);
-    expect(manager.getCachedFolders('list-test'), isEmpty);
+    expect(manager.getCachedFolders(_listSourceKey), isEmpty);
     expect(manager.getCachedPage(folder, 1), isNull);
     expect(manager.countCachedComics(folder), 0);
     expect(manager.isFullCacheRunning(folder), isFalse);
@@ -816,11 +827,11 @@ void main() {
         return pageResponse.future;
       },
     );
-    ComicSourceManager().remove('list-test');
+    ComicSourceManager().remove(_listSourceKey);
     ComicSourceManager().add(_listSource(deferredPageData));
     final pageRefresh = manager.refreshPage(deferredPageData, folder, 1);
     await pageStarted.future.timeout(const Duration(seconds: 5));
-    manager.invalidateFavoriteSessionForSource('list-test');
+    manager.invalidateFavoriteSessionForSource(_listSourceKey);
     pageResponse.complete(
       Res([_snapshotComic('c1', 'stale-page')], subData: 1),
     );
@@ -836,7 +847,7 @@ void main() {
         return cursorResponse.future;
       },
     );
-    ComicSourceManager().remove('list-test');
+    ComicSourceManager().remove(_listSourceKey);
     ComicSourceManager().add(_listSource(deferredCursorData));
     final cursorRefresh = manager.refreshNextPage(
       deferredCursorData,
@@ -844,7 +855,7 @@ void main() {
       null,
     );
     await cursorStarted.future.timeout(const Duration(seconds: 5));
-    manager.invalidateFavoriteSessionForSource('list-test');
+    manager.invalidateFavoriteSessionForSource(_listSourceKey);
     cursorResponse.complete(
       Res([_snapshotComic('c2', 'stale-cursor')], subData: null),
     );
@@ -900,15 +911,15 @@ void main() {
           return response.future;
         },
       );
-      ComicSourceManager().remove('list-test');
+      ComicSourceManager().remove(_listSourceKey);
       ComicSourceManager().add(_listSource(deferredData));
       final recheck = recheckFavoriteComicDetailed(
-        'list-test',
+        _listSourceKey,
         'c1',
         cache: manager,
       );
       await started.future.timeout(const Duration(seconds: 5));
-      manager.invalidateFavoriteSessionForSource('list-test');
+      manager.invalidateFavoriteSessionForSource(_listSourceKey);
       response.complete(Res(_snapshot('stale-recheck')));
       final result = await recheck.timeout(const Duration(seconds: 5));
 

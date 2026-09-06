@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
+import 'package:venera/foundation/catalog/source_preferences.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/pages/ranking_page.dart';
 import 'package:venera/pages/settings/settings_page.dart';
@@ -30,6 +31,7 @@ class _CategoriesPageState extends State<CategoriesPage>
       appdata.settings["categories"],
     ).whereType<String>().toList();
     var allCategories = ComicSource.all()
+        .where((source) => isSourceEnabled(source.key))
         .map((e) => e.categoryData?.key)
         .where((element) => element != null)
         .map((e) => e!)
@@ -52,6 +54,7 @@ class _CategoriesPageState extends State<CategoriesPage>
       appdata.settings["categories"],
     ).whereType<String>().toList();
     var allCategories = ComicSource.all()
+        .where((source) => isSourceEnabled(source.key))
         .map((e) => e.categoryData?.key)
         .where((element) => element != null)
         .map((e) => e!)
@@ -148,7 +151,9 @@ class _CategoryPage extends StatelessWidget {
   CategoryData get data => getCategoryDataWithKey(category);
 
   String findComicSourceKey() {
-    for (var source in ComicSource.all()) {
+    for (var source in ComicSource.all().where(
+      (source) => isSourceEnabled(source.key),
+    )) {
       if (source.categoryData?.key == category) {
         return source.key;
       }

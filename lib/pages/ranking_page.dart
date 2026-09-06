@@ -1,6 +1,7 @@
 import "package:flutter/material.dart";
 import "package:venera/components/components.dart";
 import "package:venera/foundation/app.dart";
+import "package:venera/foundation/catalog/source_preferences.dart";
 import "package:venera/foundation/comic_source/comic_source.dart";
 import "package:venera/utils/translations.dart";
 
@@ -19,7 +20,9 @@ class _RankingPageState extends State<RankingPage> {
   late String optionValue;
 
   void findData() {
-    for (final source in ComicSource.all()) {
+    for (final source in ComicSource.all().where(
+      (source) => isSourceEnabled(source.key),
+    )) {
       if (source.categoryData?.key == widget.categoryKey) {
         data = source.categoryComicsData!;
         options = data.rankingData!.options;
@@ -41,14 +44,13 @@ class _RankingPageState extends State<RankingPage> {
     var topPadding = context.padding.top + 56;
     return Scaffold(
       extendBodyBehindAppBar: true,
-      appBar: Appbar(
-        title: Text("Ranking".tl),
-      ),
+      appBar: Appbar(title: Text("Ranking".tl)),
       body: ComicList(
         key: Key(optionValue),
         errorLeading: SizedBox(height: topPadding),
-        leadingSliver:
-            buildOptions().sliverPadding(EdgeInsets.only(top: topPadding)),
+        leadingSliver: buildOptions().sliverPadding(
+          EdgeInsets.only(top: topPadding),
+        ),
         loadPage: data.rankingData!.load == null
             ? null
             : (i) => data.rankingData!.load!(optionValue, i),
@@ -74,14 +76,16 @@ class _RankingPageState extends State<RankingPage> {
 
   Widget buildOptions() {
     List<Widget> children = [];
-    children.add(Wrap(
-      spacing: 8,
-      runSpacing: 8,
-      children: [
-        for (var option in options.entries)
-          buildOptionItem(option.value.tl, option.key, context)
-      ],
-    ));
+    children.add(
+      Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          for (var option in options.entries)
+            buildOptionItem(option.value.tl, option.key, context),
+        ],
+      ),
+    );
     return SliverToBoxAdapter(
       child: Column(
         mainAxisSize: MainAxisSize.min,

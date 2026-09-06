@@ -86,7 +86,6 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
     final result = await recheckFavoriteComicDetailed(
       widget.sourceKey,
       widget.comicId,
-      generationController: App.cloudTracking.generations,
     );
     if (!mounted) return;
     setState(() => _rechecking = false);
@@ -332,48 +331,16 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
   }
 
   List<Widget> _buildOwnershipSection() {
-    if (!App.isInitialized) {
-      return [
-        ListTile(title: Text("Runtime Ownership".tl)),
-        _infoRow(
-          "Cloud",
-          _yesNo(appdata.settings['cloudTrackingEnabled'] == true),
-        ),
-        _infoRow("Artifact", "Not initialized".tl),
-      ];
-    }
-    final registry = App.cloudTracking.registry;
-    final artifacts = registry?.artifacts
-        .where((item) => item.sourceKey == widget.sourceKey)
-        .toList(growable: false);
-    if (artifacts == null || artifacts.isEmpty) {
-      return [
-        ListTile(title: Text("Runtime Ownership".tl)),
-        _infoRow("Cloud", _yesNo(App.cloudTracking.cloudEnabled)),
-        _infoRow("Artifact", "Not installed".tl),
-      ];
-    }
     return [
-      ListTile(title: Text("Runtime Ownership".tl)),
-      _infoRow("Cloud", _yesNo(App.cloudTracking.cloudEnabled)),
-      for (final artifact in artifacts) ...[
-        _infoRow("Artifact", '${artifact.sourceKey} · ${artifact.fileName}'),
-        _infoRow("Active Revision", artifact.revision ?? "Local/custom".tl),
-        _infoRow(
-          "Loaded Revision",
-          App.cloudTracking.generations.current(artifact.identity)?.revision ??
-              '-',
-        ),
-        _infoRow(
-          "Scanner Strategy",
-          App.cloudTracking.modes.strategyFor(artifact.identity).name,
-        ),
-        _infoRow("Activation Blocked", _yesNo(artifact.activationBlocked)),
-        _infoRow(
-          "Failure",
-          App.cloudTracking.modes.errorFor(artifact.identity) ?? '-',
-        ),
-      ],
+      ListTile(title: Text("Catalog Runtime".tl)),
+      _infoRow("Source", widget.sourceKey),
+      _infoRow(
+        "Server",
+        (appdata.settings['serverUrl'] as String?)?.isNotEmpty == true
+            ? appdata.settings['serverUrl'] as String
+            : "Not configured".tl,
+      ),
+      _infoRow("Loaded", _yesNo(ComicSource.find(widget.sourceKey) != null)),
     ];
   }
 

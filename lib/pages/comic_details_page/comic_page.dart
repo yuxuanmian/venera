@@ -252,11 +252,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       widget.id,
     );
     context.showMessage(message: 'Rechecking'.tl);
-    final succeeded = await recheckFavoriteComic(
-      widget.sourceKey,
-      widget.id,
-      generationController: App.cloudTracking.generations,
-    );
+    final succeeded = await recheckFavoriteComic(widget.sourceKey, widget.id);
     if (!mounted) return;
     if (succeeded) {
       retry();

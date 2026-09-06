@@ -51,11 +51,11 @@ class ComicSourceParseException implements Exception {
 }
 
 class ComicSourceParser {
-  SourceRuntimeExecutionContext? _executionContext;
+  ManagedSourceContext? _executionContext;
   dynamic _runCode(
     String code, [
     String? name,
-    SourceRuntimeExecutionContext? context,
+    ManagedSourceContext? context,
   ]) => JsEngine().runCode(code, name, context ?? _executionContext);
 
   /// comic source key
@@ -65,45 +65,31 @@ class ComicSourceParser {
   String? _name;
   static int _validationCounter = 0;
 
-  Future<ComicSource> createAndParse(
+  /// Managed Catalog entry point. It validates the declared key before the
+  /// result can be handed to a Runtime assembly and never schedules site
+  /// initialization while the context is still preparing.
+  Future<ComicSource> parseManaged(
     String js,
-    String fileName, {
-    FutureOr<void> Function()? beforeWrite,
+    String filePath, {
+    required String expectedKey,
+    required ManagedSourceContext context,
   }) async {
-    if (sourceRuntimePolicy.registry != null ||
-        sourceRuntimePolicy.cloudEnabled) {
-      sourceRuntimePolicy.requireCustomMutationAllowed();
-      if (sourceRuntimePolicy.registry != null) {
-        throw const SourceMutationDenied(
-          'Use SourceMutationService for custom source installation.',
-        );
-      }
+    context.requirePreparing();
+    final source = await parse(
+      js,
+      filePath,
+      register: false,
+      allowExistingKey: true,
+      loadData: true,
+      scheduleInit: true,
+      runtimeContext: context,
+    );
+    if (source.key != expectedKey) {
+      throw ComicSourceParseException(
+        'Catalog entry key mismatch: expected $expectedKey, got ${source.key}',
+      );
     }
-    if (!fileName.endsWith("js")) {
-      fileName = "$fileName.js";
-    }
-    var file = File(FilePath.join(App.dataPath, "comic_source", fileName));
-    if (file.existsSync()) {
-      int i = 0;
-      while (file.existsSync()) {
-        file = File(
-          FilePath.join(
-            App.dataPath,
-            "comic_source",
-            "${fileName.split('.').first}($i).js",
-          ),
-        );
-        i++;
-      }
-    }
-    await beforeWrite?.call();
-    await file.writeAsString(js);
-    try {
-      return await parse(js, file.path);
-    } catch (e) {
-      await file.delete();
-      rethrow;
-    }
+    return source;
   }
 
   Future<ComicSource> parse(
@@ -113,66 +99,10 @@ class ComicSourceParser {
     bool allowExistingKey = false,
     bool loadData = true,
     bool scheduleInit = true,
-    SourceRuntimePermit? runtimePermit,
+    ManagedSourceContext? runtimeContext,
   }) async {
     js = js.replaceAll("\r\n", "\n");
-    if (!sourceRuntimePolicy.admissionReady &&
-        !sourceRuntimePolicy.cloudEnabled) {
-      throw const SourceRuntimeDenied('Source runtime admission is not ready.');
-    }
-    if (sourceRuntimePolicy.registry != null ||
-        sourceRuntimePolicy.cloudEnabled) {
-      final candidatePermit =
-          runtimePermit ?? sourceRuntimePolicy.permitForPath(filePath);
-      sourceRuntimePolicy.requireLoadPath(filePath, permit: candidatePermit);
-      if (candidatePermit != null &&
-          !sourceRuntimePolicy.validateCandidateSource(
-            candidatePermit,
-            filePath,
-            js,
-          )) {
-        throw const SourceRuntimeDenied(
-          'Candidate source bytes do not match the runtime permit.',
-        );
-      }
-      // Keep the same exact permit at each executable boundary.  A mode
-      // request revokes it while an awaited validation/reload is in flight.
-      void requireCandidateAdmission() {
-        sourceRuntimePolicy.requireLoadPath(filePath, permit: candidatePermit);
-      }
-
-      requireCandidateAdmission();
-      final executionContext =
-          sourceRuntimePolicy.executionContextForPath(
-            filePath,
-            permit: candidatePermit,
-          ) ??
-          sourceRuntimePolicy.executionContextForUnmanaged(filePath, js);
-      if (candidatePermit == null && !executionContext.unmanaged) {
-        sourceRuntimePolicy.requireActiveSourceBytes(executionContext, js);
-      }
-      try {
-        return await sourceRuntimePolicy.runWithExecutionContext(
-          executionContext,
-          () => _parseWithAdmission(
-            js,
-            filePath,
-            register: register,
-            allowExistingKey: allowExistingKey,
-            loadData: loadData,
-            scheduleInit: scheduleInit,
-            requireCandidateAdmission: requireCandidateAdmission,
-            executionContext: executionContext,
-          ),
-        );
-      } catch (error, stack) {
-        // A failed parse must never leave an apparently active context behind.
-        // Revoke only the context created for this parse; another exact source
-        // may be using the same source key in a separate operation.
-        executionContext.revoke();
-        Error.throwWithStackTrace(error, stack);
-      }
-    }
+    managedRuntimeBridge.require(runtimeContext);
     return _parseWithAdmission(
       js,
       filePath,
@@ -180,6 +110,7 @@ class ComicSourceParser {
       allowExistingKey: allowExistingKey,
       loadData: loadData,
       scheduleInit: scheduleInit,
+      executionContext: runtimeContext,
     );
   }
 
@@ -191,7 +122,7 @@ class ComicSourceParser {
     required bool loadData,
     required bool scheduleInit,
     void Function()? requireCandidateAdmission,
-    SourceRuntimeExecutionContext? executionContext,
+    ManagedSourceContext? executionContext,
   }) async {
     requireCandidateAdmission?.call();
     _executionContext = executionContext;
@@ -217,9 +148,6 @@ class ComicSourceParser {
         _runCode("this['temp'].key") ??
         (throw ComicSourceParseException('key is required'));
     _sourceKey = key;
-    if (executionContext?.unmanaged == true) {
-      executionContext!.bindUnmanagedIdentity(key);
-    }
     var version =
         _runCode("this['temp'].version") ??
         (throw ComicSourceParseException('version is required'));
@@ -292,30 +220,19 @@ class ComicSourceParser {
         _getValue("comic.enableTagsTranslate") ?? false,
         _parseStarRatingFunc(),
         _parseArchiveDownloader(),
+        runtimeContext: executionContext,
       );
 
       if (loadData) {
-        await source.loadData();
-      }
-
-      // Only publish an active runtime after the complete Dart model and its
-      // persisted data have been read successfully.  Before this point the
-      // context is still valid for this parse's JS reads, but it is not an
-      // admitted source that a caller may use or reload.
-      if (executionContext != null) {
-        sourceRuntimePolicy.registerRuntimeContext(
-          _key!,
-          executionContext,
-          active: register,
-        );
+        await source.loadData(context: executionContext);
       }
 
       if (scheduleInit && _checkExists("init")) {
-        Future.delayed(const Duration(milliseconds: 50), () {
+        void runInit() {
           try {
             requireCandidateAdmission?.call();
             if (executionContext != null) {
-              sourceRuntimePolicy.requireExecutionContext(executionContext);
+              managedRuntimeBridge.require(executionContext);
             }
           } catch (_) {
             return;
@@ -328,20 +245,23 @@ class ComicSourceParser {
             );
           }
 
-          if (executionContext == null) {
-            run();
-          } else {
-            sourceRuntimePolicy.runWithExecutionContext(executionContext, run);
-          }
-        });
+          run();
+        }
+
+        if (executionContext == null) {
+          Future.delayed(const Duration(milliseconds: 50), runInit);
+        } else {
+          executionContext.addAfterPublish(() async {
+            await Future<void>.delayed(const Duration(milliseconds: 50));
+            managedRuntimeBridge.run(executionContext, runInit);
+          });
+        }
       }
 
       return source;
     } finally {
       if (!register) {
-        if (executionContext != null) {
-          sourceRuntimePolicy.unregisterRuntimeContext(runtimeKey);
-        } else {
+        if (executionContext == null) {
           _runCode("delete ComicSource.sources.$runtimeKey");
         }
       }
@@ -388,7 +308,7 @@ class ComicSourceParser {
         """);
           var source = ComicSource.find(_sourceKey!)!;
           source.data["account"] = <String>[account, pwd];
-          source.saveData();
+          source.saveData(runtimeContext: _executionContext);
           return const Res(true);
         } catch (e, s) {
           Log.error("Network", "$e\n$s");

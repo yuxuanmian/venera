@@ -18,6 +18,7 @@ void main() {
   late Directory dataDirectory;
   late List<String> loadedQueries;
   late List<String> recordedHistory;
+  late Object? previousEnabledSources;
 
   const sourceKey = 'nhentai';
 
@@ -27,6 +28,8 @@ void main() {
     loadedQueries = <String>[];
     recordedHistory = <String>[];
     App.dataPath = dataDirectory.path;
+    previousEnabledSources = appdata.settings['enabledSources'];
+    appdata.settings['enabledSources'] = [sourceKey];
     appdata.settings['searchSources'] = [sourceKey];
     appdata.settings['defaultSearchTarget'] = sourceKey;
     appdata.settings['autoAddLanguageFilter'] = 'english';
@@ -81,6 +84,7 @@ void main() {
 
   tearDownAll(() async {
     ComicSourceManager().remove(sourceKey);
+    appdata.settings['enabledSources'] = previousEnabledSources;
     await dataDirectory.delete(recursive: true);
   });
 

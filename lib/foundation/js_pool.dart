@@ -2,9 +2,9 @@ import 'dart:async';
 import 'dart:isolate';
 import 'package:flutter/services.dart';
 import 'package:flutter_qjs/flutter_qjs.dart';
+import 'package:venera/foundation/catalog/runtime_context.dart';
 import 'package:venera/foundation/js_engine.dart';
 import 'package:venera/foundation/log.dart';
-import 'package:venera/foundation/tracking/source_runtime_policy.dart';
 
 class JSPool {
   static final int _maxInstances = 4;
@@ -31,17 +31,17 @@ class JSPool {
   Future<dynamic> execute(
     String jsFunction,
     List<dynamic> args, {
-    SourceRuntimeExecutionContext? context,
+    ManagedSourceContext? context,
   }) async {
     if (context != null) {
-      context.policy.requireExecutionContext(context);
+      managedRuntimeBridge.require(context);
       final buffer = await rootBundle.load('assets/init.js');
-      context.policy.requireExecutionContext(context);
+      managedRuntimeBridge.require(context);
       final worker = IsolateJsEngine(buffer.buffer.asUint8List());
       context.onRevoke(worker.close);
       try {
         final result = await worker.execute(jsFunction, args);
-        context.policy.requireExecutionContext(context);
+        managedRuntimeBridge.require(context);
         return result;
       } finally {
         worker.close();
@@ -153,7 +153,7 @@ class IsolateJsEngine {
     }
     while (_sendPort == null) {
       if (_isClosed) {
-        throw const SourceRuntimeDenied('Compute execution was revoked.');
+        throw const CatalogRuntimeDenied('Compute execution was revoked.');
       }
       await Future.delayed(const Duration(milliseconds: 10));
     }
@@ -170,7 +170,7 @@ class IsolateJsEngine {
       _isClosed = true;
       for (final task in _tasks.values) {
         task.completeError(
-          const SourceRuntimeDenied('Compute execution was revoked.'),
+          const CatalogRuntimeDenied('Compute execution was revoked.'),
         );
       }
       _tasks.clear();

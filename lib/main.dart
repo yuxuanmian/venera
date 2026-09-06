@@ -6,12 +6,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:venera/foundation/log.dart';
-import 'package:venera/pages/auth_page.dart';
 import 'package:venera/pages/follow_updates_page.dart';
 import 'package:venera/pages/main_page.dart';
+import 'package:venera/pages/auth_page.dart';
 import 'package:venera/utils/io.dart';
 import 'package:window_manager/window_manager.dart';
 import 'components/components.dart';
+import 'components/catalog_gate.dart';
 import 'components/window_frame.dart';
 import 'foundation/app.dart';
 import 'foundation/appdata.dart';
@@ -28,7 +29,7 @@ void main(List<String> args) {
     runZonedGuarded(
       () async {
         WidgetsFlutterBinding.ensureInitialized();
-        await init();
+        await initBase();
         runApp(const MyApp());
         if (App.isDesktop) {
           await windowManager.ensureInitialized();
@@ -74,7 +75,6 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     App.registerForceRebuild(forceRebuild);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     WidgetsBinding.instance.addObserver(this);
-    checkUpdates();
     super.initState();
   }
 
@@ -129,7 +129,6 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     FollowUpdatesService.disposeChecker();
-    App.disposeTracking();
     super.dispose();
   }
 
@@ -193,16 +192,16 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    Widget home;
-    if (appdata.settings['authorizationRequired']) {
-      home = AuthPage(
-        onSuccessfulAuth: () {
-          App.rootContext.toReplacement(() => const MainPage());
-        },
-      );
-    } else {
-      home = const MainPage();
+    Widget buildReady(BuildContext context) {
+      return const MainPage();
     }
+
+    final catalog = CatalogGate(
+      controller: catalogController!,
+      onReady: initRuntimeServices,
+      ready: buildReady,
+    );
+    final home = CatalogAuthorizationGate(child: catalog);
     return DynamicColorBuilder(
       builder: (light, dark) {
         Color? primary, secondary, tertiary;

@@ -2,6 +2,7 @@ import "package:flutter/material.dart";
 import 'package:shimmer_animation/shimmer_animation.dart';
 import "package:venera/components/components.dart";
 import "package:venera/foundation/app.dart";
+import "package:venera/foundation/catalog/source_preferences.dart";
 import "package:venera/foundation/appdata.dart";
 import "package:venera/foundation/comic_source/comic_source.dart";
 import "package:venera/pages/search_result_page.dart";
@@ -32,6 +33,7 @@ class _AggregatedSearchPageState extends State<AggregatedSearchPage> {
   @override
   void initState() {
     var all = ComicSource.all()
+        .where((source) => isSourceEnabled(source.key))
         .where((e) => e.searchPageData != null)
         .map((e) => e.key)
         .toList();

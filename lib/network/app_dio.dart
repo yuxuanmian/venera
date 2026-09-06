@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/services.dart';
@@ -13,6 +14,14 @@ import 'cloudflare.dart';
 import 'cookie_jar.dart';
 
 export 'package:dio/dio.dart';
+
+/// Emitted by [RHttpAdapter] before Dio buffers a Catalog response whose body
+/// has exceeded its contract limit.
+class ResponseSizeLimitException implements Exception {
+  const ResponseSizeLimitException(this.maxBytes);
+
+  final int maxBytes;
+}
 
 class MyLogInterceptor implements Interceptor {
   @override
@@ -172,7 +181,7 @@ class AppDio with DioMixin {
       options!.headers!.remove('prevent-parallel');
     }
     try {
-      return super.request<T>(
+      return await super.request<T>(
         path,
         data: data,
         queryParameters: queryParameters,
@@ -216,7 +225,10 @@ class RHttpAdapter implements HttpClientAdapter {
       cancelToken.cancel().catchError((_) {});
     });
 
-    final client = await SharedRhttpClientManager.instance.getClient();
+    final catalogNoRedirect = options.extra['catalogNoRedirect'] == true;
+    final client = catalogNoRedirect
+        ? await SharedRhttpClientManager.instance.getCatalogClient()
+        : await SharedRhttpClientManager.instance.getClient();
     final rhttp.HttpResponse res;
     try {
       res = await client.request(
@@ -257,11 +269,15 @@ class RHttpAdapter implements HttpClientAdapter {
       headers[key] ??= [];
       headers[key]!.add(entry.$2);
     }
+    final maxBytes = options.extra['catalogMaxBytes'];
+    final body = catalogNoRedirect && maxBytes is int
+        ? _limitCatalogBody(res.body, maxBytes, cancelToken)
+        : res.body;
     return ResponseBody(
-      res.body,
+      body,
       res.statusCode,
       statusMessage: _getStatusMessage(res.statusCode),
-      isRedirect: false,
+      isRedirect: res.statusCode >= 300 && res.statusCode < 400,
       headers: headers,
     );
   }
@@ -284,5 +300,21 @@ class RHttpAdapter implements HttpClientAdapter {
         "Invalid Status Code 429: Too many requests. Please try again later.",
       _ => "Invalid Status Code $statusCode",
     };
+  }
+}
+
+Stream<Uint8List> _limitCatalogBody(
+  Stream<Uint8List> source,
+  int maxBytes,
+  rhttp.CancelToken cancelToken,
+) async* {
+  var received = 0;
+  await for (final chunk in source) {
+    received += chunk.length;
+    if (received > maxBytes) {
+      unawaited(cancelToken.cancel().catchError((_) {}));
+      throw ResponseSizeLimitException(maxBytes);
+    }
+    yield chunk;
   }
 }

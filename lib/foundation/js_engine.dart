@@ -25,8 +25,8 @@ import 'package:pointycastle/block/modes/ofb.dart';
 import 'package:uuid/uuid.dart';
 import 'package:venera/components/js_ui.dart';
 import 'package:venera/foundation/app.dart';
+import 'package:venera/foundation/catalog/runtime_context.dart';
 import 'package:venera/foundation/js_pool.dart';
-import 'package:venera/foundation/tracking/source_runtime_policy.dart';
 import 'package:venera/network/app_dio.dart';
 import 'package:venera/network/cookie_jar.dart';
 import 'package:venera/network/proxy.dart';
@@ -55,17 +55,22 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
   JsEngine._create();
 
   FlutterQjs? _engine;
-  final _sourceDomains = <SourceRuntimeExecutionContext, _SourceJsDomain>{};
+  final _sourceDomains = <ManagedSourceContext, _SourceJsDomain>{};
   String? _initSource;
 
   bool _closed = true;
 
   Dio? _dio;
 
-  static void reset() {
+  static Future<void> reset() async {
+    final old = _cache;
+    if (old != null) {
+      old.dispose();
+    }
     _cache = null;
-    _cache?.dispose();
-    JsEngine().init();
+    final next = JsEngine._create();
+    _cache = next;
+    await next.init();
   }
 
   void resetDio() {
@@ -119,18 +124,25 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
       _initSource = utf8.decode(jsInit);
     } catch (e, s) {
       Log.error('JS Engine', 'JS Engine Init Error:\n$e\n$s');
+      // A half-initialized native engine is not a usable Catalog runtime.
+      // Let the caller reject this preparation instead of treating it as a
+      // successful empty engine.
+      _engine?.port.close();
+      _engine?.close();
+      _engine = null;
+      _closed = true;
+      rethrow;
     }
   }
 
   Object? _messageReceiver(
     dynamic message, [
-    SourceRuntimeExecutionContext? domainContext,
+    ManagedSourceContext? domainContext,
   ]) {
     try {
       // Context is supplied by the owning engine's host closure, never by a
       // field in an untrusted source message.
-      final executionContext =
-          domainContext ?? sourceRuntimePolicy.currentExecutionContext;
+      final executionContext = domainContext ?? managedRuntimeBridge.current;
       _requireExecutionContext(executionContext);
       if (message is Map<dynamic, dynamic>) {
         if (message["method"] == null) return null;
@@ -151,6 +163,10 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
           case 'load_data':
             String key = message["key"];
             String dataKey = message["data_key"];
+            if (executionContext?.phase == ManagedSourcePhase.preparing) {
+              _requireManagedSourceKey(executionContext, key);
+              return executionContext!.readData(dataKey);
+            }
             return ComicSource.find(key)?.data[dataKey];
           case 'save_data':
             String key = message["key"];
@@ -159,12 +175,20 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
               throw "setting is not allowed to be saved";
             }
             var data = message["data"];
+            if (executionContext?.phase == ManagedSourcePhase.preparing) {
+              _requireManagedSourceKey(executionContext, key);
+              return executionContext!.writeData(dataKey, data);
+            }
             var source = ComicSource.find(key)!;
             source.data[dataKey] = data;
             return source.saveData(runtimeContext: executionContext);
           case 'delete_data':
             String key = message["key"];
             String dataKey = message["data_key"];
+            if (executionContext?.phase == ManagedSourcePhase.preparing) {
+              _requireManagedSourceKey(executionContext, key);
+              return executionContext!.deleteData(dataKey);
+            }
             var source = ComicSource.find(key);
             source?.data.remove(dataKey);
             source?.saveData(runtimeContext: executionContext);
@@ -181,18 +205,46 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
               message["type"],
             );
           case "cookie":
-            return handleCookieCallback(Map.from(message));
+            return handleCookieCallback(
+              Map.from(message),
+              executionContext: executionContext,
+            );
           case "uuid":
             return const Uuid().v1();
           case "load_setting":
             String key = message["key"];
             String settingKey = message["setting_key"];
+            if (executionContext != null) {
+              _requireManagedSourceKey(executionContext, key);
+            }
+            if (executionContext?.phase == ManagedSourcePhase.preparing) {
+              final sourceData = executionContext!.readData('settings');
+              if (sourceData is Map && sourceData[settingKey] != null) {
+                return sourceData[settingKey];
+              }
+              // The source definition is in the isolated JS domain during
+              // preparation. Never consult a stale global Dart source with
+              // the same key; resolve the current domain's definition.
+              final value = _readManagedSourceSetting(
+                executionContext,
+                settingKey,
+              );
+              if (value != null) return value;
+              throw "Setting not found: $settingKey";
+            }
             var source = ComicSource.find(key)!;
             return source.data["settings"]?[settingKey] ??
-                source.settings?[settingKey]!['default'] ??
+                source.settings?[settingKey]?['default'] ??
                 (throw "Setting not found: $settingKey");
           case "isLogged":
-            return ComicSource.find(message["key"])!.isLogged;
+            final key = message["key"] as String;
+            if (executionContext != null) {
+              _requireManagedSourceKey(executionContext, key);
+            }
+            if (executionContext?.phase == ManagedSourcePhase.preparing) {
+              return executionContext!.readData('account') != null;
+            }
+            return ComicSource.find(key)!.isLogged;
           // temporary solution for [setTimeout] function
           // TODO: implement [setTimeout] in quickjs project
           case "delay":
@@ -201,14 +253,17 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
               Future.delayed(Duration(milliseconds: message["time"])),
             );
           case "UI":
+            _requirePublished(executionContext);
             return handleUIMessage(Map.from(message));
           case "getLocale":
             return "${App.locale.languageCode}_${App.locale.countryCode}";
           case "getPlatform":
             return Platform.operatingSystem;
           case "setClipboard":
+            _requirePublished(executionContext);
             return Clipboard.setData(ClipboardData(text: message["text"]));
           case "getClipboard":
+            _requirePublished(executionContext);
             return Future.sync(() async {
               var res = await Clipboard.getData(Clipboard.kTextPlain);
               return res?.text;
@@ -244,9 +299,10 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
 
   Future<Map<String, dynamic>> _http(
     Map<String, dynamic> req,
-    SourceRuntimeExecutionContext? executionContext,
+    ManagedSourceContext? executionContext,
   ) async {
     _requireExecutionContext(executionContext);
+    _requirePublished(executionContext);
     Response? response;
     String? error;
 
@@ -295,7 +351,7 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
         ),
       );
       _requireExecutionContext(executionContext);
-    } on SourceRuntimeDenied {
+    } on CatalogRuntimeDenied {
       rethrow;
     } catch (e) {
       error = e.toString();
@@ -323,12 +379,9 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
   dynamic runCode(
     String js, [
     String? name,
-    SourceRuntimeExecutionContext? runtimeContext,
+    ManagedSourceContext? runtimeContext,
   ]) {
-    final executionContext =
-        runtimeContext ??
-        sourceRuntimePolicy.currentExecutionContext ??
-        sourceRuntimePolicy.contextForCode(js);
+    final executionContext = runtimeContext ?? managedRuntimeBridge.current;
     _requireExecutionContext(executionContext);
     if (executionContext != null) {
       final domain = _sourceDomains.putIfAbsent(executionContext, () {
@@ -356,7 +409,7 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
   }
 
   Future<T> _guardFuture<T>(
-    SourceRuntimeExecutionContext? executionContext,
+    ManagedSourceContext? executionContext,
     Future<T> future,
   ) async {
     final result = await future;
@@ -364,8 +417,8 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
     return result;
   }
 
-  void _requireExecutionContext(SourceRuntimeExecutionContext? context) {
-    if (context != null) context.policy.requireExecutionContext(context);
+  void _requireExecutionContext(ManagedSourceContext? context) {
+    managedRuntimeBridge.require(context);
   }
 
   void dispose() {
@@ -393,7 +446,7 @@ class _SourceJsDomain {
       'sendMessage',
       (dynamic message) {
         requireCurrent();
-        final result = context.policy.runWithExecutionContext(
+        final result = managedRuntimeBridge.run(
           context,
           () => host(wrap(message)),
         );
@@ -406,7 +459,7 @@ class _SourceJsDomain {
     context.onRevoke(close);
   }
 
-  final SourceRuntimeExecutionContext context;
+  final ManagedSourceContext context;
   final engine = FlutterQjs();
   bool closed = false;
   final _pending = <Completer<dynamic>>{};
@@ -429,9 +482,11 @@ class _SourceJsDomain {
 
   void requireCurrent() {
     if (closed) {
-      throw const SourceRuntimeDenied('Source execution domain was destroyed.');
+      throw const CatalogRuntimeDenied(
+        'Source execution domain was destroyed.',
+      );
     }
-    context.policy.requireExecutionContext(context);
+    managedRuntimeBridge.require(context);
   }
 
   dynamic evaluate(String code, String? name) {
@@ -491,7 +546,7 @@ class _SourceJsDomain {
     engine.close();
     for (final pending in _pending) {
       pending.completeError(
-        const SourceRuntimeDenied('Source execution was revoked.'),
+        const CatalogRuntimeDenied('Source execution was revoked.'),
       );
     }
     _pending.clear();
@@ -507,9 +562,9 @@ class _AdmittedJsFunction extends JSInvokable {
   dynamic invoke(List args, [dynamic thisVal]) {
     domain.requireCurrent();
     if (released) {
-      throw const SourceRuntimeDenied('Source function was released.');
+      throw const CatalogRuntimeDenied('Source function was released.');
     }
-    return domain.context.policy.runWithExecutionContext(
+    return managedRuntimeBridge.run(
       domain.context,
       () => domain.wrap(
         function.invoke(
@@ -622,9 +677,13 @@ mixin class _JSEngineApi {
     return null;
   }
 
-  dynamic handleCookieCallback(Map<String, dynamic> data) {
+  dynamic handleCookieCallback(
+    Map<String, dynamic> data, {
+    ManagedSourceContext? executionContext,
+  }) {
     switch (data["function"]) {
       case "set":
+        _requirePublished(executionContext);
         _cookieJar!.saveFromResponse(
           Uri.parse(data["url"]),
           (data["cookies"] as List).map((e) {
@@ -654,9 +713,45 @@ mixin class _JSEngineApi {
             )
             .toList();
       case "delete":
+        _requirePublished(executionContext);
         clearCookies([data["url"]]);
         return null;
     }
+  }
+
+  void _requireManagedSourceKey(ManagedSourceContext? context, String key) {
+    if (context == null || context.sourceKey != key) {
+      throw const CatalogRuntimeDenied('Source context key mismatch.');
+    }
+  }
+
+  void _requirePublished(ManagedSourceContext? context) {
+    try {
+      context?.requirePublished();
+    } catch (error) {
+      context?.recordPreparationViolation(error);
+      rethrow;
+    }
+  }
+
+  dynamic _readManagedSourceSetting(
+    ManagedSourceContext context,
+    String settingKey,
+  ) {
+    final sourceKey = jsonEncode(context.sourceKey);
+    final name = jsonEncode(settingKey);
+    // This helper lives in the API mixin, while the engine method is owned by
+    // JsEngine itself. Resolve the current singleton explicitly so the mixin
+    // remains usable without pretending it declares the engine method.
+    return JsEngine().runCode(
+      """(() => {
+        const source = Object.values(ComicSource.sources)
+          .find((candidate) => candidate && candidate.key === $sourceKey);
+        return source?.settings?.[$name]?.default;
+      })()""",
+      '<managed-setting>',
+      context,
+    );
   }
 
   void clearCookies(List<String> domains) async {

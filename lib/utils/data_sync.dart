@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/components/window_frame.dart';
@@ -16,9 +18,6 @@ import 'io.dart';
 
 class DataSync with ChangeNotifier {
   DataSync._() {
-    if (isEnabled) {
-      downloadData();
-    }
     ComicSourceManager().addListener(onDataChanged);
     if (App.isDesktop) {
       Future.delayed(const Duration(seconds: 1), () {
@@ -29,7 +28,7 @@ class DataSync with ChangeNotifier {
   }
 
   void onDataChanged() {
-    if (isEnabled) {
+    if (_runtimeReady && isEnabled) {
       uploadData();
     }
   }
@@ -57,6 +56,20 @@ class DataSync with ChangeNotifier {
   }
 
   static DataSync? instance;
+  static bool _runtimeReady = false;
+
+  /// Starts automatic WebDAV behavior only after Catalog publication.
+  static void markRuntimeReady() {
+    _runtimeReady = true;
+    final sync = DataSync();
+    if (sync.isEnabled) unawaited(sync.downloadData());
+  }
+
+  @visibleForTesting
+  static void resetForTesting() {
+    _runtimeReady = false;
+    instance = null;
+  }
 
   factory DataSync() => instance ?? (instance = DataSync._());
 
@@ -95,6 +108,7 @@ class DataSync with ChangeNotifier {
   }
 
   Future<Res<bool>> uploadData() async {
+    if (!_runtimeReady) return const Res(true);
     if (isDownloading) return const Res(true);
     if (_haveWaitingTask) return const Res(true);
     while (isUploading) {
@@ -163,6 +177,7 @@ class DataSync with ChangeNotifier {
   }
 
   Future<Res<bool>> downloadData() async {
+    if (!_runtimeReady) return const Res(true);
     if (_haveWaitingTask) return const Res(true);
     while (isDownloading || isUploading) {
       _haveWaitingTask = true;
@@ -214,13 +229,7 @@ class DataSync with ChangeNotifier {
         Log.info("Data Sync", "Downloading data from WebDAV server");
         var localFile = File(FilePath.join(App.cachePath, file.name!));
         await client.read2File(file.name!, localFile.path);
-        final result = await importAppData(localFile, true);
-        if (result.sourceSkipped) {
-          Log.info(
-            "Data Sync",
-            "Source scripts were not imported while Cloud owns runtimes.",
-          );
-        }
+        await importAppData(localFile, true);
         await localFile.delete();
         Log.info("Data Sync", "Data downloaded successfully");
         return const Res(true);

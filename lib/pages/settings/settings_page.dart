@@ -9,11 +9,13 @@ import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/cache_manager.dart';
+import 'package:venera/foundation/catalog/http_client.dart';
+import 'package:venera/foundation/catalog/models.dart';
+import 'package:venera/foundation/catalog/source_preferences.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/js_engine.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/log.dart';
-import 'package:venera/foundation/tracking/tracking.dart';
 import 'package:venera/network/app_dio.dart';
 import 'package:venera/utils/data.dart';
 import 'package:venera/utils/data_sync.dart';
@@ -29,6 +31,8 @@ part 'local_favorites.dart';
 part 'app.dart';
 part 'about.dart';
 part 'network.dart';
+part 'server.dart';
+part 'catalog_diagnostics.dart';
 part 'debug.dart';
 
 class SettingsPage extends StatefulWidget {

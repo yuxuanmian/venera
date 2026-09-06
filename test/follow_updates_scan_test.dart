@@ -9,10 +9,20 @@ import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_updates.dart';
 import 'package:venera/foundation/res.dart';
-import 'package:venera/foundation/tracking/runtime_generation.dart';
-import 'package:venera/foundation/tracking/trusted_catalog.dart';
 
-FavoriteItem _comic(String id, {String sourceKey = 'test-source'}) =>
+const _testSourceKey = 'test_source';
+final _fixtureSourceKeys = <String>[
+  _testSourceKey,
+  'test_source_one',
+  'test_source_two',
+  'test_source_three',
+  'test_source_four',
+  'source_a',
+  'source_b',
+  ...List.generate(10, (i) => 'global_source_$i'),
+];
+
+FavoriteItem _comic(String id, {String sourceKey = _testSourceKey}) =>
     FavoriteItem(
       id: id,
       name: 'Comic $id',
@@ -24,7 +34,7 @@ FavoriteItem _comic(String id, {String sourceKey = 'test-source'}) =>
 
 FavoriteData _numericData(
   Future<Res<List<Comic>>> Function(int page, [String? folder]) loader, {
-  String sourceKey = 'test-source',
+  String sourceKey = _testSourceKey,
 }) => FavoriteData(
   key: sourceKey,
   title: 'Test source',
@@ -37,7 +47,7 @@ FavoriteData _numericData(
 
 ComicSource _detailSource(
   Future<Res<ComicDetails>> Function(String id) loader, {
-  String sourceKey = 'test-source',
+  String sourceKey = _testSourceKey,
   String filePath = '',
 }) {
   return ComicSource(
@@ -82,7 +92,7 @@ ComicSource _detailSource(
 ComicSource _detailSourceWithFavorite(
   Future<Res<ComicDetails>> Function(String id) loader, {
   required Future<Res<Map<String, String>>> Function([String?]) loadFolders,
-  String sourceKey = 'test-source',
+  String sourceKey = _testSourceKey,
 }) {
   return ComicSource(
     'Test source',
@@ -135,7 +145,7 @@ Future<Res<ComicDetails>> _details(String id) async => Res(
     'cover': '',
     'tags': <String, List<String>>{},
     'chapters': <String, String>{'1': 'Chapter 1'},
-    'sourceKey': 'test-source',
+    'sourceKey': _testSourceKey,
     'comicId': id,
   }),
 );
@@ -172,13 +182,20 @@ Future<List<Object>> _collectScanErrors(Stream<UpdateProgress> stream) async {
 void main() {
   late Directory tempDir;
   late NetworkFavoriteCacheManager cache;
+  late Object? previousEnabledSources;
   const folder = NetworkFavoriteFolderRef(
-    sourceKey: 'test-source',
+    sourceKey: _testSourceKey,
     folderId: 'remote',
     title: 'Remote',
   );
 
   setUp(() async {
+    previousEnabledSources = appdata.settings['enabledSources'];
+    // These are real fixture identities. The production contract treats null
+    // as uninitialized, so every ordinary business fixture must opt in its
+    // source explicitly instead of relying on the old implicit all-sources
+    // behavior.
+    appdata.settings['enabledSources'] = List<String>.from(_fixtureSourceKeys);
     tempDir = await Directory.systemTemp.createTemp('venera-follow-scan-');
     cache = NetworkFavoriteCacheManager.forTesting();
     await cache.init(
@@ -198,7 +215,8 @@ void main() {
   tearDown(() {
     kTransientRetryDelay = const Duration(seconds: 2);
     kProbeWindowSize = 20;
-    ComicSourceManager().remove('test-source');
+    ComicSourceManager().remove(_testSourceKey);
+    appdata.settings['enabledSources'] = previousEnabledSources;
     cache.close();
     tempDir.deleteSync(recursive: true);
   });
@@ -241,6 +259,8 @@ void main() {
       'forwards createScanRun failures without writing a terminal run',
       () async {
         await cacheComics(['one']);
+        ComicSourceManager().add(_detailSource((id) async => _details(id)));
+        addTearDown(() => ComicSourceManager().remove(_testSourceKey));
         final database = sqlite3.open(
           '${tempDir.path}${Platform.pathSeparator}cache.db',
         );
@@ -283,7 +303,7 @@ void main() {
     'single favorite recheck requests once across multiple folders',
     () async {
       const folderB = NetworkFavoriteFolderRef(
-        sourceKey: 'test-source',
+        sourceKey: _testSourceKey,
         folderId: 'remote-b',
         title: 'Remote B',
       );
@@ -302,7 +322,7 @@ void main() {
       );
 
       expect(
-        await recheckFavoriteComic('test-source', 'shared', cache: cache),
+        await recheckFavoriteComic(_testSourceKey, 'shared', cache: cache),
         isTrue,
       );
       expect(calls, 1);
@@ -509,8 +529,8 @@ void main() {
   group('comic-level check state', () {
     test('page refresh keeps the suspect mark (Q1)', () async {
       await cacheComics(['one']);
-      cache.markComicSuspectGoneEverywhere('test-source', 'one');
-      expect(cache.isComicSuspectGone('test-source', 'one'), isTrue);
+      cache.markComicSuspectGoneEverywhere(_testSourceKey, 'one');
+      expect(cache.isComicSuspectGone(_testSourceKey, 'one'), isTrue);
 
       // Re-caching the same page rebuilds the snapshot rows; the comic-level
       // state must survive.
@@ -521,7 +541,7 @@ void main() {
         folder,
         1,
       );
-      expect(cache.isComicSuspectGone('test-source', 'one'), isTrue);
+      expect(cache.isComicSuspectGone(_testSourceKey, 'one'), isTrue);
       expect(
         cache.getComicsWithUpdatesInfo(folder).single.isSuspectGone,
         isTrue,
@@ -546,7 +566,7 @@ void main() {
           folder,
           2,
         );
-        cache.markComicSuspectGoneEverywhere('test-source', 'one');
+        cache.markComicSuspectGoneEverywhere(_testSourceKey, 'one');
 
         // Remote deletes comics, maxPage shrinks to 1 and 'one' moves onto the
         // first page. Refreshing page 1 must not lose the mark.
@@ -559,7 +579,7 @@ void main() {
           folder,
           1,
         );
-        expect(cache.isComicSuspectGone('test-source', 'one'), isTrue);
+        expect(cache.isComicSuspectGone(_testSourceKey, 'one'), isTrue);
         expect(
           cache
               .getComicsWithUpdatesInfo(folder)
@@ -581,7 +601,7 @@ void main() {
             comic_json, favorite_time, last_check_time, check_suspect_gone)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
         [
-          'test-source',
+          _testSourceKey,
           'remote',
           0,
           'legacy-one',
@@ -601,25 +621,25 @@ void main() {
         migrateLegacy: false,
       );
 
-      expect(cache.isComicSuspectGone('test-source', 'legacy-one'), isTrue);
+      expect(cache.isComicSuspectGone(_testSourceKey, 'legacy-one'), isTrue);
 
       // Second init must not re-apply stale row snapshots: clear the state,
       // keep the legacy row, reopen, and the mark must stay cleared.
-      cache.clearComicSuspectGoneEverywhere('test-source', 'legacy-one');
+      cache.clearComicSuspectGoneEverywhere(_testSourceKey, 'legacy-one');
       cache.close();
       cache = NetworkFavoriteCacheManager.forTesting();
       await cache.init(
         databasePath: '${tempDir.path}${Platform.pathSeparator}cache.db',
         migrateLegacy: false,
       );
-      expect(cache.isComicSuspectGone('test-source', 'legacy-one'), isFalse);
+      expect(cache.isComicSuspectGone(_testSourceKey, 'legacy-one'), isFalse);
     });
 
     test(
       'removed comics drop from listings but their state is reusable',
       () async {
         await cacheComics(['one']);
-        cache.markComicSuspectGoneEverywhere('test-source', 'one');
+        cache.markComicSuspectGoneEverywhere(_testSourceKey, 'one');
 
         // The comic disappears from the remote list; refreshing shrinks maxPage
         // and removes the row (favorite_pages keep the item out of view).
@@ -640,7 +660,7 @@ void main() {
           folder,
           1,
         );
-        expect(cache.isComicSuspectGone('test-source', 'one'), isTrue);
+        expect(cache.isComicSuspectGone(_testSourceKey, 'one'), isTrue);
       },
     );
   });
@@ -734,7 +754,7 @@ void main() {
         var canceledActionStarted = false;
 
         final first = limiter.run<void>(
-          'test-source',
+          _testSourceKey,
           interval: () => const Duration(seconds: 1),
           token: firstToken,
           action: () async {
@@ -746,7 +766,7 @@ void main() {
         await firstStarted.future;
 
         final second = limiter.run<void>(
-          'test-source',
+          _testSourceKey,
           interval: () => const Duration(seconds: 1),
           token: firstToken,
           action: () async {
@@ -756,7 +776,7 @@ void main() {
         await delayStarted.future;
 
         final canceled = limiter.run<void>(
-          'test-source',
+          _testSourceKey,
           interval: () => const Duration(seconds: 1),
           token: canceledToken,
           action: () async {
@@ -764,7 +784,7 @@ void main() {
           },
         );
         final fourth = limiter.run<void>(
-          'test-source',
+          _testSourceKey,
           interval: () => const Duration(seconds: 1),
           token: fourthToken,
           action: () async {},
@@ -907,7 +927,7 @@ void main() {
       var maxActive = 0;
 
       for (var i = 0; i < 10; i++) {
-        final sourceKey = 'global-source-$i';
+        final sourceKey = 'global_source_$i';
         final sourceFolder = NetworkFavoriteFolderRef(
           sourceKey: sourceKey,
           folderId: 'remote',
@@ -959,23 +979,23 @@ void main() {
       'round-robin lets another source start behind a blocked source',
       () async {
         final sourceAFolder = const NetworkFavoriteFolderRef(
-          sourceKey: 'source-a',
+          sourceKey: 'source_a',
           folderId: 'remote',
         );
         final sourceBFolder = const NetworkFavoriteFolderRef(
-          sourceKey: 'source-b',
+          sourceKey: 'source_b',
           folderId: 'remote',
         );
         final sourceAData = _numericData(
           (page, [folder]) async => Res([
-            for (var i = 0; i < 8; i++) _comic('a-$i', sourceKey: 'source-a'),
+            for (var i = 0; i < 8; i++) _comic('a-$i', sourceKey: 'source_a'),
           ], subData: 1),
-          sourceKey: 'source-a',
+          sourceKey: 'source_a',
         );
         final sourceBData = _numericData(
           (page, [folder]) async =>
-              Res(<Comic>[_comic('b-1', sourceKey: 'source-b')], subData: 1),
-          sourceKey: 'source-b',
+              Res(<Comic>[_comic('b-1', sourceKey: 'source_b')], subData: 1),
+          sourceKey: 'source_b',
         );
         await cache.refreshFolders(sourceAData);
         await cache.refreshPage(sourceAData, sourceAFolder, 1);
@@ -995,16 +1015,16 @@ void main() {
           } finally {
             activeA--;
           }
-        }, sourceKey: 'source-a');
+        }, sourceKey: 'source_a');
         final sourceB = _detailSource((id) async {
           if (!bStarted.isCompleted) bStarted.complete();
           return _details(id);
-        }, sourceKey: 'source-b');
+        }, sourceKey: 'source_b');
         ComicSourceManager().add(sourceA);
         ComicSourceManager().add(sourceB);
         addTearDown(() {
-          ComicSourceManager().remove('source-a');
-          ComicSourceManager().remove('source-b');
+          ComicSourceManager().remove('source_a');
+          ComicSourceManager().remove('source_b');
         });
 
         final scan = scanFollowUpdates(
@@ -1105,7 +1125,7 @@ void main() {
 
     test('comics in several folders are deduplicated to one request', () async {
       const folderB = NetworkFavoriteFolderRef(
-        sourceKey: 'test-source',
+        sourceKey: _testSourceKey,
         folderId: 'remote-b',
         title: 'Remote B',
       );
@@ -1141,10 +1161,10 @@ void main() {
         final gate = Completer<void>();
         final calls = <String>[];
         final sourceKeys = [
-          'test-source-one',
-          'test-source-two',
-          'test-source-three',
-          'test-source-four',
+          'test_source_one',
+          'test_source_two',
+          'test_source_three',
+          'test_source_four',
         ];
         final folders = <NetworkFavoriteFolderRef>[];
         for (final entry in [
@@ -1288,7 +1308,7 @@ void main() {
       'includeSuspect forces suspected comics back into the queue',
       () async {
         await cacheComics(['one', 'two']);
-        cache.markComicSuspectGoneEverywhere('test-source', 'one');
+        cache.markComicSuspectGoneEverywhere(_testSourceKey, 'one');
         var calls = <String>[];
         final source = _detailSource((id) async {
           calls.add(id);
@@ -1315,7 +1335,7 @@ void main() {
           cache: cache,
         ).toList();
         expect(calls, containsAll(<String>['one', 'two']));
-        expect(cache.isComicSuspectGone('test-source', 'one'), isFalse);
+        expect(cache.isComicSuspectGone(_testSourceKey, 'one'), isFalse);
       },
     );
 
@@ -1372,7 +1392,7 @@ void main() {
         // which confirms the strong 404 and marks the comic suspect.
         expect(probeCalls, 1);
         expect(detailCalls, 4);
-        expect(cache.isComicSuspectGone('test-source', 'one'), isTrue);
+        expect(cache.isComicSuspectGone(_testSourceKey, 'one'), isTrue);
       },
     );
 
@@ -1400,7 +1420,7 @@ void main() {
         ).toList();
 
         expect(probeCalls, 1);
-        expect(cache.isComicSuspectGone('test-source', 'one'), isTrue);
+        expect(cache.isComicSuspectGone(_testSourceKey, 'one'), isTrue);
       },
     );
 
@@ -1427,7 +1447,7 @@ void main() {
         // 'two' 404 arrived after a service-class error on the same source:
         // the delist gate rejects it (either order of 'two'/'three' keeps the
         // source unhealthy for marking).
-        expect(cache.isComicSuspectGone('test-source', 'two'), isFalse);
+        expect(cache.isComicSuspectGone(_testSourceKey, 'two'), isFalse);
         final two = cache
             .getComicsWithUpdatesInfo(folder)
             .firstWhere((c) => c.id == 'two');
@@ -1452,8 +1472,10 @@ void main() {
           FollowUpdateMode.missing,
           cache: cache,
         ).toList();
-        expect(cache.isComicSuspectGone('test-source', 'three'), isTrue);
-        ComicSourceManager().remove('test-source');
+        expect(cache.isComicSuspectGone(_testSourceKey, 'three'), isTrue);
+        for (final key in _fixtureSourceKeys) {
+          ComicSourceManager().remove(key);
+        }
 
         // Batch 2+3: fresh comics all fail with 500s. The counts carry over
         // across runs (3 + 3 >= 5), tripping the detector.
@@ -1481,7 +1503,7 @@ void main() {
         }
 
         // The source tripped: the batch-1 mark is rolled back too.
-        expect(cache.isComicSuspectGone('test-source', 'three'), isFalse);
+        expect(cache.isComicSuspectGone(_testSourceKey, 'three'), isFalse);
       },
     );
 
@@ -1502,7 +1524,7 @@ void main() {
 
       // 'three' 404 was served while the list endpoint was down: the mark it
       // briefly received is rolled back and nothing else is marked.
-      expect(cache.isComicSuspectGone('test-source', 'three'), isFalse);
+      expect(cache.isComicSuspectGone(_testSourceKey, 'three'), isFalse);
       expect(
         cache.getComicsWithUpdatesInfo(folder).every((c) => !c.isSuspectGone),
         isTrue,
@@ -1543,8 +1565,8 @@ void main() {
       // hit, window size 2) and the re-probe found the site down: both marks
       // are rolled back.
       expect(probeCalls, 2);
-      expect(cache.isComicSuspectGone('test-source', 'one'), isFalse);
-      expect(cache.isComicSuspectGone('test-source', 'three'), isFalse);
+      expect(cache.isComicSuspectGone(_testSourceKey, 'one'), isFalse);
+      expect(cache.isComicSuspectGone(_testSourceKey, 'three'), isFalse);
     });
 
     test(
@@ -1555,9 +1577,9 @@ void main() {
           mode: 'force',
           ignoreRetryAfter: true,
           total: 2,
-          items: [('test-source', 'one'), ('test-source', 'two')],
+          items: [(_testSourceKey, 'one'), (_testSourceKey, 'two')],
         );
-        cache.markScanItemDone(run.runId, 'test-source', 'one', result: 'ok');
+        cache.markScanItemDone(run.runId, _testSourceKey, 'one', result: 'ok');
         // A comic cached after the run was persisted.
         await cache.refreshPage(
           _numericData(
@@ -1586,7 +1608,7 @@ void main() {
         expect(cache.getCurrentScanRun()!.runId, run.runId);
         expect(
           cache.getScanRunKeys(run.runId),
-          contains('test-source\u0000three'),
+          contains(_testSourceKey + '\u0000three'),
         );
         expect(calls, contains('three'));
         expect(calls, isNot(contains('one')));
@@ -1605,7 +1627,7 @@ void main() {
          (source_key, comic_id, last_check_time, next_check_at)
          VALUES (?, ?, ?, ?)''',
       [
-        'test-source',
+        _testSourceKey,
         'clocked',
         initial.millisecondsSinceEpoch,
         initial.add(const Duration(hours: 1)).millisecondsSinceEpoch,
@@ -1636,7 +1658,7 @@ void main() {
   group('scan candidate SQL', () {
     test('getScanCandidates matches the full-scan manual filter', () async {
       const folderB = NetworkFavoriteFolderRef(
-        sourceKey: 'test-source',
+        sourceKey: _testSourceKey,
         folderId: 'remote-b',
         title: 'Remote B',
       );
@@ -1711,7 +1733,7 @@ void main() {
              (source_key, comic_id, last_check_time, retry_after,
               check_suspect_gone)
              VALUES (?, ?, ?, ?, ?)''',
-          ['test-source', s.id, s.lastMs, s.retryMs, s.suspect],
+          [_testSourceKey, s.id, s.lastMs, s.retryMs, s.suspect],
         );
       }
       db.dispose();
@@ -1797,13 +1819,13 @@ void main() {
             'updateTime': updateTime,
             'tags': <String, List<String>>{},
             'chapters': <String, String>{'1': 'Chapter 1'},
-            'sourceKey': 'test-source',
+            'sourceKey': _testSourceKey,
             'comicId': id,
           }),
         );
       });
       ComicSourceManager().add(source);
-      addTearDown(() => ComicSourceManager().remove('test-source'));
+      addTearDown(() => ComicSourceManager().remove(_testSourceKey));
 
       Future<void> checkOnce() => updateComic(
         cache.getComicsWithUpdatesInfo(folder).single,
@@ -1858,7 +1880,7 @@ void main() {
       return _details(id);
     });
     ComicSourceManager().add(source);
-    addTearDown(() => ComicSourceManager().remove('test-source'));
+    addTearDown(() => ComicSourceManager().remove(_testSourceKey));
 
     final token = _TestScanToken();
     final future = updateComic(
@@ -1878,50 +1900,6 @@ void main() {
     expect(item.updateMarker, isNull);
     expect(item.name, 'Comic late');
   });
-
-  test(
-    'a late detail result is rejected by the production generation fence',
-    () async {
-      await cacheComics(['late-generation']);
-      final gate = Completer<void>();
-      final started = Completer<void>();
-      final source = _detailSource((id) async {
-        if (!started.isCompleted) started.complete();
-        await gate.future;
-        return _details(id);
-      }, filePath: 'test-source.js');
-      ComicSourceManager().add(source);
-      addTearDown(() => ComicSourceManager().remove('test-source'));
-
-      const artifact = TrustedArtifact(
-        sourceKey: 'test-source',
-        fileName: 'test-source.js',
-      );
-      final generations = RuntimeGenerationController();
-      generations.activate(
-        artifact: artifact,
-        revision: 'local',
-        strategy: TrackingStrategy.local,
-      );
-
-      final scan = scanFollowUpdates(
-        [folder],
-        FollowUpdateMode.force,
-        ignoreRetryAfter: true,
-        cache: cache,
-        generationController: generations,
-      ).toList();
-      await started.future;
-      generations.invalidate(artifact);
-      gate.complete();
-      await scan;
-
-      final item = cache.getComicsWithUpdatesInfo(folder).single;
-      expect(item.id, 'late-generation');
-      expect(item.lastCheckTime, isNull);
-      expect(item.updateMarker, isNull);
-    },
-  );
 }
 
 /// Polls [condition] until it is true or [timeout] elapses.

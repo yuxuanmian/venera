@@ -9,12 +9,14 @@ import 'package:venera/foundation/follow_updates.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/pages/follow_updates_page.dart';
 
+const _testSourceKey = 'test_source';
+
 FavoriteItem _comic(String id) => FavoriteItem(
   id: id,
   name: 'Comic $id',
   coverPath: 'https://example.invalid/$id.jpg',
   author: 'Author',
-  sourceKeyValue: 'test-source',
+  sourceKeyValue: _testSourceKey,
   tags: const ['tag'],
 );
 
@@ -25,7 +27,7 @@ const _listSnapshotComic = Comic(
   null,
   <String>[],
   '',
-  'force-list-source',
+  'force_list_source',
   null,
   null,
   favoriteUpdate: FavoriteUpdateHint(
@@ -38,7 +40,7 @@ const _listSnapshotComic = Comic(
 FavoriteData _numericData(
   Future<Res<List<Comic>>> Function(int page, [String? folder]) loader,
 ) => FavoriteData(
-  key: 'test-source',
+  key: _testSourceKey,
   title: 'Test source',
   multiFolder: true,
   loadComic: loader,
@@ -50,7 +52,7 @@ FavoriteData _numericData(
 FavoriteData _listData(
   Future<Res<FavoriteUpdateSnapshot>> Function([String? folder]) loader,
 ) => FavoriteData(
-  key: 'force-list-source',
+  key: 'force_list_source',
   title: 'Test source',
   multiFolder: false,
   loadComic: null,
@@ -105,7 +107,7 @@ ComicSource _detailSource(
 ) {
   return ComicSource(
     'Test source',
-    'test-source',
+    _testSourceKey,
     null,
     null,
     null,
@@ -147,7 +149,7 @@ Future<Res<ComicDetails>> _details(String id) async => Res(
     'cover': '',
     'tags': <String, List<String>>{},
     'chapters': <String, String>{'1': 'Chapter 1'},
-    'sourceKey': 'test-source',
+    'sourceKey': _testSourceKey,
     'comicId': id,
   }),
 );
@@ -169,13 +171,21 @@ Future<void> _waitUntil(
 void main() {
   late Directory tempDir;
   late NetworkFavoriteCacheManager cache;
+  late Object? previousEnabledSources;
+  late Object? previousFavorites;
   const folder = NetworkFavoriteFolderRef(
-    sourceKey: 'test-source',
+    sourceKey: _testSourceKey,
     folderId: 'remote',
     title: 'Remote',
   );
 
   setUpAll(() async {
+    previousEnabledSources = appdata.settings['enabledSources'];
+    previousFavorites = appdata.settings['favorites'];
+    appdata.settings['enabledSources'] = <String>[
+      _testSourceKey,
+      'force_list_source',
+    ];
     tempDir = await Directory.systemTemp.createTemp('venera-follow-service-');
     cache = NetworkFavoriteCacheManager();
     await cache.init(
@@ -183,7 +193,7 @@ void main() {
       migrateLegacy: false,
     );
     appdata.settings['followUpdatesEnabled'] = true;
-    appdata.settings['favorites'] = ['test-source'];
+    appdata.settings['favorites'] = [_testSourceKey];
     appdata.settings['followUpdateThreads'] = 8;
     appdata.settings['followUpdateBatchDelay'] = 0.0;
     // Registered once; the service listener + periodic check are global.
@@ -192,7 +202,9 @@ void main() {
 
   tearDownAll(() async {
     FollowUpdatesService.disposeChecker();
-    ComicSourceManager().remove('test-source');
+    ComicSourceManager().remove(_testSourceKey);
+    appdata.settings['enabledSources'] = previousEnabledSources;
+    appdata.settings['favorites'] = previousFavorites;
     cache.close();
     await tempDir.delete(recursive: true);
   });
@@ -203,7 +215,7 @@ void main() {
       final source = _detailSource(_details);
       source.data['account'] = <String, dynamic>{};
       ComicSourceManager().add(source);
-      addTearDown(() => ComicSourceManager().remove('test-source'));
+      addTearDown(() => ComicSourceManager().remove(_testSourceKey));
 
       final data = _numericData(
         (page, [folder]) async => Res(<Comic>[
@@ -247,7 +259,7 @@ void main() {
     'new comics cached while a scan is running are scanned after it ends',
     () async {
       const folderB = NetworkFavoriteFolderRef(
-        sourceKey: 'test-source',
+        sourceKey: _testSourceKey,
         folderId: 'remote-b',
         title: 'Remote B',
       );
@@ -263,7 +275,7 @@ void main() {
       });
       source.data['account'] = <String, dynamic>{};
       ComicSourceManager().add(source);
-      addTearDown(() => ComicSourceManager().remove('test-source'));
+      addTearDown(() => ComicSourceManager().remove(_testSourceKey));
 
       final data = _numericData(
         (page, [folder]) async => Res(<Comic>[
@@ -323,14 +335,14 @@ void main() {
     'single-folder source comics are eligible for follow-up once cached',
     () async {
       const singleFolder = NetworkFavoriteFolderRef(
-        sourceKey: 'test-source',
+        sourceKey: _testSourceKey,
         folderId: '',
         title: 'Test source',
       );
       final source = _detailSource(_details);
       source.data['account'] = <String, dynamic>{};
       ComicSourceManager().add(source);
-      addTearDown(() => ComicSourceManager().remove('test-source'));
+      addTearDown(() => ComicSourceManager().remove(_testSourceKey));
 
       final data = _numericData(
         (page, [folder]) async => Res(<Comic>[
@@ -345,7 +357,7 @@ void main() {
 
       final eligible = getFollowUpdateFolders();
       expect(
-        eligible.any((f) => f.sourceKey == 'test-source' && f.folderId == ''),
+        eligible.any((f) => f.sourceKey == _testSourceKey && f.folderId == ''),
         isTrue,
       );
       await _waitUntil(() => cache.countUncheckedComics(singleFolder) == 0);
@@ -360,7 +372,7 @@ void main() {
     });
     source.data['account'] = <String, dynamic>{};
     ComicSourceManager().add(source);
-    addTearDown(() => ComicSourceManager().remove('test-source'));
+    addTearDown(() => ComicSourceManager().remove(_testSourceKey));
 
     final data = _numericData(
       (page, [folder]) async => Res(<Comic>[
@@ -396,7 +408,7 @@ void main() {
     });
     source.data['account'] = <String, dynamic>{};
     ComicSourceManager().add(source);
-    addTearDown(() => ComicSourceManager().remove('test-source'));
+    addTearDown(() => ComicSourceManager().remove(_testSourceKey));
 
     final data = _numericData(
       (page, [folder]) async => Res(<Comic>[
