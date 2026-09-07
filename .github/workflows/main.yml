@@ -1,231 +1,120 @@
-name: Build ALL
-run-name: Build ALL
+name: Build Android ARM64
+run-name: Build Android ARM64 (${{ github.event_name == 'workflow_dispatch' && inputs.build_mode || 'release' }})
+
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      build_mode:
+        description: Android build mode (both use the same signing key)
+        type: choice
+        options: [release, debug]
+        default: release
+        required: true
   release:
     types: [published]
 
+permissions:
+  contents: read
+
 jobs:
-  Build_MacOS:
-    runs-on: macos-15
+  build_android:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      BUILD_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.build_mode || 'release' }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
       - uses: subosito/flutter-action@v2
         with:
-          channel: "stable"
+          channel: stable
           flutter-version-file: pubspec.yaml
           architecture: x64
-      - run: sudo xcode-select --switch /Applications/Xcode_16.4.app
-      - run: flutter pub get
-        # Step 1: Decode and install the certificate
-      - name: Decode and install certificate
-        env:
-          CERTIFICATE: ${{ secrets.CERTIFICATE }}
-          CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
-        run: |
-          echo "$CERTIFICATE" | base64 --decode > signing_certificate.p12
-          security import signing_certificate.p12 -k ~/Library/Keychains/login.keychain -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          cache: true
 
-      - name: Check rust-toolchain.toml
+      - name: Select Java 17 for Flutter
+        run: flutter config --jdk-dir "$JAVA_HOME"
+
+      - name: Check Rust toolchain
         run: rustup show
 
-      # Step 2: Build the Flutter macOS app
-      - name: Build Flutter macOS App
-        run: flutter build macos --release
+      - name: Install dependencies
+        run: flutter pub get --enforce-lockfile
 
-      # Step 3: Create the DMG file
-      - name: Create DMG
+      - name: Restore shared Android signing key
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+          ANDROID_KEY_PROPERTIES: ${{ secrets.ANDROID_KEY_PROPERTIES }}
+        run: |
+          if [[ -z "$ANDROID_KEYSTORE" || -z "$ANDROID_KEY_PROPERTIES" ]]; then
+            echo '::error::Configure ANDROID_KEYSTORE and ANDROID_KEY_PROPERTIES in repository Actions secrets.'
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$ANDROID_KEYSTORE" | base64 --decode > android/keystore.jks
+          printf '%s\n' "$ANDROID_KEY_PROPERTIES" > android/key.properties
+          # Resolve storeFile relative to android/app, independently of local paths.
+          printf '\nstoreFile=../keystore.jks\n' >> android/key.properties
+
+      - name: Build Android ARM64 APK
+        run: flutter build apk --${BUILD_MODE} --target-platform android-arm64 --no-pub
+
+      - name: Collect and verify ARM64 APK
         run: |
           mkdir -p dist
-          mkdir -p dist/dmg_contents
-          cp -R build/macos/Build/Products/Release/venera.app dist/dmg_contents/
-          ln -s /Applications dist/dmg_contents/Applications
-          hdiutil create -volname "venera" -srcfolder dist/dmg_contents -ov -format UDZO "dist/venera.dmg"
+          python3 - <<'PY'
+          import os
+          import re
+          import shutil
+          import zipfile
+          from pathlib import Path
 
-      - name: Add version to filename
-        run: |
-          APP_VERSION=$(grep "version:" pubspec.yaml | cut -d':' -f2 | tr -d ' ')
-          mkdir -p result
-          mv dist/venera.dmg result/venera-$APP_VERSION.dmg
+          mode = os.environ['BUILD_MODE']
+          version = re.search(r'^version:\s*(\S+)', Path('pubspec.yaml').read_text(), re.M).group(1)
+          apk = Path(f'build/app/outputs/flutter-apk/app-{mode}.apk')
+          with zipfile.ZipFile(apk) as archive:
+              abis = {name.split('/')[1] for name in archive.namelist()
+                      if name.startswith('lib/') and name.endswith('.so')}
+          if abis != {'arm64-v8a'}:
+              raise SystemExit(f'Expected only arm64-v8a native libraries, got {sorted(abis)}')
+          shutil.copyfile(apk, f'dist/venera-{version}-android-arm64-{mode}.apk')
+          PY
 
-      # Step 4: Attach and upload artifacts (optional)
-      - name: Upload DMG
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: macos_build
-          path: result/
-  Build_IOS:
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v3
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: "stable"
-          flutter-version-file: pubspec.yaml
-          architecture: x64
-      - run: sudo xcode-select --switch /Applications/Xcode_16.4.app
-      - run: flutter pub get
-      - run: flutter build ios --release --no-codesign
-      - run: |
-          mkdir -p /Users/runner/work/venera/venera/build/ios/iphoneos/Payload
-          mv /Users/runner/work/venera/venera/build/ios/iphoneos/Runner.app /Users/runner/work/venera/venera/build/ios/iphoneos/Payload
-          cd /Users/runner/work/venera/venera/build/ios/iphoneos/
-          zip -r venera-ios.ipa Payload
-      - name: Add version to filename
-        run: |
-          APP_VERSION=$(grep "version:" pubspec.yaml | cut -d':' -f2 | tr -d ' ')
-          mkdir -p result
-          mv build/ios/iphoneos/venera-ios.ipa result/venera-ios-$APP_VERSION.ipa
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ios_build
-          path: result/
-  Build_Android:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v3
-      - run: rm -rf /opt/hostedtoolcache
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: "stable"
-          flutter-version-file: pubspec.yaml
-          architecture: x64
-      - name: Decode and install certificate
-        env:
-          STORE_FILE: ${{ secrets.ANDROID_KEYSTORE }}
-          PROPERTY_FILE: ${{ secrets.ANDROID_KEY_PROPERTIES }}
-        run: |
-            echo "$STORE_FILE" | base64 --decode > android/keystore.jks
-            echo "$PROPERTY_FILE" > android/key.properties
-      - uses: actions/setup-java@v4
-        with:
-          distribution: 'oracle'
-          java-version: '17'
-      - name: Check rust-toolchain.toml
-        run: rustup show
-      - run: flutter pub get
-      - run: flutter build apk --release
-      - uses: actions/upload-artifact@v4
-        with:
-          name: apks
-          path: build/app/outputs/apk/release
-  Build_Windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: install dependencies
-        run: | 
-          choco install yq -y
-          pip install httpx
-      - name: Install Inno Setup
-        run: choco install innosetup --no-progress
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: "stable"
-          flutter-version-file: pubspec.yaml
-          architecture: x64
-      - name: build
-        run: |
-          flutter pub get
-          python windows/build.py
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows_build
-          path: build/windows/Venera-*
-  Build_Linux:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: 'stable'
-          flutter-version-file: pubspec.yaml
-          architecture: x64
-      - run: |
-          sudo apt-get update -y
-          sudo apt-get install -y ninja-build libgtk-3-dev webkit2gtk-4.1
-          dart pub global activate -s git https://github.com/venera-app/flutter_to_debian.git
-      - run: python3 debian/build.py x64
-      - run: dart run flutter_to_arch
-      - run: |
-          sudo rm -rf build/linux/arch/app.tar.gz
-          sudo rm -rf build/linux/arch/pkg
-          sudo rm -rf build/linux/arch/src
-          sudo rm -rf build/linux/arch/PKGBUILD
-      - uses: actions/upload-artifact@v4
-        with:
-          name: deb_build
-          path: build/linux/x64/release/debian
-      - uses: actions/upload-artifact@v4
-        with:
-          name: arch_build
-          path: build/linux/arch/
-  Build_Linux_ARM64:
-    runs-on: ubuntu-22.04-arm
-    steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: 'master'
-          flutter-version-file: pubspec.yaml
-      - run: |
-          flutter pub get
-          sudo apt-get update -y
-          sudo apt-get install -y ninja-build libgtk-3-dev webkit2gtk-4.1
-          dart pub global activate -s git https://github.com/venera-app/flutter_to_debian.git
-      - name: "Patch font"
-        run: |
-          dart run patch/font.dart
-      - run: python3 debian/build.py arm64
-      - uses: actions/upload-artifact@v4
-        with:
-          name: deb_arm64_build
-          path: build/linux/x64/release/debian # This is a bug related to flutter_to_debian, but it's not a big deal.
+          name: android-arm64-${{ env.BUILD_MODE }}
+          path: dist/*.apk
+          if-no-files-found: error
+          retention-days: 14
 
-  Release:
+      - name: Remove signing files
+        if: always()
+        run: rm -f android/keystore.jks android/key.properties
+
+  publish:
+    if: github.event_name == 'release'
+    needs: build_android
     runs-on: ubuntu-22.04
-    needs: [Build_MacOS, Build_IOS, Build_Android, Build_Windows, Build_Linux, Build_Linux_ARM64]
-    if: github.event_name == 'release'  # 仅在 push 事件时执行
+    timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: macos_build
-          path: outputs
-      - uses: actions/download-artifact@v4
-        with:
-          name: ios_build
-          path: outputs
-      - uses: actions/download-artifact@v4
-        with:
-          name: apks
-          path: outputs
-      - uses: actions/download-artifact@v4
-        with:
-          name: windows_build
-          path: outputs
-      - uses: actions/download-artifact@v4
-        with:
-          name: deb_build
-          path: outputs
-      - uses: actions/download-artifact@v4
-        with:
-          name: arch_build
-          path: outputs
-      - uses: actions/download-artifact@v4
-        with:
-          name: deb_arm64_build
-          path: outputs
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          files: |
-            outputs/*.ipa
-            outputs/*.dmg
-            outputs/*.apk
-            outputs/*.zip
-            outputs/*.exe
-            outputs/*.deb
-            outputs/*.zst
-            outputs/*.AppImage
+          name: android-arm64-release
+          path: dist
+      - name: Attach APK to release
         env:
-          GITHUB_TOKEN: ${{ secrets.ACTION_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" dist/*.apk --clobber

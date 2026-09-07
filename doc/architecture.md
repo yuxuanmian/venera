@@ -156,7 +156,8 @@ Bootstrap 只展示本地翻译文案，不展示远端 message 或异常诊断�
 - Windows 额外有 `windows/build.py`、Inno Setup 配置与窗口心跳逻辑。
 - Linux/Debian 有 CMake、Debian/Arch 打包脚本，ARM64 构建还应用字体 patch。
 - macOS 使用 Xcode 工程和签名配置。
-- CI 静态分析见 `.github/workflows/analyze.yml`，各平台发布流程见 `.github/workflows/main.yml`。
+- 当前维护范围为 Android 与 Windows：Android 只构建和发布 ARM64 APK；Windows 仅本地维护，不进入 Actions 或 Release。其他平台工程作为历史保留，不属于当前发布范围。
+- CI 静态分析见 `.github/workflows/analyze.yml`，Android 构建发布见 `.github/workflows/main.yml`；AltStore 自动更新已移除。操作与签名配置见 [android-actions.md](android-actions.md)。
 
 项目依赖多个自维护 Git fork，并包含 Rust 原生依赖，因此“Dart 分析通过”不能替代平台构建验证。
 
