@@ -15,6 +15,11 @@ Android 使用 Gradle 8.14.4、Kotlin 2.2.20，满足该 Flutter 版本的最低
 Java 路径由环境提供，不在仓库写入本机 JDK 绝对路径。本地应配置 Flutter 使用 Java 17。
 原 Flutter 3.41.4 低于锁定依赖要求，已对齐到本地验证版本；没有更新依赖锁文件。
 工作流使用 `flutter pub get --enforce-lockfile` 保持依赖一致。
+NDK 固定为 28.2.13676358，与当前插件要求对齐。
+Android 打包不能加 `--no-pub`：Flutter 3.47.2 需要按构建模式重新生成插件注册文件，
+否则 Release 可能残留 integration_test 注册项，而对应测试插件已被排除。
+静态检查直接使用 `flutter analyze --no-pub --no-fatal-infos`，警告和错误仍使任务失败。
+AGP/Kotlin 的后续升级提醒暂时保留；AGP 9 需要单独验证旧插件和 Gradle DSL 兼容性。
 
 ## 签名配置
 

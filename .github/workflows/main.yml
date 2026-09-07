@@ -65,7 +65,7 @@ jobs:
           printf '\nstoreFile=../keystore.jks\n' >> android/key.properties
 
       - name: Build Android ARM64 APK
-        run: flutter build apk --${BUILD_MODE} --target-platform android-arm64 --no-pub
+        run: flutter build apk --${BUILD_MODE} --target-platform android-arm64
 
       - name: Collect and verify ARM64 APK
         run: |

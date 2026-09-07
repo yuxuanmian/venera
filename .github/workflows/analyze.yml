@@ -17,5 +17,6 @@ jobs:
           channel: "stable"
           flutter-version-file: pubspec.yaml
           architecture: x64
-      - run: flutter pub get
-      - uses: invertase/github-action-dart-analyzer@v1
+      - run: flutter pub get --enforce-lockfile
+      - name: Analyze Dart
+        run: flutter analyze --no-pub --no-fatal-infos

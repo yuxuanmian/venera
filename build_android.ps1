@@ -7,7 +7,7 @@ Set-Location $PSScriptRoot
 $mode = if ($Release) { 'release' } else { 'debug' }
 $targetPlatform = 'android-arm64'
 
-& flutter build apk "--$mode" --target-platform $targetPlatform --no-pub
+& flutter build apk "--$mode" --target-platform $targetPlatform
 
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE

@@ -833,7 +833,7 @@ void main() {
                 throw Exception('Invalid Status Code: 404. Not found.');
               }
               await detailGate.future;
-              return _details(id);
+              return await _details(id);
             } finally {
               active--;
             }
@@ -894,7 +894,7 @@ void main() {
           }
           try {
             await gate.future;
-            return _details(id);
+            return await _details(id);
           } finally {
             active--;
           }
@@ -950,7 +950,7 @@ void main() {
           }
           try {
             await gate.future;
-            return _details(id);
+            return await _details(id);
           } finally {
             active--;
           }
@@ -1011,7 +1011,7 @@ void main() {
           maxActiveA = activeA > maxActiveA ? activeA : maxActiveA;
           try {
             await sourceAGate.future;
-            return _details(id);
+            return await _details(id);
           } finally {
             activeA--;
           }
@@ -1069,7 +1069,7 @@ void main() {
           }
           try {
             await gate.future;
-            return _details(id);
+            return await _details(id);
           } finally {
             active--;
           }
