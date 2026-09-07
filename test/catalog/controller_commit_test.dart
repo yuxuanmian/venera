@@ -54,6 +54,7 @@ class _ThrowingAppdata extends Appdata {
     required List<String>? nextEnabled,
     String? nextServerUrl,
     CatalogAttempt? attempt,
+    void Function(Map<String, dynamic> settings)? migrateSourcePages,
   }) async {
     throw failure;
   }
@@ -71,6 +72,7 @@ class _ObservingAppdata extends Appdata {
     required List<String>? nextEnabled,
     String? nextServerUrl,
     CatalogAttempt? attempt,
+    void Function(Map<String, dynamic> settings)? migrateSourcePages,
   }) {
     if (!commitEntered.isCompleted) commitEntered.complete();
     return super.prepareCatalogCommit(
@@ -78,6 +80,7 @@ class _ObservingAppdata extends Appdata {
       nextEnabled: nextEnabled,
       nextServerUrl: nextServerUrl,
       attempt: attempt,
+      migrateSourcePages: migrateSourcePages,
     );
   }
 }

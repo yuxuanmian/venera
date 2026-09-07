@@ -95,13 +95,15 @@ class _CatalogGateState extends State<CatalogGate> {
         controller: widget.controller,
         serverDraft: result.serverDraft,
         hasLegacy: result.hasLegacy,
+        failure: result.failure,
         onReady: (ready) => _finishReady(ready),
       );
     }
     if (result is CatalogNeedsRecovery) {
       return CatalogBootstrapPage(
         controller: widget.controller,
-        serverDraft: '',
+        serverDraft:
+            widget.controller.appdata.settings['serverUrl'] as String? ?? '',
         recovery: true,
         onReady: (ready) => _finishReady(ready),
       );

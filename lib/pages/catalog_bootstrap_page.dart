@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'package:venera/foundation/catalog/controller.dart';
 import 'package:venera/foundation/catalog/http_client.dart';
+import 'package:venera/utils/translations.dart';
 
 class CatalogBootstrapPage extends StatefulWidget {
   const CatalogBootstrapPage({
@@ -10,6 +11,7 @@ class CatalogBootstrapPage extends StatefulWidget {
     required this.serverDraft,
     this.hasLegacy = false,
     this.recovery = false,
+    this.failure,
     required this.onReady,
   });
 
@@ -17,6 +19,7 @@ class CatalogBootstrapPage extends StatefulWidget {
   final String serverDraft;
   final bool hasLegacy;
   final bool recovery;
+  final CatalogSetupFailure? failure;
   final void Function(CatalogReady result) onReady;
 
   @override
@@ -35,6 +38,9 @@ class _CatalogBootstrapPageState extends State<CatalogBootstrapPage> {
   void initState() {
     super.initState();
     _serverController = TextEditingController(text: widget.serverDraft);
+    _error = widget.failure == null
+        ? (widget.recovery ? _recoveryMessage : null)
+        : _failureMessage(widget.failure!.kind);
     widget.controller.addListener(_onControllerProgress);
   }
 
@@ -63,14 +69,19 @@ class _CatalogBootstrapPageState extends State<CatalogBootstrapPage> {
       _error = null;
       _phase = '正在连接并获取漫画源配置';
     });
-    final result = await widget.controller.initialize(_serverController.text);
+    final result = widget.recovery
+        ? await widget.controller.recover(_serverController.text)
+        : await widget.controller.initialize(_serverController.text);
     if (!mounted) return;
     setState(() {
       _busy = false;
       if (result is CatalogNeedsInitialization) {
-        _error = '初始化未完成，请检查地址后重试';
+        _error = result.failure == null
+            ? null
+            : _failureMessage(result.failure!.kind);
+        _phase = '请输入 Venera Server 基础地址';
       } else if (result is CatalogNeedsRecovery) {
-        _error = result.error;
+        _error = _recoveryMessage;
       } else {
         _phase = '漫画源配置已准备完成';
       }
@@ -145,4 +156,33 @@ class _CatalogBootstrapPageState extends State<CatalogBootstrapPage> {
       ),
     );
   }
+}
+
+String get _recoveryMessage =>
+    '${'Unable to save or read the local comic source configuration'.tl}\n${'Check local storage and try again'.tl}';
+
+String _failureMessage(CatalogSetupFailureKind kind) {
+  final (title, guidance) = switch (kind) {
+    CatalogSetupFailureKind.invalidServerAddress => (
+      'Invalid server address',
+      'Enter a valid Venera Server base address',
+    ),
+    CatalogSetupFailureKind.connectionFailed => (
+      'Unable to connect to the server',
+      'Check your network or server status and try again',
+    ),
+    CatalogSetupFailureKind.incompatibleServer => (
+      'Not a compatible Venera Server',
+      'This address does not provide a compatible comic source service',
+    ),
+    CatalogSetupFailureKind.catalogNotActivated => (
+      'The server has not published a comic source catalog',
+      'Activate a catalog in the server admin page, then try again',
+    ),
+    CatalogSetupFailureKind.contentPreparationFailed => (
+      'Unable to prepare the comic source catalog',
+      'The retrieved catalog could not be loaded. Try again later',
+    ),
+  };
+  return '${title.tl}\n${guidance.tl}';
 }

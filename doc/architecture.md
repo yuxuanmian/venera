@@ -76,6 +76,23 @@ Normalized UpdateState、Comparison、Presentation 和 Rejection 六个阶段；
 
 ## 分层与职责
 
+### Catalog 初始化失败提示
+
+Authority 请求保留 Server 结构化错误码，网络层将连接、TLS 和超时异常统一为 Catalog
+HTTP 错误。Controller 按 Authority / 内容准备 / 本地提交阶段分类：地址无效、无法连接、
+服务不兼容、Catalog 未激活、内容准备失败；本地保存或读取失败继续进入 Recovery。
+Bootstrap 只展示本地翻译文案，不展示远端 message 或异常诊断，Recovery 保留已保存地址。
+取消不产生失败提示，已有可用 active/LKG 时仍优先完成本地回退并进入应用。
+
+### Catalog 首次迁移的页面偏好
+
+首次从 Legacy 初始化 Catalog（尚无 `catalogRuntime`）时，只对旧文件匹配到且被选为
+`enabledSources` 的源检查页面入口。若当前能力在 `explore_pages`、`categories`、
+`favorites`、`searchSources` 中已有任意入口，完整保留用户选择；否则使用与手动开启源
+相同的 `defaultSourcePages` 规则补充支持的默认入口。页面偏好与 Catalog 指针、启用列表
+在同一次 appdata 原子提交中安装，失败不提前修改页面配置。普通 Authority revision 更新
+及已有 Catalog 的恢复不执行此补全，因此用户后续隐藏页面的选择会保留。
+
 ### UI
 
 - `lib/pages/` 组织业务页面。

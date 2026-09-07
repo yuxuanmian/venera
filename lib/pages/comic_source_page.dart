@@ -8,6 +8,7 @@ import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/catalog/source_preferences.dart';
+import 'package:venera/foundation/catalog/source_pages.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/log.dart';
@@ -110,19 +111,14 @@ class _BodyState extends State<_Body> {
   }
 
   Future<void> _ensureDefaultPages(ComicSource source) async {
-    final explore = appdata.settings['explore_pages'] as List? ?? const [];
-    final categories = appdata.settings['categories'] as List? ?? const [];
-    final favorites = appdata.settings['favorites'] as List? ?? const [];
-    final search = appdata.settings['searchSources'] as List? ?? const [];
-    final hasPage =
-        source.explorePages.any((page) => explore.contains(page.title)) ||
-        (source.categoryData != null &&
-            categories.contains(source.categoryData!.key)) ||
-        (source.favoriteData != null &&
-            favorites.contains(source.favoriteData!.key)) ||
-        (source.searchPageData != null && search.contains(source.key));
-    if (!hasPage) {
-      _addAllPagesWithComicSource(source);
+    final patch = defaultSourcePages(
+      Map<String, dynamic>.from(appdata.toJson()['settings'] as Map),
+      source,
+    );
+    if (patch.isNotEmpty) {
+      for (final entry in patch.entries) {
+        appdata.settings[entry.key] = entry.value;
+      }
       await appdata.saveData();
     }
   }
@@ -174,45 +170,6 @@ class _SourceSelectionTile extends StatelessWidget {
       ),
     );
   }
-}
-
-void _addAllPagesWithComicSource(ComicSource source) {
-  final explorePages = appdata.settings['explore_pages'] is List
-      ? appdata.settings['explore_pages'] as List
-      : <dynamic>[];
-  final categoryPages = appdata.settings['categories'] is List
-      ? appdata.settings['categories'] as List
-      : <dynamic>[];
-  final networkFavorites = appdata.settings['favorites'] is List
-      ? appdata.settings['favorites'] as List
-      : <dynamic>[];
-  final searchPages = appdata.settings['searchSources'] is List
-      ? appdata.settings['searchSources'] as List
-      : <dynamic>[];
-
-  if (source.explorePages.isNotEmpty) {
-    for (var page in source.explorePages) {
-      if (!explorePages.contains(page.title)) {
-        explorePages.add(page.title);
-      }
-    }
-  }
-  if (source.categoryData != null &&
-      !categoryPages.contains(source.categoryData!.key)) {
-    categoryPages.add(source.categoryData!.key);
-  }
-  if (source.favoriteData != null &&
-      !networkFavorites.contains(source.favoriteData!.key)) {
-    networkFavorites.add(source.favoriteData!.key);
-  }
-  if (source.searchPageData != null && !searchPages.contains(source.key)) {
-    searchPages.add(source.key);
-  }
-
-  appdata.settings['explore_pages'] = explorePages.toSet().toList();
-  appdata.settings['categories'] = categoryPages.toSet().toList();
-  appdata.settings['favorites'] = networkFavorites.toSet().toList();
-  appdata.settings['searchSources'] = searchPages.toSet().toList();
 }
 
 class _CallbackSetting extends StatefulWidget {

@@ -111,6 +111,7 @@ void main() {
       controller.cancelCurrentAttempt();
       final result = await initialization;
       expect(result, isA<CatalogNeedsInitialization>());
+      expect((result as CatalogNeedsInitialization).failure, isNull);
       expect(preparingContext?.phase, ManagedSourcePhase.preparing);
 
       pendingSource.complete('late source');

@@ -125,6 +125,7 @@ class Appdata with Init {
     required List<String>? nextEnabled,
     String? nextServerUrl,
     CatalogAttempt? attempt,
+    void Function(Map<String, dynamic> settings)? migrateSourcePages,
   }) => _prepareCatalogDocument((next) {
     final settings = Map<String, dynamic>.from(
       next['settings'] as Map? ?? const {},
@@ -143,6 +144,7 @@ class Appdata with Init {
       settings['enabledSources'] = enabled;
     }
     if (nextServerUrl != null) settings['serverUrl'] = nextServerUrl;
+    migrateSourcePages?.call(settings);
     next['settings'] = settings;
     next['catalogRuntime'] = nextState.toJson();
   }, attempt: attempt);

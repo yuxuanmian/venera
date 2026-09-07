@@ -112,6 +112,20 @@ class IoCatalogTransport implements CatalogTransport {
       );
     } on TimeoutException catch (error) {
       throw CatalogHttpException('timeout', 'Catalog 请求超时', error);
+    } on SocketException catch (error) {
+      throw CatalogHttpException('connection_failed', 'Catalog 连接失败', error);
+    } on HandshakeException catch (error) {
+      throw CatalogHttpException(
+        'connection_failed',
+        'Catalog TLS 连接失败',
+        error,
+      );
+    } on HttpException catch (error) {
+      throw CatalogHttpException(
+        'connection_failed',
+        'Catalog HTTP 连接失败',
+        error,
+      );
     } finally {
       client.close(force: true);
     }
@@ -206,7 +220,7 @@ class AppDioCatalogTransport implements CatalogTransport {
         cancelToken.cancel('Catalog request timed out');
         throw CatalogHttpException('timeout', 'Catalog 请求超时', error);
       }
-      rethrow;
+      throw CatalogHttpException('connection_failed', 'Catalog 连接失败', error);
     } finally {
       removeCancellation?.call();
     }
@@ -398,19 +412,34 @@ class CatalogHttpClient {
         )
         .timeout(timeout)
         .catchError((error) {
-          if (error is TimeoutException) {
-            throw CatalogHttpException('timeout', 'Catalog 请求超时', error);
-          }
-          throw error;
+          throw _normalizeTransportError(error);
         });
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw CatalogHttpException(
-        response.statusCode == 404 ? 'not_found' : 'authority_failed',
-        '无法连接 Venera Server（HTTP ${response.statusCode}）',
-      );
-    }
     if (response.bytes.length > catalogMaxAuthorityBytes) {
       throw const CatalogHttpException('response_too_large', 'Server 响应过大');
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      String? serverCode;
+      try {
+        final body = jsonDecode(utf8.decode(response.bytes));
+        final error = body is Map ? body['error'] : null;
+        final code = error is Map ? error['code'] : null;
+        if (code is String &&
+            RegExp(r'^[a-z][a-z0-9_]{0,63}$').hasMatch(code) &&
+            error['message'] is String) {
+          serverCode = code;
+        }
+      } on FormatException {
+        // HTML and malformed error bodies are classified by HTTP status.
+      }
+      throw CatalogHttpException(
+        serverCode ??
+            (const [502, 503, 504].contains(response.statusCode)
+                ? 'connection_failed'
+                : response.statusCode == 404
+                ? 'not_found'
+                : 'authority_failed'),
+        'Authority HTTP ${response.statusCode}',
+      );
     }
     try {
       final value = jsonDecode(utf8.decode(response.bytes));
@@ -551,12 +580,22 @@ class CatalogHttpClient {
         )
         .timeout(timeout)
         .catchError((error) {
-          if (error is TimeoutException) {
-            throw CatalogHttpException('timeout', 'Catalog 请求超时', error);
-          }
-          throw error;
+          throw _normalizeTransportError(error);
         });
   }
+}
+
+Object _normalizeTransportError(Object error) {
+  if (error is CatalogHttpException) return error;
+  if (error is TimeoutException) {
+    return CatalogHttpException('timeout', 'Catalog 请求超时', error);
+  }
+  if (error is SocketException ||
+      error is HandshakeException ||
+      error is HttpException) {
+    return CatalogHttpException('connection_failed', 'Catalog 连接失败', error);
+  }
+  return error;
 }
 
 String _basePath(String path) {

@@ -11,8 +11,12 @@ import 'http_client.dart';
 import 'legacy_migration.dart';
 import 'models.dart';
 import 'runtime_loader.dart';
+import 'setup_failure.dart';
 import 'source_preferences.dart';
+import 'source_pages.dart';
 import 'store.dart';
+
+export 'setup_failure.dart';
 
 sealed class CatalogStartupResult {
   const CatalogStartupResult();
@@ -34,10 +38,12 @@ class CatalogNeedsInitialization extends CatalogStartupResult {
   const CatalogNeedsInitialization({
     required this.serverDraft,
     this.hasLegacy = false,
+    this.failure,
   });
 
   final String serverDraft;
   final bool hasLegacy;
+  final CatalogSetupFailure? failure;
 }
 
 class CatalogNeedsRecovery extends CatalogStartupResult {
@@ -248,12 +254,15 @@ class CatalogController extends ChangeNotifier {
     var published = false;
     var copyApplied = false;
     LegacyCopyEffect? copyEffect;
+    var stage = CatalogSetupStage.authority;
     try {
       final base = CatalogServerUrl.parse(serverUrl);
+      final isLegacyMigration = appdata.catalogRuntime == null;
       _reportProgress('连接并获取漫画源配置', 0, 0);
       final pointer = await attempt.waitFor(
         () => httpClient.getAuthority(base.normalized, attempt: attempt),
       );
+      stage = CatalogSetupStage.snapshot;
       final existingEnabled =
           preferences.enabledSources ?? _readEnabledFromSettings();
       var inventory = await attempt.waitFor(() => migration.discover());
@@ -283,6 +292,7 @@ class CatalogController extends ChangeNotifier {
         await attempt.waitFor(() => _readSourceData(downloaded.index)),
         copy,
       );
+      stage = CatalogSetupStage.runtime;
       await attempt.waitFor(
         () => runtimeLoader.validateCandidate(
           downloaded.snapshot,
@@ -318,12 +328,26 @@ class CatalogController extends ChangeNotifier {
             inventory.matched.keys.where(promoted.index.keys.contains),
       )..sort();
       final nextState = AppCatalogState(active: pointer, lkg: null);
+      stage = CatalogSetupStage.commit;
       final preparedHandle = await attempt.waitFor(
         () => appdata.prepareCatalogCommit(
           nextState: nextState,
           nextEnabled: selected,
           nextServerUrl: base.normalized,
           attempt: attempt,
+          migrateSourcePages: isLegacyMigration
+              ? (settings) {
+                  for (final source
+                      in preparedRuntime.sources
+                          .map((source) => source.value)
+                          .whereType<ComicSource>()) {
+                    if (selected.contains(source.key) &&
+                        inventory.matched.containsKey(source.key)) {
+                      settings.addAll(defaultSourcePages(settings, source));
+                    }
+                  }
+                }
+              : null,
         ),
         onLate: (lateHandle) => lateHandle.discard(),
       );
@@ -348,12 +372,8 @@ class CatalogController extends ChangeNotifier {
         preparedRuntime.dispose();
         handle = null;
         runtime = null;
-        return _remember(
-          CatalogNeedsInitialization(
-            serverDraft: base.normalized,
-            hasLegacy: inventory.matched.isNotEmpty,
-          ),
-        );
+        lastDiagnostic = 'Catalog commit: $error';
+        return _remember(CatalogNeedsRecovery('本地漫画源配置无法保存'));
       }
       // The commit linearization point is followed by a synchronous memory
       // install and Runtime publication; no await is inserted between them.
@@ -396,8 +416,18 @@ class CatalogController extends ChangeNotifier {
           }
         }
       }
+      final failure = CatalogSetupFailure.fromError(error, stage);
+      lastDiagnostic = failure?.diagnostic;
+      if (failure != null &&
+          (stage == CatalogSetupStage.commit || error is FileSystemException)) {
+        return _remember(CatalogNeedsRecovery('本地漫画源配置无法保存或读取'));
+      }
       return _remember(
-        CatalogNeedsInitialization(serverDraft: serverUrl, hasLegacy: false),
+        CatalogNeedsInitialization(
+          serverDraft: serverUrl,
+          hasLegacy: false,
+          failure: failure,
+        ),
       );
     } finally {
       if (identical(_currentAttempt, attempt)) _currentAttempt = null;
