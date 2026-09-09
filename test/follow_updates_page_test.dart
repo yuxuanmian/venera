@@ -7,6 +7,7 @@ import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
+import 'package:venera/foundation/follow_update_availability.dart';
 import 'package:venera/foundation/follow_updates.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/pages/follow_updates_page.dart';
@@ -168,77 +169,29 @@ void main() {
     );
   }
 
-  testWidgets(
-    'progress card stays indeterminate until the scan publishes its queue',
-    (tester) async {
-      // A restart triggers the auto scan: the task is running but the queue
-      // numbers have not been published yet (summaries refreshing).
-      FollowUpdatesService.taskRunning.value = true;
-      FollowUpdatesService.baselineStatus.value = null;
-      await pumpPage(tester);
-
-      expect(find.text('Checking updates'.tl), findsOneWidget);
-      // No database-derived counts in the pre-first-frame window.
-      expect(find.textContaining('checked'), findsNothing);
-      final indicator = tester.widget<LinearProgressIndicator>(
-        find.byType(LinearProgressIndicator),
-      );
-      expect(indicator.value, isNull);
-      expect(find.text('Follow-up scan in progress'.tl), findsOneWidget);
-      expect(find.text('Retry'.tl), findsNothing);
-
-      // First frame arrives: the queue's own numbers take over.
-      FollowUpdatesService.baselineStatus.value = const BaselineStatus(
-        isRunning: true,
-        total: 300,
-        completed: 7,
-        errors: 0,
-        updated: 0,
-      );
-      await tester.pump();
-      expect(find.text('7 / 300 checked'), findsOneWidget);
-      final runningIndicator = tester.widget<LinearProgressIndicator>(
-        find.byType(LinearProgressIndicator),
-      );
-      expect(runningIndicator.value, closeTo(7 / 300, 1e-9));
-
-      // The task finishes with everything checked: the card disappears.
-      FollowUpdatesService.taskRunning.value = false;
-      FollowUpdatesService.baselineStatus.value = null;
-      await tester.pump();
-      expect(find.text('Checking updates'.tl), findsNothing);
-    },
-  );
-
-  testWidgets('progress dialog mirrors the card in the starting window', (
+  testWidgets('the page shows history without a fake progress card', (
     tester,
   ) async {
     FollowUpdatesService.taskRunning.value = true;
-    FollowUpdatesService.baselineStatus.value = null;
+    await pumpPage(tester);
+
+    expect(find.text(followUpdateScannerUnavailableMessage.tl), findsOneWidget);
+    expect(find.text('Displayed scan state is historical'.tl), findsWidgets);
+    expect(find.text('Checking updates'.tl), findsNothing);
+    expect(find.text('Follow-up scan in progress'.tl), findsNothing);
+    expect(find.text('Retry'.tl), findsNothing);
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+  });
+
+  testWidgets('the progress entry gives unavailable feedback', (tester) async {
     await pumpPage(tester);
 
     await tester.tap(find.byTooltip('Update check progress'.tl));
-    // Dialog entrance animation; the indeterminate indicators never settle,
-    // so advance fixed frames instead of pumpAndSettle.
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump(const Duration(seconds: 3));
 
-    expect(find.text('Update check progress'.tl), findsOneWidget);
-    // Neither the card nor the dialog renders DB-derived counts while the
-    // task is starting, and neither offers Retry.
-    expect(find.textContaining('checked'), findsNothing);
-    expect(find.text('Follow-up scan in progress'.tl), findsNWidgets(2));
+    expect(find.text(followUpdateScannerUnavailableMessage.tl), findsWidgets);
     expect(find.text('Retry'.tl), findsNothing);
-
-    // The published queue numbers show up in both places.
-    FollowUpdatesService.baselineStatus.value = const BaselineStatus(
-      isRunning: true,
-      total: 300,
-      completed: 7,
-      errors: 0,
-      updated: 0,
-    );
-    await tester.pump();
-    expect(find.text('7 / 300 checked'), findsNWidgets(2));
+    expect(find.byType(CircularProgressIndicator), findsNothing);
   });
 }

@@ -3,7 +3,6 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:venera/foundation/favorites.dart';
-import 'package:venera/foundation/tracking/update_state.dart';
 
 void _seedFavoriteDatabase(String path) {
   final database = sqlite3.open(path);
@@ -116,13 +115,19 @@ void main() {
   test('repeated startup does not invalidate a new-format baseline', () async {
     cache = NetworkFavoriteCacheManager.forTesting();
     await cache.init(databasePath: databasePath, migrateLegacy: false);
-    cache.recordComicCheckEverywhere(
-      'legacy-source',
-      'comic-1',
-      updateState: const UpdateState(latestChapterId: 'chapter-2'),
-      updateMarker: 'opaque-full-marker',
-      completedAt: DateTime.utc(2026, 9, 2),
+    final seedDatabase = sqlite3.open(databasePath);
+    seedDatabase.execute(
+      '''UPDATE comic_check_state
+         SET update_state = ?, update_marker = ?
+         WHERE source_key = ? AND comic_id = ?''',
+      [
+        '{"latestChapterId":"chapter-2"}',
+        'opaque-full-marker',
+        'legacy-source',
+        'comic-1',
+      ],
     );
+    seedDatabase.dispose();
     cache.close();
 
     cache = NetworkFavoriteCacheManager.forTesting();

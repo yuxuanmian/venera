@@ -26,7 +26,6 @@ class ComicDebugPage extends StatefulWidget {
 
 class _ComicDebugPageState extends State<ComicDebugPage> {
   final _cache = NetworkFavoriteCacheManager();
-  bool _rechecking = false;
 
   /// Follow-up state of this comic, from whichever favorite folder row the
   /// cache knows about (state is comic-level, shared across folders).
@@ -81,21 +80,8 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
     return null;
   }
 
-  Future<void> _recheck() async {
-    setState(() => _rechecking = true);
-    final result = await recheckFavoriteComicDetailed(
-      widget.sourceKey,
-      widget.comicId,
-    );
-    if (!mounted) return;
-    setState(() => _rechecking = false);
-    final message = !result.succeeded
-        ? "Failed".tl
-        : result.found == false
-        ? "Not present in favorite snapshot".tl
-        : "Success".tl;
-    context.showMessage(message: message);
-  }
+  void _recheck() =>
+      context.showMessage(message: followUpdateScannerUnavailableMessage.tl);
 
   void _clearSuspect() {
     _cache.clearComicSuspectGoneEverywhere(widget.sourceKey, widget.comicId);
@@ -162,7 +148,7 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
           runSpacing: 8,
           children: [
             Button.filled(
-              isLoading: _rechecking,
+              isLoading: false,
               onPressed: _recheck,
               child: Text("Recheck Now".tl),
             ),
@@ -188,6 +174,8 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
     if (_usesListUpdateStrategy) return _buildListFollowUpSection();
     final info = _updateInfo();
     return [
+      ListTile(title: Text(followUpdateScannerUnavailableMessage.tl)),
+      ListTile(title: Text('Displayed scan state is historical'.tl)),
       ListTile(title: Text("Follow-up State".tl)),
       if (info == null)
         ListTile(
@@ -195,7 +183,7 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
         )
       else ...[
         _infoRow("Last Check Time", _fmt(info.lastCheckTime)),
-        _infoRow("Next Check Time", _nextCheckText(info)),
+        _infoRow("Historical Next Check Time", _historicalNextCheckText(info)),
         _infoRow(
           "Last Effective Activity Time",
           _fmt(info.effectiveActivityAt),
@@ -234,22 +222,24 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
     }
 
     return [
+      ListTile(title: Text(followUpdateScannerUnavailableMessage.tl)),
+      ListTile(title: Text('Displayed scan state is historical'.tl)),
       ListTile(title: Text("Follow-up State".tl)),
       _infoRow("Update Check Strategy", "Favorite list snapshot".tl),
       _infoRow("Source is_new", sourceBool('isNew')),
       _infoRow("Source full_is_new", sourceBool('fullIsNew')),
       _infoRow("Marker Value", info?.updateMarker ?? '-'),
       _infoRow(
-        "List Scan Interval",
+        "Historical List Scan Interval",
         updateCheck == null ? '-' : _formatInterval(updateCheck.scanInterval),
       ),
       _infoRow("Last List Scan Attempt", _fmt(scan?.lastAttemptAt)),
       _infoRow("Last Successful List Scan", _fmt(scan?.lastSuccessAt)),
       _infoRow(
-        "Next Automatic List Scan",
-        _nextListScanText(scan, updateCheck?.scanInterval),
+        "Historical Next List Check",
+        _historicalNextListCheckText(scan, updateCheck?.scanInterval),
       ),
-      _infoRow("List Retry After", _fmt(scan?.retryAfter)),
+      _infoRow("Historical List Retry After", _fmt(scan?.retryAfter)),
       _infoRow("List Check Failures", '${scan?.checkFailures ?? 0}'),
       _infoRow(
         "Last Snapshot Pages / Comics",
@@ -270,21 +260,22 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
     return '${seconds}s';
   }
 
-  String _nextListScanText(FavoriteUpdateScanState? scan, Duration? interval) {
+  String _historicalNextListCheckText(
+    FavoriteUpdateScanState? scan,
+    Duration? interval,
+  ) {
     if (scan?.lastSuccessAt == null || interval == null) return '-';
     var next = scan!.lastSuccessAt!.add(interval);
     if (scan.retryAfter != null && scan.retryAfter!.isAfter(next)) {
       next = scan.retryAfter!;
     }
-    final ready = !next.isAfter(DateTime.now());
-    return '${_fmt(next)} (${ready ? "Ready".tl : "In Cooldown".tl})';
+    return _fmt(next);
   }
 
-  String _nextCheckText(FavoriteItemWithUpdateInfo info) {
+  String _historicalNextCheckText(FavoriteItemWithUpdateInfo info) {
     final next = _nextCheckTime(info);
     if (next == null) return "Not checked yet".tl;
-    final ready = !next.isAfter(DateTime.now());
-    return '${_fmt(next)} (${ready ? "Ready".tl : "In Cooldown".tl})';
+    return _fmt(next);
   }
 
   String _hotSource(FavoriteItemWithUpdateInfo info) {

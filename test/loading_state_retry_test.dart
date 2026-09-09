@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:venera/components/components.dart';
-import 'package:venera/foundation/follow_updates.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/utils/translations.dart';
 
@@ -146,36 +145,5 @@ void main() {
     await tester.pump();
 
     expect(tester.takeException(), isNull);
-  });
-
-  group('comic info retry signal', () {
-    test('only strong delist signals stop automatic retry', () {
-      for (final message in [
-        'Invalid Status Code: 404',
-        'Invalid Status Code: 410',
-        '该漫画已下架',
-      ]) {
-        expect(
-          classifyNotFoundError(message),
-          NotFoundSignal.strong,
-          reason: message,
-        );
-      }
-      expect(
-        classifyNotFoundError('Invalid Status Code: 400'),
-        NotFoundSignal.weak,
-      );
-    });
-
-    test('transient errors are not classified as delisted', () {
-      for (final message in [
-        'Connection Timeout',
-        'Invalid Status Code: 403',
-        'Invalid Status Code: 429',
-        'Invalid Status Code: 500',
-      ]) {
-        expect(classifyNotFoundError(message), NotFoundSignal.none);
-      }
-    });
   });
 }

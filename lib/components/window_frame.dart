@@ -5,7 +5,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:venera/foundation/app.dart';
-import 'package:venera/pages/follow_updates_page.dart';
+import 'package:venera/foundation/follow_update_availability.dart';
 import 'package:venera/utils/translations.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -281,18 +281,19 @@ void handleDebugMenuSelected(String value) {
       App.rootContext.showMessage(message: 'Favorites cache cleared'.tl);
       break;
     case 'clearBaselines':
-      FollowUpdatesService.cancelChecking();
-      FollowUpdatesService.baselineStatus.value = null;
-      App.favorites.clearAllBaselines();
-      App.rootContext.showMessage(message: 'Baselines cleared'.tl);
+      App.rootContext.showMessage(
+        message: followUpdateScannerUnavailableMessage.tl,
+      );
       break;
     case 'forceScanAll':
-      FollowUpdatesService.forceScanAll();
-      App.rootContext.showMessage(message: 'Force scan started'.tl);
+      App.rootContext.showMessage(
+        message: followUpdateScannerUnavailableMessage.tl,
+      );
       break;
     case 'refreshRandomComics':
-      unawaited(FollowUpdatesService.refreshRandomComics());
-      App.rootContext.showMessage(message: 'Random refresh started'.tl);
+      App.rootContext.showMessage(
+        message: followUpdateScannerUnavailableMessage.tl,
+      );
       break;
   }
 }

@@ -8,139 +8,16 @@ import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/follow_update_schedule.dart';
+import 'package:venera/foundation/follow_update_availability.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';
-import 'package:venera/foundation/tracking/tracking.dart';
+import 'package:venera/foundation/tracking/update_state.dart';
 import 'package:venera/utils/io.dart';
 
 import 'app.dart';
 
 String _formatFavoriteTime(DateTime time) =>
     time.toIso8601String().replaceFirst('T', ' ').substring(0, 19);
-
-class _SqliteTrackingApplyStore implements TrackingApplyStore {
-  const _SqliteTrackingApplyStore(this.database);
-
-  final Database database;
-
-  @override
-  TrackingApplyTransaction beginTrackingTransaction() =>
-      _SqliteTrackingApplyTransaction(database);
-}
-
-class _SqliteTrackingApplyTransaction implements TrackingApplyTransaction {
-  _SqliteTrackingApplyTransaction(this.database, {bool begin = true}) {
-    if (begin) database.execute('BEGIN');
-  }
-
-  final Database database;
-  bool _closed = false;
-
-  @override
-  TrackingBaseline? readBaseline(String sourceKey, String comicId) {
-    final rows = database.select(
-      '''SELECT update_state, update_marker, has_new_update,
-                source_update_metadata, baseline_at, source_activity_at
-         FROM comic_check_state
-         WHERE source_key = ? AND comic_id = ? LIMIT 1''',
-      [sourceKey, comicId],
-    );
-    if (rows.isEmpty) return null;
-    final row = rows.first;
-    UpdateState? state;
-    final rawState = row['update_state'];
-    if (rawState is String && rawState.isNotEmpty) {
-      try {
-        state = UpdateState.fromJson(jsonDecode(rawState));
-      } catch (e) {
-        Log.warning('FavoriteUpdate', 'Ignoring corrupted UpdateState: $e');
-      }
-    }
-    Map<String, dynamic>? metadata;
-    final rawMetadata = row['source_update_metadata'];
-    if (rawMetadata is String && rawMetadata.isNotEmpty) {
-      try {
-        final decoded = jsonDecode(rawMetadata);
-        if (decoded is Map) metadata = Map<String, dynamic>.from(decoded);
-      } catch (e) {
-        Log.warning(
-          'FavoriteUpdate',
-          'Ignoring corrupted tracking metadata: $e',
-        );
-      }
-    }
-    return TrackingBaseline(
-      state: state,
-      marker: row['update_marker'] as String?,
-      metadata: metadata,
-      hasNewUpdate: (row['has_new_update'] as int? ?? 0) != 0,
-      baselineAt: _millisToDateTime(row['baseline_at']),
-      sourceActivityAt: _millisToDateTime(row['source_activity_at']),
-    );
-  }
-
-  @override
-  void writeBaseline(
-    String sourceKey,
-    String comicId,
-    TrackingBaseline baseline,
-  ) {
-    final encodedState = baseline.state == null
-        ? null
-        : jsonEncode(baseline.state!.toJson());
-    final encodedMetadata = baseline.metadata == null
-        ? null
-        : jsonEncode(baseline.metadata);
-    final updatedAt = baseline.state?.updatedAt?.toIso8601String();
-    database.execute(
-      '''INSERT INTO comic_check_state
-           (source_key, comic_id, last_update_time, update_state,
-            update_marker, last_check_time, has_new_update, baseline_at,
-            source_activity_at, source_update_metadata)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(source_key, comic_id) DO UPDATE SET
-           last_update_time = excluded.last_update_time,
-           update_state = excluded.update_state,
-           update_marker = excluded.update_marker,
-           last_check_time = COALESCE(excluded.last_check_time,
-                                      comic_check_state.last_check_time),
-           has_new_update = excluded.has_new_update,
-           baseline_at = COALESCE(excluded.baseline_at,
-                                  comic_check_state.baseline_at),
-           source_activity_at = excluded.source_activity_at,
-           source_update_metadata = excluded.source_update_metadata''',
-      [
-        sourceKey,
-        comicId,
-        updatedAt,
-        encodedState,
-        baseline.marker,
-        null,
-        baseline.hasNewUpdate ? 1 : 0,
-        baseline.baselineAt?.millisecondsSinceEpoch,
-        baseline.sourceActivityAt?.millisecondsSinceEpoch,
-        encodedMetadata,
-      ],
-    );
-  }
-
-  @override
-  void commit() {
-    if (_closed) throw StateError('tracking transaction already closed');
-    database.execute('COMMIT');
-    _closed = true;
-  }
-
-  @override
-  void rollback() {
-    if (_closed) return;
-    database.execute('ROLLBACK');
-    _closed = true;
-  }
-
-  static DateTime? _millisToDateTime(Object? value) =>
-      value is int ? DateTime.fromMillisecondsSinceEpoch(value) : null;
-}
 
 /// A cached copy of a comic in a source-owned favorite folder.
 ///
@@ -346,26 +223,6 @@ class FavoriteItemWithUpdateInfo extends FavoriteItem {
       '${updateTime ?? updateState?.updatedAt?.toIso8601String() ?? 'Unknown'} | $sourceKey';
 }
 
-/// Lightweight scan-candidate row (snapshot row + check-state join), used
-/// by the scan queue builder so it never materializes whole folders.
-class ScanCandidate {
-  const ScanCandidate({
-    required this.sourceKey,
-    required this.comicId,
-    required this.folderId,
-    required this.lastCheckTime,
-    required this.retryAfter,
-    required this.nextCheckTime,
-  });
-
-  final String sourceKey;
-  final String comicId;
-  final String folderId;
-  final DateTime? lastCheckTime;
-  final DateTime? retryAfter;
-  final DateTime? nextCheckTime;
-}
-
 /// Strips a trailing " (1234)" count that sources like ehentai embed in
 /// favorite folder titles. The number comes from the source API at folder
 /// list fetch time and drifts from the actual folder contents (especially
@@ -425,96 +282,6 @@ class NetworkFavoriteFolderRef {
 
   @override
   int get hashCode => sourceKey.hashCode ^ folderId.hashCode;
-}
-
-/// Persisted state of a follow-up scan run, stored as JSON under the
-/// metadata key `follow_update_run`.
-///
-/// `running` runs are resumed by the next scan (the app was killed mid-run);
-/// `finished`/`canceled` runs are replaced by a fresh run.
-class ScanRunInfo {
-  const ScanRunInfo({
-    required this.runId,
-    required this.mode,
-    required this.ignoreRetryAfter,
-    required this.total,
-    required this.status,
-    required this.startedAt,
-    this.finishedAt,
-  });
-
-  final int runId;
-
-  /// [FollowUpdateMode.name] of the run.
-  final String mode;
-
-  final bool ignoreRetryAfter;
-
-  /// Queue length at run creation.
-  final int total;
-
-  /// running | finished | canceled
-  final String status;
-
-  final DateTime startedAt;
-
-  final DateTime? finishedAt;
-
-  ScanRunInfo copyWith({String? status, DateTime? finishedAt}) {
-    return ScanRunInfo(
-      runId: runId,
-      mode: mode,
-      ignoreRetryAfter: ignoreRetryAfter,
-      total: total,
-      status: status ?? this.status,
-      startedAt: startedAt,
-      finishedAt: finishedAt ?? this.finishedAt,
-    );
-  }
-
-  Map<String, Object?> toJson() => {
-    'runId': runId,
-    'mode': mode,
-    'ignoreRetryAfter': ignoreRetryAfter,
-    'total': total,
-    'status': status,
-    'startedAt': startedAt.millisecondsSinceEpoch,
-    'finishedAt': finishedAt?.millisecondsSinceEpoch,
-  };
-
-  /// Returns null when the metadata is missing or malformed; the caller then
-  /// starts a fresh run.
-  static ScanRunInfo? fromJson(Object? json) {
-    if (json is! String) return null;
-    try {
-      final map = Map<String, dynamic>.from(jsonDecode(json) as Map);
-      final runId = map['runId'];
-      final mode = map['mode'];
-      final total = map['total'];
-      final status = map['status'];
-      final startedAt = map['startedAt'];
-      if (runId is! int ||
-          mode is! String ||
-          total is! int ||
-          status is! String ||
-          startedAt is! int) {
-        return null;
-      }
-      return ScanRunInfo(
-        runId: runId,
-        mode: mode,
-        ignoreRetryAfter: map['ignoreRetryAfter'] as bool? ?? false,
-        total: total,
-        status: status,
-        startedAt: DateTime.fromMillisecondsSinceEpoch(startedAt),
-        finishedAt: map['finishedAt'] == null
-            ? null
-            : DateTime.fromMillisecondsSinceEpoch(map['finishedAt'] as int),
-      );
-    } catch (_) {
-      return null;
-    }
-  }
 }
 
 class NetworkFavoriteFolder extends NetworkFavoriteFolderRef {
@@ -613,20 +380,6 @@ class FavoriteUpdateScanState {
   final int lastComicCount;
 }
 
-class FavoriteUpdateSnapshotApplyResult {
-  const FavoriteUpdateSnapshotApplyResult({
-    required this.updatedComicCount,
-    required this.pageCount,
-    required this.comicCount,
-  });
-
-  final int updatedComicCount;
-  final int pageCount;
-  final int comicCount;
-
-  int get updated => updatedComicCount;
-}
-
 /// Progress emitted while an explicit full-cache operation is running.
 ///
 /// Cursor-based sources do not expose a total page count, so [totalPages] is
@@ -648,11 +401,6 @@ class FavoriteFullCacheProgress {
   final bool isComplete;
   final bool isCanceled;
 }
-
-/// Minimum time between two not-found hits that both count toward the
-/// suspected-removed mark. Hits inside the window are ignored, so a
-/// risk-control window that lasts hours cannot compress the evidence.
-const Duration kNotFoundHitWindow = Duration(hours: 24);
 
 /// Device-local cache for remote favorite folders.
 class NetworkFavoriteCacheManager with ChangeNotifier {
@@ -960,11 +708,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     }
   }
 
-  /// Returns the host-owned transaction store used by Cloud and local
-  /// tracking producers. The database itself remains private to favorites so
-  /// callers cannot bypass the cache's schema boundary.
-  TrackingApplyStore get trackingApplyStore => _SqliteTrackingApplyStore(_db);
-
   void _writeFollowScheduleBackfillStatus(String status) {
     _db.execute('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)', [
       _followScheduleBackfillKey,
@@ -1155,160 +898,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   /// Changes only after [clearAllCache] commits. UI cache-first pages use this
   /// generation to discard their in-memory pages and PageStorage namespace.
   int get cacheGeneration => _cacheGeneration;
-
-  static const _scanRunMetadataKey = 'follow_update_run';
-
-  /// Returns the persisted scan run, or null when there is none (or its JSON
-  /// is malformed, which is treated as "no run").
-  ScanRunInfo? getCurrentScanRun() {
-    final rows = _db.select('SELECT value FROM metadata WHERE key = ?', [
-      _scanRunMetadataKey,
-    ]);
-    if (rows.isEmpty) return null;
-    return ScanRunInfo.fromJson(rows.first['value']);
-  }
-
-  /// Clears any previous run (finished/canceled) and persists a fresh running
-  /// run with its queue.
-  ScanRunInfo createScanRun({
-    required String mode,
-    required bool ignoreRetryAfter,
-    required int total,
-    required List<(String, String)> items,
-  }) {
-    clearScanRun();
-    final runId = DateTime.now().millisecondsSinceEpoch;
-    _db.execute('BEGIN');
-    try {
-      for (final (sourceKey, comicId) in items) {
-        _db.execute(
-          '''INSERT OR REPLACE INTO scan_queue (run_id, source_key, comic_id, status)
-             VALUES (?, ?, ?, 'pending')''',
-          [runId, sourceKey, comicId],
-        );
-      }
-      _db.execute(
-        'INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)',
-        [
-          _scanRunMetadataKey,
-          jsonEncode(
-            ScanRunInfo(
-              runId: runId,
-              mode: mode,
-              ignoreRetryAfter: ignoreRetryAfter,
-              total: total,
-              status: 'running',
-              startedAt: DateTime.now(),
-            ).toJson(),
-          ),
-        ],
-      );
-      _db.execute('COMMIT');
-    } catch (_) {
-      _db.execute('ROLLBACK');
-      rethrow;
-    }
-    return getCurrentScanRun()!;
-  }
-
-  /// Keys of the items already processed by [runId], as
-  /// `'sourceKey\u0000comicId'`.
-  Set<String> getDoneScanItems(int runId) {
-    final rows = _db.select(
-      '''SELECT source_key, comic_id FROM scan_queue
-         WHERE run_id = ? AND status = 'done' ''',
-      [runId],
-    );
-    return rows.map((r) => '${r['source_key']}\u0000${r['comic_id']}').toSet();
-  }
-
-  /// All keys queued for [runId] (pending or done), as
-  /// `'sourceKey\u0000comicId'`.
-  Set<String> getScanRunKeys(int runId) {
-    final rows = _db.select(
-      '''SELECT source_key, comic_id FROM scan_queue
-         WHERE run_id = ?''',
-      [runId],
-    );
-    return rows.map((r) => '${r['source_key']}\u0000${r['comic_id']}').toSet();
-  }
-
-  /// Completes stale detail queue rows for sources that now declare the list
-  /// strategy, so an interrupted pre-migration run cannot request details.
-  void markListStrategyScanItemsSkipped(
-    int runId,
-    Iterable<String> sourceKeys,
-  ) {
-    final keys = sourceKeys.toSet().toList();
-    if (keys.isEmpty) return;
-    final placeholders = keys.map((_) => '?').join(', ');
-    _db.execute(
-      '''UPDATE scan_queue
-         SET status = 'done', result = 'skipped', error = NULL
-         WHERE run_id = ? AND source_key IN ($placeholders)
-           AND status = 'pending' ''',
-      [runId, ...keys],
-    );
-  }
-
-  /// Inserts [items] into [runId]'s queue as pending. Used when a resumed run
-  /// re-builds its queue from the current cache and finds comics that were
-  /// cached after the original run was persisted, so a second interruption
-  /// excludes them via the done-set like every other item.
-  void addScanRunItems(int runId, List<(String, String)> items) {
-    if (items.isEmpty) return;
-    _db.execute('BEGIN');
-    try {
-      for (final (sourceKey, comicId) in items) {
-        _db.execute(
-          '''INSERT OR IGNORE INTO scan_queue (run_id, source_key, comic_id, status)
-             VALUES (?, ?, ?, 'pending')''',
-          [runId, sourceKey, comicId],
-        );
-      }
-      _db.execute('COMMIT');
-    } catch (_) {
-      _db.execute('ROLLBACK');
-      rethrow;
-    }
-  }
-
-  void markScanItemDone(
-    int runId,
-    String sourceKey,
-    String comicId, {
-    required String result,
-    String? error,
-  }) {
-    _db.execute(
-      '''UPDATE scan_queue SET status = 'done', result = ?, error = ?
-         WHERE run_id = ? AND source_key = ? AND comic_id = ?''',
-      [result, error, runId, sourceKey, comicId],
-    );
-  }
-
-  void updateScanRunStatus(int runId, String status) {
-    final info = getCurrentScanRun();
-    if (info == null || info.runId != runId) return;
-    _db.execute('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)', [
-      _scanRunMetadataKey,
-      jsonEncode(
-        info
-            .copyWith(
-              status: status,
-              finishedAt: status == 'finished'
-                  ? DateTime.now()
-                  : info.finishedAt,
-            )
-            .toJson(),
-      ),
-    ]);
-  }
-
-  void clearScanRun() {
-    _db.execute('DELETE FROM scan_queue');
-    _db.execute('DELETE FROM metadata WHERE key = ?', [_scanRunMetadataKey]);
-  }
 
   /// Folder refs of every folder known to contain [comicId]; falls back to
   /// [fallback] when the membership table has no entry (e.g. single-folder
@@ -1609,124 +1198,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     );
   }
 
-  void recordFavoriteUpdateScanAttempt(
-    NetworkFavoriteFolderRef folder, {
-    DateTime? attemptedAt,
-  }) {
-    final at = (attemptedAt ?? DateTime.now()).millisecondsSinceEpoch;
-    _db.execute(
-      '''INSERT INTO favorite_update_scan_state
-           (source_key, folder_id, last_attempt_at)
-         VALUES (?, ?, ?)
-         ON CONFLICT(source_key, folder_id) DO UPDATE SET
-           last_attempt_at = excluded.last_attempt_at''',
-      [folder.sourceKey, folder.folderId, at],
-    );
-  }
-
-  void recordFavoriteUpdateScanFailure(
-    NetworkFavoriteFolderRef folder, {
-    DateTime? failedAt,
-  }) {
-    final now = failedAt ?? DateTime.now();
-    final existing = getFavoriteUpdateScanState(folder);
-    final failures = (existing?.checkFailures ?? 0) + 1;
-    final delay = switch (failures) {
-      1 => const Duration(hours: 1),
-      2 => const Duration(hours: 6),
-      3 => const Duration(hours: 24),
-      _ => const Duration(days: 7),
-    };
-    _db.execute(
-      '''INSERT INTO favorite_update_scan_state
-           (source_key, folder_id, last_attempt_at, retry_after, check_failures)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(source_key, folder_id) DO UPDATE SET
-           last_attempt_at = excluded.last_attempt_at,
-           retry_after = excluded.retry_after,
-           check_failures = excluded.check_failures''',
-      [
-        folder.sourceKey,
-        folder.folderId,
-        now.millisecondsSinceEpoch,
-        now.add(delay).millisecondsSinceEpoch,
-        failures,
-      ],
-    );
-  }
-
-  String? _favoriteUpdateMetadataJson(FavoriteUpdateHint hint) {
-    final metadata = hint.metadata;
-    if (metadata == null) return null;
-    try {
-      final encoded = jsonEncode(metadata);
-      if (utf8.encode(encoded).length > 4096) {
-        Log.warning(
-          'FavoriteUpdate',
-          'Dropped source metadata exceeding the 4096 UTF-8 byte limit',
-        );
-        return null;
-      }
-      return encoded;
-    } catch (e) {
-      Log.warning('FavoriteUpdate', 'Dropped invalid source metadata: $e');
-      return null;
-    }
-  }
-
-  /// Applies a validated observation through the shared App-owned tracking
-  /// service. Callers that need to combine it with other cache writes should
-  /// use the snapshot path below, which keeps the transaction open.
-  TrackingApplyResult applyTrackingObservation(
-    TrackingObservation observation,
-  ) {
-    final result = TrackingApplyService(
-      _SqliteTrackingApplyStore(_db),
-      diagnostics: trackingDiagnostics,
-    ).apply(observation);
-    notifyListeners();
-    return result;
-  }
-
-  bool _applyFavoriteUpdateHint(
-    NetworkFavoriteFolderRef folder, {
-    required String comicId,
-    required FavoriteUpdateHint hint,
-    required DateTime completedAt,
-  }) {
-    final facts = TrackingNormalizer.fromFavoriteUpdate(hint);
-    final observation = TrackingObservation(
-      origin: TrackingObservationOrigin.localOptimized,
-      revision: 'local',
-      artifact: TrackingArtifactIdentity(
-        sourceKey: folder.sourceKey,
-        fileName: '${folder.sourceKey}.js',
-      ),
-      comicId: comicId,
-      observedAt: completedAt,
-      validUntil: completedAt,
-      state: facts.state,
-      sourceUnread: facts.sourceUnread,
-      marker: facts.marker,
-      metadata: facts.metadata,
-      normalizationDrops: facts.droppedFields
-          .map(
-            (item) => <String, String>{
-              'field': item.field,
-              'reason': item.reason,
-            },
-          )
-          .toList(growable: false),
-      compatibilityNotes: facts.compatibilityNotes,
-    );
-    final transaction = _SqliteTrackingApplyTransaction(_db, begin: false);
-    final result = TrackingApplyService(
-      _SqliteTrackingApplyStore(_db),
-      diagnostics: trackingDiagnostics,
-    ).applyInTransaction(transaction, observation);
-    return result.decision.contentChange == ContentChange.changed;
-  }
-
   /// Invalidates only pre-UpdateState comparison evidence. The transaction
   /// and marker make retries safe: an interrupted migration rolls back, while
   /// a completed migration never touches a later baseline.
@@ -1753,191 +1224,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       _db.execute('ROLLBACK');
       rethrow;
     }
-  }
-
-  void _validateFavoriteUpdateSnapshot(
-    FavoriteData data,
-    NetworkFavoriteFolderRef folder,
-    FavoriteUpdateSnapshot snapshot,
-    DateTime completedAt,
-  ) {
-    final updateCheck = data.updateCheck;
-    if (updateCheck == null) {
-      throw StateError('Favorite source does not support list update checks');
-    }
-    if (folder.sourceKey != data.key ||
-        snapshot.pageSize < 1 ||
-        snapshot.pageSize > 200 ||
-        snapshot.total != snapshot.comics.length) {
-      throw StateError('Invalid favorite update snapshot shape');
-    }
-    final ids = <String>{};
-    for (final comic in snapshot.comics) {
-      if (comic.sourceKey != data.key ||
-          comic.id.trim().isEmpty ||
-          !ids.add(comic.id)) {
-        throw StateError('Invalid or duplicate comic ID in update snapshot');
-      }
-      final hint = comic.favoriteUpdate;
-      if (hint == null) {
-        throw StateError('Invalid full update evidence for ${comic.id}');
-      }
-      // Validate the diagnostic payload before starting the transaction.
-      _favoriteUpdateMetadataJson(hint);
-    }
-  }
-
-  FavoriteUpdateSnapshotApplyResult applyCompleteFavoriteUpdateSnapshot(
-    FavoriteData data,
-    NetworkFavoriteFolderRef folder,
-    FavoriteUpdateSnapshot snapshot, {
-    required DateTime completedAt,
-  }) {
-    _validateFavoriteUpdateSnapshot(data, folder, snapshot, completedAt);
-    final oldRows = _db.select(
-      '''SELECT * FROM favorite_items
-         WHERE source_key = ? AND folder_id = ?''',
-      [folder.sourceKey, folder.folderId],
-    );
-    final oldItems = <String, FavoriteItem>{};
-    for (final row in oldRows) {
-      oldItems.putIfAbsent(
-        row['comic_id'] as String,
-        () => FavoriteItem.fromRow(row),
-      );
-    }
-    final pageCount = snapshot.comics.isEmpty
-        ? 0
-        : (snapshot.comics.length + snapshot.pageSize - 1) ~/ snapshot.pageSize;
-    final lastAttemptAt =
-        getFavoriteUpdateScanState(folder)?.lastAttemptAt ?? completedAt;
-    var updatedComicCount = 0;
-    _db.execute('BEGIN');
-    try {
-      _ensureFolder(folder);
-      _db.execute(
-        '''DELETE FROM favorite_items WHERE source_key = ? AND folder_id = ?''',
-        [folder.sourceKey, folder.folderId],
-      );
-      _db.execute(
-        '''DELETE FROM favorite_pages WHERE source_key = ? AND folder_id = ?''',
-        [folder.sourceKey, folder.folderId],
-      );
-      for (var page = 1; page <= pageCount; page++) {
-        final start = (page - 1) * snapshot.pageSize;
-        final pageComics = snapshot.comics
-            .skip(start)
-            .take(snapshot.pageSize)
-            .toList();
-        _db.execute(
-          '''INSERT INTO favorite_pages
-             (source_key, folder_id, page_index, request_token, next_token,
-              max_page, updated_at)
-             VALUES (?, ?, ?, ?, NULL, ?, ?)''',
-          [
-            folder.sourceKey,
-            folder.folderId,
-            page,
-            'page:$page',
-            pageCount,
-            completedAt.millisecondsSinceEpoch,
-          ],
-        );
-        for (var index = 0; index < pageComics.length; index++) {
-          final comic = pageComics[index];
-          final hint = comic.favoriteUpdate;
-          final remoteItem = FavoriteItem.fromComic(comic);
-          final previousItem = oldItems[remoteItem.id];
-          final previousFavoriteTime = previousItem == null
-              ? null
-              : DateTime.tryParse(previousItem.time.replaceFirst(' ', 'T'));
-          final item = FavoriteItem(
-            id: remoteItem.id,
-            name: remoteItem.name,
-            coverPath: previousItem?.coverPath ?? remoteItem.coverPath,
-            author: remoteItem.author,
-            sourceKeyValue: remoteItem.sourceKey,
-            tags: remoteItem.tags,
-            chapterCount: remoteItem.chapterCount ?? previousItem?.chapterCount,
-            remoteFavoriteId: remoteItem.favoriteId,
-            favoriteTime: previousFavoriteTime,
-          );
-          final itemJson = item.toCacheJson();
-          _db.execute(
-            '''INSERT INTO favorite_items
-               (source_key, folder_id, page_index, comic_id, display_order,
-                comic_json, favorite_id, favorite_time, search_text)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            [
-              folder.sourceKey,
-              folder.folderId,
-              page,
-              item.id,
-              index,
-              jsonEncode(itemJson),
-              item.favoriteId,
-              item.time,
-              _buildSearchText(item.id, itemJson),
-            ],
-          );
-          if (_applyFavoriteUpdateHint(
-            folder,
-            comicId: item.id,
-            hint: hint!,
-            completedAt: completedAt,
-          )) {
-            updatedComicCount++;
-          }
-        }
-      }
-      _rebuildMembership(folder);
-      _db.execute(
-        '''UPDATE favorite_folders
-           SET updated_at = ?, full_cache_at = ?, full_cache_pages = ?,
-               full_cache_comics = ?
-           WHERE source_key = ? AND folder_id = ?''',
-        [
-          completedAt.millisecondsSinceEpoch,
-          completedAt.millisecondsSinceEpoch,
-          pageCount,
-          snapshot.comics.length,
-          folder.sourceKey,
-          folder.folderId,
-        ],
-      );
-      _db.execute(
-        '''INSERT INTO favorite_update_scan_state
-             (source_key, folder_id, last_attempt_at,
-              last_success_at, retry_after, check_failures,
-              last_page_count, last_comic_count)
-           VALUES (?, ?, ?, ?, NULL, 0, ?, ?)
-           ON CONFLICT(source_key, folder_id) DO UPDATE SET
-             last_attempt_at = excluded.last_attempt_at,
-             last_success_at = excluded.last_success_at,
-             retry_after = NULL,
-             check_failures = 0,
-             last_page_count = excluded.last_page_count,
-             last_comic_count = excluded.last_comic_count''',
-        [
-          folder.sourceKey,
-          folder.folderId,
-          lastAttemptAt.millisecondsSinceEpoch,
-          completedAt.millisecondsSinceEpoch,
-          pageCount,
-          snapshot.comics.length,
-        ],
-      );
-      _db.execute('COMMIT');
-    } catch (_) {
-      _db.execute('ROLLBACK');
-      rethrow;
-    }
-    notifyListeners();
-    return FavoriteUpdateSnapshotApplyResult(
-      updatedComicCount: updatedComicCount,
-      pageCount: pageCount,
-      comicCount: snapshot.comics.length,
-    );
   }
 
   void _upsertFolders(
@@ -2048,7 +1334,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
           nextToken: null,
           clearFollowingCursorPages: false,
           preserveExistingCover: preserveExistingCover,
-          updateCheck: data.updateCheck,
         ),
       );
     } catch (e, s) {
@@ -2090,7 +1375,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
           clearFollowingCursorPages:
               existing != null && existing.nextToken != result.subData,
           preserveExistingCover: preserveExistingCover,
-          updateCheck: data.updateCheck,
         ),
       );
     } catch (e, s) {
@@ -2119,7 +1403,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     required String? nextToken,
     required bool clearFollowingCursorPages,
     required bool preserveExistingCover,
-    required FavoriteUpdateCheckData? updateCheck,
   }) {
     final now = DateTime.now();
     _db.execute('BEGIN');
@@ -2180,7 +1463,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       final seenIds = <String>{};
       for (var index = 0; index < comics.length; index++) {
         final comic = comics[index];
-        final hint = comic.favoriteUpdate;
         final remoteItem = FavoriteItem.fromComic(comic);
         if (!seenIds.add(remoteItem.id)) continue;
         final previousItem = updateState[remoteItem.id];
@@ -2217,23 +1499,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
             _buildSearchText(item.id, item.toCacheJson()),
           ],
         );
-        if (updateCheck != null && remoteItem.id.isNotEmpty) {
-          if (hint != null) {
-            try {
-              _applyFavoriteUpdateHint(
-                folder,
-                comicId: item.id,
-                hint: hint,
-                completedAt: now,
-              );
-            } catch (e) {
-              Log.warning(
-                'Favorite page refresh',
-                'Ignoring invalid update hint for ${item.id}: $e',
-              );
-            }
-          }
-        }
       }
       _rebuildMembership(folder);
       _db.execute('COMMIT');
@@ -2442,6 +1707,20 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     required bool Function() isCanceled,
   }) {
     final stream = StreamController<FavoriteFullCacheProgress>();
+    if (data.loadComic == null &&
+        data.loadNext == null &&
+        data.updateCheck != null) {
+      stream
+        ..add(
+          FavoriteFullCacheProgress(
+            pagesCached: 0,
+            comicsCached: countCachedComics(folder),
+            errorMessage: followUpdateScannerUnavailableMessage,
+          ),
+        )
+        ..close();
+      return stream.stream;
+    }
     if (!tryAcquireFullCacheLock(folder)) {
       stream
         ..add(
@@ -2464,9 +1743,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
             updatedAt: DateTime.now(),
           ),
         ], removeMissing: false);
-        if (data.updateCheck != null) {
-          await _cacheAllListSnapshot(data, folder, stream, isCanceled);
-        } else if (data.loadComic != null) {
+        if (data.loadComic != null) {
           await _cacheAllNumberedPages(data, folder, stream, isCanceled);
         } else if (data.loadNext != null) {
           await _cacheAllCursorPages(data, folder, stream, isCanceled);
@@ -2493,90 +1770,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       }
     }();
     return stream.stream;
-  }
-
-  Future<void> _cacheAllListSnapshot(
-    FavoriteData data,
-    NetworkFavoriteFolderRef folder,
-    StreamController<FavoriteFullCacheProgress> stream,
-    bool Function() isCanceled,
-  ) async {
-    if (isCanceled()) {
-      stream.add(
-        const FavoriteFullCacheProgress(
-          pagesCached: 0,
-          comicsCached: 0,
-          isCanceled: true,
-        ),
-      );
-      return;
-    }
-    final expectedEpoch = captureFavoriteSessionEpoch(folder.sourceKey);
-    void emitCanceled() {
-      stream.add(
-        FavoriteFullCacheProgress(
-          pagesCached: 0,
-          comicsCached: countCachedComics(folder),
-          isCanceled: true,
-        ),
-      );
-    }
-
-    final attemptedAt = DateTime.now();
-    recordFavoriteUpdateScanAttempt(folder, attemptedAt: attemptedAt);
-    try {
-      final result = await data.updateCheck!.load(folder.folderId);
-      if (isCanceled() ||
-          !isFavoriteSessionEpochCurrent(folder.sourceKey, expectedEpoch)) {
-        emitCanceled();
-        return;
-      }
-      if (result.error) {
-        recordFavoriteUpdateScanFailure(folder);
-        stream.add(
-          FavoriteFullCacheProgress(
-            pagesCached: 0,
-            comicsCached: countCachedComics(folder),
-            errorMessage: result.errorMessage,
-          ),
-        );
-        return;
-      }
-      if (isCanceled() ||
-          !isFavoriteSessionEpochCurrent(folder.sourceKey, expectedEpoch)) {
-        emitCanceled();
-        return;
-      }
-      final completed = DateTime.now();
-      final applied = applyCompleteFavoriteUpdateSnapshot(
-        data,
-        folder,
-        result.data,
-        completedAt: completed,
-      );
-      stream.add(
-        FavoriteFullCacheProgress(
-          pagesCached: applied.pageCount,
-          comicsCached: applied.comicCount,
-          totalPages: applied.pageCount,
-          isComplete: true,
-        ),
-      );
-    } catch (e) {
-      if (isCanceled() ||
-          !isFavoriteSessionEpochCurrent(folder.sourceKey, expectedEpoch)) {
-        emitCanceled();
-        return;
-      }
-      recordFavoriteUpdateScanFailure(folder);
-      stream.add(
-        FavoriteFullCacheProgress(
-          pagesCached: 0,
-          comicsCached: countCachedComics(folder),
-          errorMessage: e.toString(),
-        ),
-      );
-    }
   }
 
   Future<void> _cacheAllNumberedPages(
@@ -3086,88 +2279,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   Map<String, Map<String, Object?>> _checkStateForRows(List<Row> rows) =>
       _checkStateMap({for (final row in rows) row['source_key'] as String});
 
-  /// Scan-eligible comics across [folders], filtered in SQL exactly like the
-  /// old Dart-side filtering: suspect skip (unless [includeSuspect]), the
-  /// [modeName] time window ('missing' = never checked, 'regular' = due by
-  /// schedule, 'force' = everything) and the retry-after cooldown. The mode
-  /// is passed as a string so this library never needs to import the scan
-  /// runner.
-  ///
-  /// One row per (source, comic, folder); comics appearing in several
-  /// folders are deduplicated by the queue builder, not here.
-  List<ScanCandidate> getScanCandidates(
-    List<NetworkFavoriteFolderRef> folders, {
-    required String modeName,
-    required bool ignoreRetryAfter,
-    required bool includeSuspect,
-    DateTime? now,
-  }) {
-    if (folders.isEmpty) return const [];
-    final current = now ?? DateTime.now();
-    final nowMs = current.millisecondsSinceEpoch;
-    final where = <String>[_folderWhereClause(folders)];
-    final args = <Object>[
-      for (final f in folders) ...[f.sourceKey, f.folderId],
-    ];
-    if (!includeSuspect) {
-      where.add('(cs.check_suspect_gone IS NULL OR cs.check_suspect_gone = 0)');
-    }
-    if (modeName == 'missing') {
-      where.add('cs.last_check_time IS NULL');
-    } else if (modeName == 'regular') {
-      where.add(
-        '(cs.last_check_time IS NULL OR cs.next_check_at IS NULL '
-        'OR cs.next_check_at <= ?)',
-      );
-      args.add(nowMs);
-    }
-    if (!ignoreRetryAfter) {
-      where.add('(cs.retry_after IS NULL OR cs.retry_after <= ?)');
-      args.add(nowMs);
-    }
-    final rows = _db.select(
-      '''SELECT fi.source_key, fi.comic_id, fi.folder_id,
-                cs.last_check_time, cs.retry_after, cs.next_check_at
-         FROM favorite_items fi
-         LEFT JOIN comic_check_state cs
-           ON cs.source_key = fi.source_key AND cs.comic_id = fi.comic_id
-         WHERE ${where.join(' AND ')}
-         GROUP BY fi.source_key, fi.comic_id, fi.folder_id
-         ORDER BY fi.folder_id, fi.page_index, fi.display_order, fi.comic_id''',
-      args,
-    );
-    final listStrategySources = {
-      for (final folder in folders)
-        if (ComicSource.find(folder.sourceKey)?.favoriteData?.updateCheck !=
-            null)
-          folder.sourceKey,
-    };
-    return [
-      for (final row in rows)
-        if (!listStrategySources.contains(row['source_key'] as String))
-          ScanCandidate(
-            sourceKey: row['source_key'] as String,
-            comicId: row['comic_id'] as String,
-            folderId: row['folder_id'] as String,
-            lastCheckTime: row['last_check_time'] == null
-                ? null
-                : DateTime.fromMillisecondsSinceEpoch(
-                    row['last_check_time'] as int,
-                  ),
-            retryAfter: row['retry_after'] == null
-                ? null
-                : DateTime.fromMillisecondsSinceEpoch(
-                    row['retry_after'] as int,
-                  ),
-            nextCheckTime: row['next_check_at'] == null
-                ? null
-                : DateTime.fromMillisecondsSinceEpoch(
-                    row['next_check_at'] as int,
-                  ),
-          ),
-    ];
-  }
-
   List<FavoriteItemWithUpdateInfo> getComicsWithUpdatesInfo(
     NetworkFavoriteFolderRef folder,
   ) {
@@ -3453,380 +2564,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     }
   }
 
-  /// Atomically records a successful detail check and updates every cached
-  /// favorite snapshot for the same comic. The returned value is true only
-  /// when a same-version marker changed, so callers can decide whether to
-  /// replace a potentially signed cover URL.
-  bool applySuccessfulComicCheck(
-    NetworkFavoriteFolderRef fallback,
-    String comicId, {
-    String? updateTime,
-    UpdateState? updateState,
-    DateTime? sourceActivityAt,
-    DateTime? completedAt,
-    String? updateMarker,
-    String? title,
-    String? author,
-    int? chapterCount,
-    String? cover,
-  }) {
-    final sourceKey = fallback.sourceKey;
-    final finishedAt = completedAt ?? DateTime.now();
-    final candidateActivity =
-        sourceActivityAt ??
-        updateState?.updatedAt ??
-        parseFollowUpdateActivityTime(updateTime, now: finishedAt);
-    final folders = _comicFolders(fallback, comicId);
-    var changed = false;
-    _db.execute('BEGIN');
-    try {
-      final previousRows = _db.select(
-        '''SELECT * FROM comic_check_state
-           WHERE source_key = ? AND comic_id = ? LIMIT 1''',
-        [sourceKey, comicId],
-      );
-      final previous = previousRows.isEmpty ? null : previousRows.first;
-      final previousMarker = previous?['update_marker'] as String?;
-      final trackingTransaction = _SqliteTrackingApplyTransaction(
-        _db,
-        begin: false,
-      );
-      final trackingResult =
-          TrackingApplyService(
-            _SqliteTrackingApplyStore(_db),
-            diagnostics: trackingDiagnostics,
-          ).applyInTransaction(
-            trackingTransaction,
-            TrackingObservation(
-              origin: TrackingObservationOrigin.localDetail,
-              revision: 'local',
-              artifact: TrackingArtifactIdentity(
-                sourceKey: sourceKey,
-                fileName: '$sourceKey.js',
-              ),
-              comicId: comicId,
-              observedAt: finishedAt,
-              validUntil: finishedAt,
-              state: updateState,
-              marker: updateMarker,
-            ),
-          );
-      changed = trackingResult.decision.contentChange == ContentChange.changed;
-      final acceptedUpdateMarker = trackingResult.baselinePersisted
-          ? updateMarker
-          : previousMarker;
-      final acceptedLastUpdateTime = trackingResult.baselinePersisted
-          ? updateState?.updatedAt?.toIso8601String() ?? updateTime
-          : previous?['last_update_time'] as String?;
-      final previousActivity = _dateTimeFromRow(
-        previous?['source_activity_at'],
-      );
-      final acceptedActivity = !trackingResult.baselinePersisted
-          ? previousActivity
-          : candidateActivity == null
-          ? previousActivity
-          : previousActivity == null ||
-                candidateActivity.isAfter(previousActivity)
-          ? candidateActivity
-          : previousActivity;
-      final baseline = _dateTimeFromRow(previous?['baseline_at']) ?? finishedAt;
-      var autoUntil = _dateTimeFromRow(previous?['auto_hot_until']);
-      if (changed) {
-        final candidateUntil = finishedAt.add(kFollowUpdateHotWindow);
-        if (autoUntil == null || candidateUntil.isAfter(autoUntil)) {
-          autoUntil = candidateUntil;
-        }
-      }
-      final manualUntil = _dateTimeFromRow(previous?['manual_hot_until']);
-      final manualEnabled =
-          (previous?['manual_hot_enabled'] as int? ?? 0) != 0 &&
-          manualUntil != null &&
-          manualUntil.isAfter(finishedAt);
-      var jitterApplied =
-          (previous?['old_schedule_jitter_applied'] as int? ?? 0) != 0;
-      final effectiveActivity = acceptedActivity ?? baseline;
-      if (finishedAt.difference(effectiveActivity) <
-          kFollowUpdateOldScheduleJitterAge) {
-        jitterApplied = false;
-      }
-      final decision = computeNextSchedule(
-        completedAt: finishedAt,
-        effectiveActivityAt: effectiveActivity,
-        autoHotUntil: autoUntil,
-        manualHotEnabled: manualEnabled,
-        manualHotUntil: manualUntil,
-        oldScheduleJitterApplied: jitterApplied,
-        sourceKey: sourceKey,
-        comicId: comicId,
-      );
-      jitterApplied = decision.appliedOldScheduleJitter;
-      _db.execute(
-        '''INSERT INTO comic_check_state
-            (source_key, comic_id, last_update_time, update_marker,
-             last_check_time, has_new_update, baseline_at, source_activity_at,
-             next_check_at, auto_hot_until, manual_hot_until,
-             manual_hot_enabled, old_schedule_jitter_applied)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(source_key, comic_id) DO UPDATE SET
-             last_update_time = excluded.last_update_time,
-             update_marker = excluded.update_marker,
-             last_check_time = excluded.last_check_time,
-             retry_after = NULL,
-             check_failures = 0,
-             check_not_found_count = 0,
-             check_suspect_gone = 0,
-             has_new_update = excluded.has_new_update,
-             baseline_at = excluded.baseline_at,
-             source_activity_at = excluded.source_activity_at,
-             next_check_at = excluded.next_check_at,
-             auto_hot_until = excluded.auto_hot_until,
-             manual_hot_until = excluded.manual_hot_until,
-             manual_hot_enabled = excluded.manual_hot_enabled,
-             old_schedule_jitter_applied = excluded.old_schedule_jitter_applied''',
-        [
-          sourceKey,
-          comicId,
-          acceptedLastUpdateTime,
-          acceptedUpdateMarker,
-          finishedAt.millisecondsSinceEpoch,
-          trackingResult.hasNewUpdate ? 1 : 0,
-          baseline.millisecondsSinceEpoch,
-          acceptedActivity?.millisecondsSinceEpoch,
-          decision.nextCheckAt.millisecondsSinceEpoch,
-          autoUntil?.millisecondsSinceEpoch,
-          manualUntil?.millisecondsSinceEpoch,
-          manualEnabled ? 1 : 0,
-          jitterApplied ? 1 : 0,
-        ],
-      );
-      for (final folder in folders) {
-        updateBasicInfo(
-          folder,
-          comicId,
-          title: title,
-          author: author,
-          chapterCount: chapterCount,
-          cover: changed ? cover : null,
-        );
-      }
-      _db.execute('COMMIT');
-    } catch (_) {
-      _db.execute('ROLLBACK');
-      rethrow;
-    }
-    notifyListeners();
-    return changed;
-  }
-
-  /// Records a completed detail check in the comic-level state table. The
-  /// first marker only establishes a baseline; later marker changes are
-  /// actual updates. A successful check clears every delist/retry marker.
-  bool recordComicCheckEverywhere(
-    String sourceKey,
-    String comicId, {
-    String? updateTime,
-    UpdateState? updateState,
-    DateTime? sourceActivityAt,
-    DateTime? completedAt,
-    String? updateMarker,
-  }) {
-    final finishedAt = completedAt ?? DateTime.now();
-    final candidateActivity =
-        sourceActivityAt ??
-        updateState?.updatedAt ??
-        parseFollowUpdateActivityTime(updateTime, now: finishedAt);
-    _db.execute('BEGIN');
-    try {
-      final rows = _db.select(
-        '''SELECT * FROM comic_check_state
-           WHERE source_key = ? AND comic_id = ? LIMIT 1''',
-        [sourceKey, comicId],
-      );
-      final previous = rows.isEmpty ? null : rows.first;
-      final previousMarker = previous?['update_marker'] as String?;
-      final trackingTransaction = _SqliteTrackingApplyTransaction(
-        _db,
-        begin: false,
-      );
-      final trackingResult =
-          TrackingApplyService(
-            _SqliteTrackingApplyStore(_db),
-            diagnostics: trackingDiagnostics,
-          ).applyInTransaction(
-            trackingTransaction,
-            TrackingObservation(
-              origin: TrackingObservationOrigin.localDetail,
-              revision: 'local',
-              artifact: TrackingArtifactIdentity(
-                sourceKey: sourceKey,
-                fileName: '$sourceKey.js',
-              ),
-              comicId: comicId,
-              observedAt: finishedAt,
-              validUntil: finishedAt,
-              state: updateState,
-              marker: updateMarker,
-            ),
-          );
-      final changed =
-          trackingResult.decision.contentChange == ContentChange.changed;
-      final acceptedUpdateMarker = trackingResult.baselinePersisted
-          ? updateMarker
-          : previousMarker;
-      final acceptedLastUpdateTime = trackingResult.baselinePersisted
-          ? updateState?.updatedAt?.toIso8601String() ?? updateTime
-          : previous?['last_update_time'] as String?;
-      final previousActivity = _dateTimeFromRow(
-        previous?['source_activity_at'],
-      );
-      final acceptedActivity = !trackingResult.baselinePersisted
-          ? previousActivity
-          : candidateActivity == null
-          ? previousActivity
-          : previousActivity == null ||
-                candidateActivity.isAfter(previousActivity)
-          ? candidateActivity
-          : previousActivity;
-      final baseline = _dateTimeFromRow(previous?['baseline_at']) ?? finishedAt;
-      var autoUntil = _dateTimeFromRow(previous?['auto_hot_until']);
-      if (changed) {
-        final candidateUntil = finishedAt.add(kFollowUpdateHotWindow);
-        if (autoUntil == null || candidateUntil.isAfter(autoUntil)) {
-          autoUntil = candidateUntil;
-        }
-      }
-      final manualUntil = _dateTimeFromRow(previous?['manual_hot_until']);
-      final manualEnabled =
-          (previous?['manual_hot_enabled'] as int? ?? 0) != 0 &&
-          manualUntil != null &&
-          manualUntil.isAfter(finishedAt);
-      var jitterApplied =
-          (previous?['old_schedule_jitter_applied'] as int? ?? 0) != 0;
-      final effectiveActivity = acceptedActivity ?? baseline;
-      if (finishedAt.difference(effectiveActivity) <
-          kFollowUpdateOldScheduleJitterAge) {
-        jitterApplied = false;
-      }
-      final decision = computeNextSchedule(
-        completedAt: finishedAt,
-        effectiveActivityAt: effectiveActivity,
-        autoHotUntil: autoUntil,
-        manualHotEnabled: manualEnabled,
-        manualHotUntil: manualUntil,
-        oldScheduleJitterApplied: jitterApplied,
-        sourceKey: sourceKey,
-        comicId: comicId,
-      );
-      _db.execute(
-        '''INSERT INTO comic_check_state
-            (source_key, comic_id, last_update_time, update_marker,
-             last_check_time, has_new_update, baseline_at, source_activity_at,
-             next_check_at, auto_hot_until, manual_hot_until,
-             manual_hot_enabled, old_schedule_jitter_applied)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(source_key, comic_id) DO UPDATE SET
-             last_update_time = excluded.last_update_time,
-             update_marker = excluded.update_marker,
-             last_check_time = excluded.last_check_time,
-             retry_after = NULL,
-             check_failures = 0,
-             check_not_found_count = 0,
-             check_suspect_gone = 0,
-             has_new_update = excluded.has_new_update,
-             baseline_at = excluded.baseline_at,
-             source_activity_at = excluded.source_activity_at,
-             next_check_at = excluded.next_check_at,
-             auto_hot_until = excluded.auto_hot_until,
-             manual_hot_until = excluded.manual_hot_until,
-             manual_hot_enabled = excluded.manual_hot_enabled,
-             old_schedule_jitter_applied = excluded.old_schedule_jitter_applied''',
-        [
-          sourceKey,
-          comicId,
-          acceptedLastUpdateTime,
-          acceptedUpdateMarker,
-          finishedAt.millisecondsSinceEpoch,
-          trackingResult.hasNewUpdate ? 1 : 0,
-          baseline.millisecondsSinceEpoch,
-          acceptedActivity?.millisecondsSinceEpoch,
-          decision.nextCheckAt.millisecondsSinceEpoch,
-          autoUntil?.millisecondsSinceEpoch,
-          manualUntil?.millisecondsSinceEpoch,
-          manualEnabled ? 1 : 0,
-          decision.appliedOldScheduleJitter ? 1 : 0,
-        ],
-      );
-      _db.execute('COMMIT');
-      return changed;
-    } catch (_) {
-      _db.execute('ROLLBACK');
-      rethrow;
-    }
-  }
-
-  /// Marks [comicId] as temporarily skipped by automatic scans after it
-  /// failed a check. The value is persisted so a restart does not retry the
-  /// failed comic immediately.
-  void markComicRetryLaterEverywhere(
-    String sourceKey,
-    String comicId, {
-    Duration delay = const Duration(hours: 1),
-    int failures = 0,
-    DateTime? now,
-  }) {
-    _db.execute(
-      '''INSERT INTO comic_check_state
-          (source_key, comic_id, retry_after, check_failures)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(source_key, comic_id) DO UPDATE SET
-           retry_after = excluded.retry_after,
-           check_failures = excluded.check_failures''',
-      [
-        sourceKey,
-        comicId,
-        (now ?? DateTime.now()).add(delay).millisecondsSinceEpoch,
-        failures,
-      ],
-    );
-  }
-
-  /// Records one bare-400 delist hit and returns the accumulated count.
-  /// Reset by any successful check, a suspect mark or a source-wide clear.
-  int markComicNotFoundHitEverywhere(String sourceKey, String comicId) {
-    _db.execute(
-      '''INSERT INTO comic_check_state
-          (source_key, comic_id, check_not_found_count)
-         VALUES (?, ?, 1)
-         ON CONFLICT(source_key, comic_id) DO UPDATE SET
-           check_not_found_count = comic_check_state.check_not_found_count + 1''',
-      [sourceKey, comicId],
-    );
-    final rows = _db.select(
-      '''SELECT check_not_found_count FROM comic_check_state
-         WHERE source_key = ? AND comic_id = ?''',
-      [sourceKey, comicId],
-    );
-    return rows.first['check_not_found_count'] as int;
-  }
-
-  /// Marks [comicId] as suspected removed. Such comics are skipped by all
-  /// follow-up scans until the user clears the mark or removes the favorite.
-  void markComicSuspectGoneEverywhere(String sourceKey, String comicId) {
-    _db.execute(
-      '''INSERT INTO comic_check_state
-          (source_key, comic_id, check_suspect_gone, check_failures,
-           check_not_found_count, last_check_time)
-         VALUES (?, ?, 1, 0, 0, ?)
-         ON CONFLICT(source_key, comic_id) DO UPDATE SET
-           check_suspect_gone = 1,
-           check_failures = 0,
-           check_not_found_count = 0,
-           retry_after = NULL,
-           last_check_time = excluded.last_check_time''',
-      [sourceKey, comicId, DateTime.now().millisecondsSinceEpoch],
-    );
-  }
-
   void clearComicSuspectGoneEverywhere(String sourceKey, String comicId) {
     _db.execute(
       '''UPDATE comic_check_state
@@ -3834,21 +2571,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
               check_not_found_count = 0, retry_after = NULL
           WHERE source_key = ? AND comic_id = ?''',
       [sourceKey, comicId],
-    );
-    notifyListeners();
-  }
-
-  /// Clears every suspected-removed mark of [sourceKey] (including marks made
-  /// by earlier runs). Used when the source is judged to be down: marks made
-  /// against its delist-looking responses are unreliable, so they are dropped
-  /// and the comics are re-evaluated by the next run once the source recovers.
-  void clearComicSuspectGoneForSourceEverywhere(String sourceKey) {
-    _db.execute(
-      '''UPDATE comic_check_state
-          SET check_suspect_gone = 0, check_failures = 0,
-              check_not_found_count = 0, retry_after = NULL
-          WHERE source_key = ? AND check_suspect_gone = 1''',
-      [sourceKey],
     );
     notifyListeners();
   }
@@ -3861,14 +2583,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       [sourceKey, comicId],
     );
     return rows.isNotEmpty;
-  }
-
-  /// Marks [comicId] as suspected removed. Used by the detail/reader page
-  /// paths: the user opened the comic and saw a 404/400/delist response
-  /// first-hand, so a single confirmed response is enough. Idempotent.
-  void recordComicNotFoundEverywhere(String sourceKey, String comicId) {
-    markComicSuspectGoneEverywhere(sourceKey, comicId);
-    notifyListeners();
   }
 
   List<FavoriteItemWithUpdateInfo> getSuspectGoneComicsInFolders(
@@ -3969,47 +2683,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
 
   bool hasUncheckedComics(NetworkFavoriteFolderRef folder) =>
       countUncheckedComics(folder) > 0;
-
-  /// Removes every follow-up baseline so the next check re-establishes it.
-  ///
-  /// Only update-check metadata is reset; cached comics and folders remain.
-  /// Retry cooldowns and failure counters are part of the baseline: without
-  /// clearing them the never-checked semantics would count cooled comics as
-  /// checked and the next scan would never retry them.
-  void clearAllBaselines({DateTime? now}) {
-    final currentMs = (now ?? DateTime.now()).millisecondsSinceEpoch;
-    _db.execute('BEGIN');
-    try {
-      _db.execute('''
-        UPDATE comic_check_state
-        SET last_check_time = NULL,
-            last_update_time = NULL,
-            update_state = NULL,
-            update_marker = NULL,
-            has_new_update = 0,
-            retry_after = NULL,
-            check_failures = 0,
-            source_update_metadata = NULL,
-            baseline_at = NULL,
-            source_activity_at = NULL,
-            next_check_at = NULL,
-            auto_hot_until = NULL,
-            old_schedule_jitter_applied = 0,
-            manual_hot_enabled = CASE
-              WHEN manual_hot_until IS NOT NULL
-               AND manual_hot_until > $currentMs
-              THEN manual_hot_enabled ELSE 0 END
-      ''');
-      // List strategy baselines live at folder level; clear them together so
-      // the next follow-up run rebuilds both detail and list baselines.
-      _db.execute('DELETE FROM favorite_update_scan_state');
-      _db.execute('COMMIT');
-    } catch (_) {
-      _db.execute('ROLLBACK');
-      rethrow;
-    }
-    notifyListeners();
-  }
 
   /// Drops list-strategy scan baselines after an explicit account session
   /// change. Detail-strategy sources are deliberately untouched.

@@ -189,12 +189,9 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     );
     final cache = NetworkFavoriteCacheManager();
     final isSuspect = cache.isComicSuspectGone(widget.sourceKey, widget.id);
-    // Only a confirmed delist signal (404/410/delist wording) or an already
-    // suspected mark shows the destructive actions; a bare 400 may be a
-    // risk-control rejection.
-    final notFound =
-        classifyNotFoundError(error ?? '') == NotFoundSignal.strong ||
-        isSuspect;
+    // Destructive actions are driven only by the persisted historical mark.
+    // A current network error is never interpreted as new delist evidence.
+    final notFound = isSuspect;
     final isFavorite = cache.isFavoriteKnown(widget.sourceKey, widget.id);
     final buttons = <Widget>[
       if (isDownloaded)
@@ -222,7 +219,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       if (notFound && isFavorite && isSuspect)
         OutlinedButton.icon(
           icon: const Icon(Icons.restart_alt),
-          onPressed: clearSuspectAndRecheck,
+          onPressed: clearSuspect,
           label: Text('Clear Suspected Removed'.tl),
         ),
     ];
@@ -246,19 +243,13 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     context.pop();
   }
 
-  Future<void> clearSuspectAndRecheck() async {
+  void clearSuspect() {
     NetworkFavoriteCacheManager().clearComicSuspectGoneEverywhere(
       widget.sourceKey,
       widget.id,
     );
-    context.showMessage(message: 'Rechecking'.tl);
-    final succeeded = await recheckFavoriteComic(widget.sourceKey, widget.id);
-    if (!mounted) return;
-    if (succeeded) {
-      retry();
-    } else {
-      context.showMessage(message: error ?? 'Failed'.tl);
-    }
+    update();
+    context.showMessage(message: 'Cleared'.tl);
   }
 
   @override
@@ -418,26 +409,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   }
 
   @override
-  void onLoadError(String message) {
-    if (!isNotFoundError(message)) return;
-    final cache = NetworkFavoriteCacheManager();
-    if (cache.isFavoriteKnown(widget.sourceKey, widget.id)) {
-      cache.recordComicNotFoundEverywhere(widget.sourceKey, widget.id);
-    }
-  }
-
-  @override
-  @protected
-  bool shouldRetryLoad(String message, int retryCount) {
-    return classifyNotFoundError(message) != NotFoundSignal.strong;
-  }
-
-  @override
   void onDataLoaded() {
-    final cache = NetworkFavoriteCacheManager();
-    if (cache.isComicSuspectGone(widget.sourceKey, widget.id)) {
-      cache.clearComicSuspectGoneEverywhere(widget.sourceKey, widget.id);
-    }
     isLiked = comic.isLiked ?? false;
     isFavorite =
         comic.isFavorite ??
