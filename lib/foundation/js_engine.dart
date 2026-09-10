@@ -5,7 +5,7 @@ import 'dart:math' as math;
 import 'package:crypto/crypto.dart';
 import 'package:dio/io.dart';
 import 'package:enough_convert/enough_convert.dart';
-import 'package:flutter/foundation.dart' show protected;
+import 'package:flutter/foundation.dart' show protected, visibleForTesting;
 import 'package:flutter/services.dart';
 import 'package:html/parser.dart' as html;
 import 'package:html/dom.dart' as dom;
@@ -30,11 +30,18 @@ import 'package:venera/foundation/js_pool.dart';
 import 'package:venera/network/app_dio.dart';
 import 'package:venera/network/cookie_jar.dart';
 import 'package:venera/network/proxy.dart';
+import 'package:venera/network/cache.dart';
+import 'package:venera/network/cloudflare.dart';
 import 'package:venera/utils/init.dart';
 
 import 'comic_source/comic_source.dart';
 import 'consts.dart';
 import 'log.dart';
+import 'scan/failure_sanitizer.dart';
+import 'scan/models.dart';
+import 'scan/scan_call_lease.dart';
+import 'scan/scan_limits.dart';
+import 'scan/source_adapter.dart';
 
 class JavaScriptRuntimeException implements Exception {
   final String message;
@@ -56,11 +63,13 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
 
   FlutterQjs? _engine;
   final _sourceDomains = <ManagedSourceContext, _SourceJsDomain>{};
+  final _scanCapabilities = <ScanCapabilities>{};
   String? _initSource;
 
   bool _closed = true;
 
   Dio? _dio;
+  HttpClientAdapter Function(String? proxy)? _scanIoAdapterFactory;
 
   static Future<void> reset() async {
     final old = _cache;
@@ -80,6 +89,18 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
         validateStatus: (status) => true,
       ),
     );
+  }
+
+  @visibleForTesting
+  void setDioForTesting(Dio dio) {
+    _dio = dio;
+  }
+
+  @visibleForTesting
+  void setScanIoAdapterFactoryForTesting(
+    HttpClientAdapter Function(String? proxy)? factory,
+  ) {
+    _scanIoAdapterFactory = factory;
   }
 
   static Uint8List? _jsInitCache;
@@ -292,50 +313,186 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
       }
       return null;
     } catch (e, s) {
-      Log.error("Failed to handle message: $message\n$e\n$s", "JsEngine");
+      if (message is Map && message["method"] == "save_data") {
+        Log.error("Failed to handle save_data (${e.runtimeType})", "JsEngine");
+      } else {
+        Log.error("Failed to handle message: $message\n$e\n$s", "JsEngine");
+      }
       rethrow;
     }
   }
 
+  /// Host-only request entry used by the optional Debug scan capability.
+  /// Source code can provide request facts, but not cancellation, context,
+  /// logging, cache or database controls.
+  Future<Map<String, dynamic>> requestForScan(
+    Object? value,
+    ManagedSourceContext? executionContext, {
+    required ScanCallLease lease,
+    ScanLimits limits = const ScanLimits(),
+  }) async {
+    late final ScanHttpRequest request;
+    try {
+      request = ScanHttpRequest.fromJson(value);
+    } catch (error) {
+      return {
+        'ok': false,
+        'failure': FailureSanitizer.sanitize({
+          'exceptionType': 'ScanRequestValidation',
+          'message': 'Invalid scan request',
+        }, limits: limits).toJson(),
+      };
+    }
+    lease.checkOpen();
+    _requireExecutionContext(executionContext);
+    _requirePublished(executionContext);
+    final response = await _http(
+      <String, dynamic>{
+        'url': request.url,
+        'headers': request.headers,
+        'http_method': request.method,
+        if (request.body != null) 'data': request.body,
+      },
+      executionContext,
+      scanLease: lease,
+      isScanRequest: true,
+      limits: limits,
+    );
+    lease.guard.check();
+    lease.checkOpen();
+    final status = response['status'];
+    final rawHeaders = response['headers'];
+    final headers = rawHeaders is Map
+        ? <String, String>{
+            for (final entry in rawHeaders.entries)
+              if (entry.key is String && entry.value is String)
+                entry.key as String: entry.value as String,
+          }
+        : <String, String>{};
+    final error = response['error'];
+    if (error != null || status is! int) {
+      return {
+        'ok': false,
+        'failure': FailureSanitizer.sanitize({
+          'httpStatus': status,
+          'exceptionType': response['errorType'],
+          'message': error is String ? error : 'Scan request failed',
+          'retryAfter': _retryAfterHeader(headers['retry-after']),
+        }, limits: limits).toJson(),
+      };
+    }
+    final body = response['body'];
+    if (body is! String) {
+      return {
+        'ok': false,
+        'failure': FailureSanitizer.sanitize({
+          'httpStatus': status,
+          'exceptionType': 'ScanResponseDecode',
+          'message': 'Scan response was not valid UTF-8 text',
+        }, limits: limits).toJson(),
+      };
+    }
+    return {
+      'ok': true,
+      'response': ScanHttpResponse(
+        status: status,
+        headers: headers,
+        body: body,
+      ).toJson(),
+    };
+  }
+
+  String? _retryAfterHeader(String? value) {
+    if (value == null || value.trim().isEmpty) return null;
+    final candidate = value.trim();
+    if (RegExp(r'^\d+$').hasMatch(candidate)) {
+      final seconds = int.tryParse(candidate);
+      if (seconds == null || seconds < 0) return null;
+      return DateTime.now()
+          .toUtc()
+          .add(Duration(seconds: seconds))
+          .toIso8601String();
+    }
+    return candidate;
+  }
+
   Future<Map<String, dynamic>> _http(
     Map<String, dynamic> req,
-    ManagedSourceContext? executionContext,
-  ) async {
+    ManagedSourceContext? executionContext, {
+    ScanCallLease? scanLease,
+    bool isScanRequest = false,
+    ScanLimits limits = const ScanLimits(),
+  }) async {
     _requireExecutionContext(executionContext);
     _requirePublished(executionContext);
     Response? response;
     String? error;
+    String? errorType;
+    CancelToken? cancellation;
+    Timer? requestTimer;
+    var requestTimedOut = false;
+    Dio? privateDio;
+    void Function()? removeRevokeListener;
 
     try {
+      if (isScanRequest) {
+        scanLease?.guard.check();
+        scanLease?.checkOpen();
+      }
       var headers = Map<String, dynamic>.from(req["headers"] ?? {});
       var extra = Map<String, dynamic>.from(req["extra"] ?? {});
+      if (isScanRequest) {
+        // These values are host-owned.  They are never taken from a JS
+        // `extra` object supplied by the source.
+        extra = <String, dynamic>{'veneraScan': true};
+      }
       if (headers["user-agent"] == null && headers["User-Agent"] == null) {
         headers["User-Agent"] = webUA;
       }
       var dio = _dio;
       if (headers['http_client'] == "dart:io") {
-        dio = Dio(
+        privateDio = dio = Dio(
           BaseOptions(
-            responseType: ResponseType.plain,
+            responseType: isScanRequest
+                ? ResponseType.stream
+                : ResponseType.plain,
             validateStatus: (status) => true,
           ),
         );
         var proxy = await getProxy();
-        dio.httpClientAdapter = IOHttpClientAdapter(
-          createHttpClient: () {
-            return HttpClient()
-              ..findProxy = (uri) => proxy == null ? "DIRECT" : "PROXY $proxy";
-          },
-        );
+        dio.httpClientAdapter =
+            _scanIoAdapterFactory?.call(proxy) ??
+            IOHttpClientAdapter(
+              createHttpClient: () {
+                return HttpClient()
+                  ..findProxy = (uri) =>
+                      proxy == null ? "DIRECT" : "PROXY $proxy";
+              },
+            );
         dio.interceptors.add(
           CookieManagerSql(SingleInstanceCookieJar.instance!),
         );
-        dio.interceptors.add(LogInterceptor());
+        if (isScanRequest) {
+          dio.interceptors.add(NetworkCacheManager());
+          dio.interceptors.add(CloudflareInterceptor());
+          dio.interceptors.add(MyLogInterceptor());
+        } else {
+          dio.interceptors.add(LogInterceptor());
+        }
       }
       _requireExecutionContext(executionContext);
-      final cancellation = CancelToken();
-      executionContext?.onRevoke(
-        () => cancellation.cancel('Source execution revoked'),
+      cancellation = CancelToken();
+      if (scanLease != null && !scanLease.registerRequest(cancellation)) {
+        scanLease.checkOpen();
+      }
+      if (isScanRequest) {
+        requestTimer = Timer(limits.requestTimeout, () {
+          requestTimedOut = true;
+          cancellation?.cancel('Scan request deadline');
+        });
+      }
+      removeRevokeListener = executionContext?.addRevokeListener(
+        () => cancellation?.cancel('Source execution revoked'),
       );
       response = await dio!.request(
         req["url"],
@@ -343,7 +500,9 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
         data: req["data"],
         options: Options(
           method: req['http_method'],
-          responseType: req["bytes"] == true
+          responseType: isScanRequest
+              ? ResponseType.stream
+              : req["bytes"] == true
               ? ResponseType.bytes
               : ResponseType.plain,
           headers: headers,
@@ -351,29 +510,125 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
         ),
       );
       _requireExecutionContext(executionContext);
+      if (isScanRequest) {
+        scanLease?.guard.check();
+        scanLease?.checkOpen();
+        response = Response<dynamic>(
+          requestOptions: response.requestOptions,
+          statusCode: response.statusCode,
+          statusMessage: response.statusMessage,
+          headers: response.headers,
+          data: await _readScanResponseBody(
+            response.data,
+            cancellation,
+            limits.maxScanResponseBytes,
+          ),
+        );
+      }
     } on CatalogRuntimeDenied {
+      if (!isScanRequest) rethrow;
+      throw const ScanControlException(ScanControlReason.sourceInvalidated);
+    } on ScanControlException {
+      rethrow;
+    } on ScanLeaseException {
       rethrow;
     } catch (e) {
-      error = e.toString();
+      if (isScanRequest) {
+        if (scanLease != null) {
+          try {
+            scanLease.guard.check();
+            if (scanLease.isControlCanceled) {
+              throw ScanControlException(
+                scanLease.controlReason ?? ScanControlReason.userCanceled,
+              );
+            }
+          } on ScanControlException {
+            rethrow;
+          }
+        }
+        errorType = requestTimedOut
+            ? 'ScanRequestTimeout'
+            : e.runtimeType.toString();
+        error = requestTimedOut
+            ? 'Scan request exceeded its deadline'
+            : 'Scan request failed';
+      } else {
+        error = e.toString();
+      }
+    } finally {
+      requestTimer?.cancel();
+      removeRevokeListener?.call();
+      if (scanLease != null && cancellation != null) {
+        scanLease.unregisterRequest(cancellation);
+      }
+      if (privateDio != null) {
+        privateDio.close(force: true);
+      }
     }
 
-    Map<String, String> headers = {};
+    Map<String, String> responseHeaders = {};
 
     response?.headers.forEach(
-      (name, values) => headers[name] = values.join(','),
+      (name, values) => responseHeaders[name] = values.join(','),
     );
 
     dynamic body = response?.data;
+    if (isScanRequest && body is! String && body != null) {
+      error ??= 'Scan response was not valid UTF-8 text';
+      errorType ??= 'ScanResponseDecode';
+      body = '';
+    }
     if (body is! Uint8List && body is List<int>) {
       body = Uint8List.fromList(body);
     }
 
     return {
       "status": response?.statusCode,
-      "headers": headers,
+      "headers": responseHeaders,
       "body": body,
       "error": error,
+      "errorType": errorType,
     };
+  }
+
+  Future<String> _readScanResponseBody(
+    Object? value,
+    CancelToken cancellation,
+    int maxBytes,
+  ) async {
+    final bytes = <int>[];
+    void addBytes(List<int> chunk) {
+      if (bytes.length + chunk.length > maxBytes) {
+        cancellation.cancel('Scan response size limit');
+        throw ResponseSizeLimitException(maxBytes);
+      }
+      bytes.addAll(chunk);
+    }
+
+    if (value is ResponseBody) {
+      await for (final chunk in value.stream) {
+        addBytes(chunk);
+      }
+    } else if (value is Stream) {
+      await for (final chunk in value) {
+        if (chunk is List<int>) {
+          addBytes(chunk);
+        } else {
+          throw const FormatException('scan response chunk is not bytes');
+        }
+      }
+    } else if (value is List<int>) {
+      addBytes(value);
+    } else if (value is String) {
+      addBytes(utf8.encode(value));
+    } else if (value != null) {
+      throw const FormatException('scan response is not text');
+    }
+    try {
+      return utf8.decode(bytes, allowMalformed: false);
+    } catch (_) {
+      throw const FormatException('scan response is not valid UTF-8');
+    }
   }
 
   dynamic runCode(
@@ -421,11 +676,46 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
     managedRuntimeBridge.require(context);
   }
 
+  /// Keeps scan callback ownership with the engine even while a source is
+  /// being validated or held outside the published source manager.
+  void registerScanCapabilities(ScanCapabilities capabilities) {
+    _scanCapabilities.add(capabilities);
+  }
+
   void dispose() {
+    // Source scan callbacks are owned by the published source assembly, not
+    // by the Dart GC. Release them before tearing down the native runtime so
+    // QuickJS can observe a clean handle table during shutdown.
+    for (final source in ComicSource.all()) {
+      source.scan?.dispose();
+    }
+    for (final capabilities in _scanCapabilities.toList()) {
+      capabilities.dispose();
+    }
+    _scanCapabilities.clear();
     for (final domain in _sourceDomains.values.toList()) {
       domain.close();
     }
     _sourceDomains.clear();
+    if (_engine != null) {
+      // Parser-created source instances are held by the JS static registry
+      // (and by the parser's temporary global). Drop those roots before the
+      // native context is freed; otherwise closures captured by scan wrappers
+      // remain visible as QuickJS reference leaks.
+      try {
+        _engine!.evaluate('''
+          (() => {
+            try { delete this["temp"]; } catch (_) {}
+            try {
+              if (typeof ComicSource !== "undefined") ComicSource.sources = {};
+            } catch (_) {}
+          })()
+        ''');
+      } catch (_) {
+        // The engine may already be partially torn down; close remains the
+        // final owner of native resources in that case.
+      }
+    }
     _cache = null;
     _closed = true;
     _engine?.close();
@@ -1066,15 +1356,29 @@ class DocumentWrapper {
 
 class JSAutoFreeFunction {
   final JSInvokable func;
+  bool _disposed = false;
 
   /// Automatically free the function when it's not used anymore
   JSAutoFreeFunction(this.func) {
     func.dup();
-    finalizer.attach(this, func);
+    finalizer.attach(this, func, detach: this);
   }
 
   dynamic call(List<dynamic> args) {
+    if (_disposed) {
+      throw StateError('JavaScript function has been released.');
+    }
     return func(args);
+  }
+
+  /// Releases the retained native function immediately. This is idempotent so
+  /// source replacement, context revocation, and engine shutdown may all use
+  /// the same ownership path safely.
+  void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    finalizer.detach(this);
+    func.destroy();
   }
 
   static final finalizer = Finalizer<JSInvokable>((func) {

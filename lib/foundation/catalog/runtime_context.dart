@@ -23,6 +23,8 @@ class ManagedSourceContext {
 
   Map<String, dynamic> get data => Map.unmodifiable(_data);
 
+  int get revokeListenerCount => _onRevoke.length;
+
   Object? get preparationViolation => _preparationViolation;
 
   void recordPreparationViolation(Object error) {
@@ -88,10 +90,31 @@ class ManagedSourceContext {
   }
 
   void onRevoke(void Function() callback) {
+    addRevokeListener(callback);
+  }
+
+  /// Registers a revocation callback and returns a backwards-compatible
+  /// removal function.  Long-lived source callbacks may keep their listener
+  /// for the context lifetime; short-lived scan requests must unregister it
+  /// as soon as their request settles.
+  void Function() addRevokeListener(void Function() callback) {
     if (phase == ManagedSourcePhase.revoked) {
       callback();
+      return () {};
     } else {
-      _onRevoke.add(callback);
+      var active = true;
+      void wrapped() {
+        if (!active) return;
+        active = false;
+        callback();
+      }
+
+      _onRevoke.add(wrapped);
+      return () {
+        if (!active) return;
+        active = false;
+        _onRevoke.remove(wrapped);
+      };
     }
   }
 

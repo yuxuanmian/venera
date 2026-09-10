@@ -139,6 +139,7 @@ class ComicSourceParser {
     requireCandidateAdmission?.call();
     _runCode("""(() => { $js
         this['temp'] = new $className()
+        return null
       }).call()
     """, className);
     _name =
@@ -184,6 +185,7 @@ class ComicSourceParser {
     requireCandidateAdmission?.call();
     _runCode("""
       ComicSource.sources.$_key = this['temp'];
+      null;
     """);
     try {
       var source = ComicSource(
@@ -221,6 +223,7 @@ class ComicSourceParser {
         _parseStarRatingFunc(),
         _parseArchiveDownloader(),
         runtimeContext: executionContext,
+        scan: _parseScanCapabilities(),
       );
 
       if (loadData) {
@@ -268,6 +271,402 @@ class ComicSourceParser {
     }
   }
 
+  /// Discovers the optional scan object without invoking any source method.
+  /// The returned callbacks retain the parsed runtime alias and context, so
+  /// replacing a published source with another instance of the same key cannot
+  /// redirect an old callback.
+  ScanCapabilities? _parseScanCapabilities() {
+    final shape = _runCode('''
+      (() => {
+        const scan = ComicSource.sources.$_key?.scan;
+        if (scan === undefined || scan === null) return {absent: true};
+        if (typeof scan !== "object" || Array.isArray(scan)) {
+          return {invalid: "scan must be an object"};
+        }
+        const describe = (name) => {
+          if (!Object.prototype.hasOwnProperty.call(scan, name)) {
+            return {present: false};
+          }
+          const value = scan[name];
+          if (value === null || typeof value !== "object" || Array.isArray(value)) {
+            return {invalid: name + " must be an object"};
+          }
+          if (!Object.prototype.hasOwnProperty.call(value, "load")) {
+            return {present: true, hasLoad: false};
+          }
+          if (typeof value.load !== "function") {
+            return {invalid: name + ".load must be a function"};
+          }
+          const owner = ComicSource.sources.$_key;
+          const original = value.load;
+          const active = [];
+          const check = (current, depth) => {
+            if (depth > 8) throw new Error("scan result is too deep");
+            if (current === null || typeof current === "string" ||
+                typeof current === "boolean") return;
+            if (typeof current === "number") {
+              if (!Number.isFinite(current)) throw new Error("scan result is not finite");
+              return;
+            }
+            if (typeof current === "undefined" || typeof current === "function" ||
+                typeof current === "bigint" || current instanceof Date ||
+                typeof current !== "object") {
+              throw new Error("scan result is not JSON-safe");
+            }
+            if (active.includes(current)) throw new Error("scan result is cyclic");
+            active.push(current);
+            if (Array.isArray(current)) {
+              current.forEach((item) => check(item, depth + 1));
+            } else {
+              const prototype = Object.getPrototypeOf(current);
+              if (prototype !== Object.prototype && prototype !== null) {
+                throw new Error("scan result is not a plain object");
+              }
+              Object.keys(current).forEach((key) => check(current[key], depth + 1));
+            }
+            active.pop();
+          };
+          const wrapped = async function(...args) {
+            try {
+              const callArgs = [...args];
+              // flutter_qjs encodes a Dart null argument as JS undefined.
+              // Collection's first cursor is an explicit protocol null, so
+              // restore that value before the source state machine sees it.
+              if (name === "collection" && typeof callArgs[1] === "undefined") {
+                callArgs[1] = null;
+              }
+              const hostRequest = callArgs[callArgs.length - 1];
+              if (typeof hostRequest === "function") {
+                callArgs[callArgs.length - 1] = async (...requestArgs) => {
+                  const envelope = await hostRequest(...requestArgs);
+                  if (envelope && envelope.ok === true &&
+                      envelope.response && typeof envelope.response === "object") {
+                    return envelope.response;
+                  }
+                  if (envelope && envelope.ok === false &&
+                      envelope.failure && typeof envelope.failure === "object") {
+                    const failure = new Error("scan request failed");
+                    failure.scanFailure = envelope.failure;
+                    throw failure;
+                  }
+                  throw new Error("invalid scan host response envelope");
+                };
+              }
+              const result = await original.apply(owner, callArgs);
+              check(result, 0);
+              let isCollectionFailure = false;
+              if (name === "collection") {
+                const hasFailure = result !== null &&
+                    typeof result === "object" &&
+                    !Array.isArray(result) &&
+                    Object.prototype.hasOwnProperty.call(result, "failure");
+                if (hasFailure) {
+                  isCollectionFailure = true;
+                  const keys = Object.keys(result);
+                  const failure = result.failure;
+                  const prototype = failure === null ||
+                      typeof failure !== "object"
+                      ? undefined
+                      : Object.getPrototypeOf(failure);
+                  if (keys.includes("items") || keys.includes("next") ||
+                      failure === null || typeof failure !== "object" ||
+                      Array.isArray(failure) ||
+                      (prototype !== Object.prototype && prototype !== null)) {
+                    throw new Error("invalid collection failure envelope");
+                  }
+                } else if (result === null ||
+                    typeof result !== "object" ||
+                    !Object.prototype.hasOwnProperty.call(result, "next") ||
+                    typeof result.next === "undefined") {
+                  throw new Error("collection result must own next");
+                }
+              }
+              const encoded = JSON.stringify(result);
+              if (typeof encoded !== "string" || encoded.length > 2 * 1024 * 1024) {
+                throw new Error("scan result is too large");
+              }
+              if (name === "collection" && !isCollectionFailure &&
+                  result.next !== null) {
+                const cursor = JSON.stringify(result.next);
+                if (typeof cursor !== "string" || cursor.length > 8192) {
+                  throw new Error("scan cursor is too large");
+                }
+              }
+              return result;
+            } catch (error) {
+              if (error && error.scanFailure && typeof error.scanFailure === "object") {
+                return {failure: error.scanFailure};
+              }
+              throw error;
+            }
+          };
+          return {present: true, hasLoad: true, load: wrapped};
+        };
+        return {
+          comic: describe("comic"),
+          collection: describe("collection"),
+          primary: Object.prototype.hasOwnProperty.call(scan, "primary")
+            ? scan.primary : null,
+        };
+      })()
+    ''');
+    try {
+      return _buildScanCapabilities(shape);
+    } finally {
+      // The bridge returns a Dart graph that still owns every JSRef it
+      // contains. Release the graph after transferring the load function to
+      // its explicit JSAutoFreeFunction owner.
+      _freeScanJsRefs(shape);
+    }
+  }
+
+  ScanCapabilities? _buildScanCapabilities(dynamic shape) {
+    if (shape is! Map) {
+      return const ScanCapabilities.invalid('invalid scan declaration');
+    }
+    if (shape['absent'] == true) {
+      return null;
+    }
+    if (shape['invalid'] is String) {
+      return ScanCapabilities.invalid(shape['invalid'] as String);
+    }
+    final comic = shape['comic'];
+    final collection = shape['collection'];
+    if (comic is! Map || collection is! Map) {
+      return const ScanCapabilities.invalid('invalid scan capability');
+    }
+    if (comic['invalid'] is String) {
+      return ScanCapabilities.invalid(comic['invalid'] as String);
+    }
+    if (collection['invalid'] is String) {
+      return ScanCapabilities.invalid(collection['invalid'] as String);
+    }
+
+    final comicLoad = comic['hasLoad'] == true ? comic['load'] : null;
+    final collectionLoad = collection['hasLoad'] == true
+        ? collection['load']
+        : null;
+    if (comic['present'] == true &&
+        comic['hasLoad'] != true &&
+        comicLoad == null) {
+      return const ScanCapabilities.invalid('comic.load is required');
+    }
+    if (collection['present'] == true &&
+        collection['hasLoad'] != true &&
+        collectionLoad == null) {
+      return const ScanCapabilities.invalid('collection.load is required');
+    }
+    final hasComic = comicLoad is JSInvokable;
+    final hasCollection = collectionLoad is JSInvokable;
+    final count = (hasComic ? 1 : 0) + (hasCollection ? 1 : 0);
+    if (count == 0) {
+      return const ScanCapabilities.invalid('scan has no load function');
+    }
+
+    final rawPrimary = shape['primary'];
+    ScanProducer? primary;
+    if (rawPrimary != null) {
+      primary = ScanProducerValue.parse(rawPrimary);
+      if (primary == null) {
+        return const ScanCapabilities.invalid('invalid scan.primary');
+      }
+    }
+    if (count == 1) {
+      final only = hasComic ? ScanProducer.comic : ScanProducer.collection;
+      if (primary != null && primary != only) {
+        return const ScanCapabilities.invalid(
+          'scan.primary points to a missing capability',
+        );
+      }
+      primary ??= only;
+    } else if (primary == null) {
+      return const ScanCapabilities.invalid('scan.primary is required');
+    }
+
+    ScanCapability? comicCapability;
+    ScanCapability? collectionCapability;
+    final ownedFunctions = <JSAutoFreeFunction>[];
+
+    JSAutoFreeFunction ownFunction(JSInvokable function) {
+      for (final owned in ownedFunctions) {
+        if (identical(owned.func, function)) return owned;
+      }
+      final owned = JSAutoFreeFunction(function);
+      ownedFunctions.add(owned);
+      return owned;
+    }
+
+    // The native bridge may expose closure values which are not part of the
+    // public scan shape but are still present in the returned Dart graph.
+    // Transfer all of them to explicit owners before releasing that graph.
+    for (final function in _scanJsFunctions(shape)) {
+      ownFunction(function);
+    }
+
+    if (hasComic) {
+      final function = ownFunction(comicLoad);
+      comicCapability = ScanCapability.comic(_wrapScanComicLoader(function));
+    }
+    if (hasCollection) {
+      final function = ownFunction(collectionLoad);
+      collectionCapability = ScanCapability.collection(
+        _wrapScanCollectionLoader(function),
+      );
+    }
+    void disposeFunctions() {
+      for (final function in ownedFunctions) {
+        function.dispose();
+      }
+    }
+
+    _executionContext?.onRevoke(disposeFunctions);
+    final capabilities = ScanCapabilities.supported(
+      primary: primary,
+      comic: comicCapability,
+      collection: collectionCapability,
+      onDispose: disposeFunctions,
+    );
+    JsEngine().registerScanCapabilities(capabilities);
+    return capabilities;
+  }
+
+  List<JSInvokable> _scanJsFunctions(dynamic value) {
+    final functions = <JSInvokable>[];
+    final visited = Set<Object>.identity();
+    void visit(dynamic current) {
+      if (current is JSInvokable) {
+        if (!functions.any((function) => identical(function, current))) {
+          functions.add(current);
+        }
+        return;
+      }
+      if (current is List) {
+        if (!visited.add(current)) return;
+        for (final item in current) {
+          visit(item);
+        }
+        return;
+      }
+      if (current is Map) {
+        if (!visited.add(current)) return;
+        for (final item in current.values) {
+          visit(item);
+        }
+      }
+    }
+
+    visit(value);
+    return functions;
+  }
+
+  void _freeScanJsRefs(dynamic value) {
+    final visited = Set<Object>.identity();
+    void visit(dynamic current) {
+      if (current is JSRef) {
+        if (visited.add(current)) current.free();
+        return;
+      }
+      if (current is List) {
+        if (!visited.add(current)) return;
+        for (final item in current) {
+          visit(item);
+        }
+        return;
+      }
+      if (current is Map) {
+        if (!visited.add(current)) return;
+        for (final item in current.values) {
+          visit(item);
+        }
+      }
+    }
+
+    visit(value);
+  }
+
+  ScanComicLoader _wrapScanComicLoader(JSAutoFreeFunction function) {
+    return (comicId, request) async {
+      final value = function([comicId, request]);
+      final result = value is Future ? await value : value;
+      return _checkScanJsValue(result, collection: false);
+    };
+  }
+
+  ScanCollectionLoader _wrapScanCollectionLoader(JSAutoFreeFunction function) {
+    return (collectionKey, cursor, request) async {
+      final value = function([collectionKey, cursor, request]);
+      final result = value is Future ? await value : value;
+      return _checkScanJsValue(result, collection: true);
+    };
+  }
+
+  /// Dart-side safety check is deliberately repeated after the managed JS
+  /// domain has wrapped the returned graph. The JS-side wrapper below is kept
+  /// in the parser call path so an undefined collection `next` cannot be
+  /// collapsed by the native bridge into null.
+  dynamic _checkScanJsValue(dynamic value, {required bool collection}) {
+    final active = Set<Object>.identity();
+    void visit(dynamic current, int depth) {
+      if (depth > 8) throw const FormatException('scan value is too deep');
+      if (current == null || current is String || current is bool) return;
+      if (current is num) {
+        if (!current.isFinite) {
+          throw const FormatException('scan value is not finite');
+        }
+        return;
+      }
+      if (current is Function ||
+          current is JSInvokable ||
+          current is DateTime) {
+        throw const FormatException('scan value is not JSON-safe');
+      }
+      if (current is List) {
+        if (!active.add(current)) {
+          throw const FormatException('scan value is cyclic');
+        }
+        try {
+          for (final item in current) {
+            visit(item, depth + 1);
+          }
+        } finally {
+          active.remove(current);
+        }
+        return;
+      }
+      if (current is Map) {
+        if (!active.add(current)) {
+          throw const FormatException('scan value is cyclic');
+        }
+        try {
+          for (final entry in current.entries) {
+            if (entry.key is! String) {
+              throw const FormatException('scan value has a non-string key');
+            }
+            visit(entry.value, depth + 1);
+          }
+        } finally {
+          active.remove(current);
+        }
+        return;
+      }
+      throw const FormatException('scan value is not JSON-safe');
+    }
+
+    visit(value, 0);
+    if (collection && value is Map && value.containsKey('failure')) {
+      if (value.containsKey('items') ||
+          value.containsKey('next') ||
+          value['failure'] is! Map) {
+        throw const FormatException('invalid collection failure envelope');
+      }
+      return value;
+    }
+    if (collection && value is Map && !value.containsKey('next')) {
+      throw const FormatException('collection result must contain next');
+    }
+    return value;
+  }
+
   _checkKeyValidation() {
     // 仅允许数字和字母以及下划线
     if (!_key!.contains(RegExp(r"^[a-zA-Z0-9_]+$"))) {
@@ -276,7 +675,21 @@ class ComicSourceParser {
   }
 
   bool _checkExists(String index) {
-    return _getValue(index) != null;
+    // Existence checks must not bridge the value itself.  A function-valued
+    // property would otherwise create a transient native JS handle that the
+    // parser never owns, which becomes visible as a leak when a real source
+    // is parsed and the engine is torn down.
+    return _runCode("""
+      (() => {
+        try {
+          const value = ComicSource.sources.$_key.$index;
+          return value !== undefined && value !== null;
+        } catch (_) {
+          return false;
+        }
+      })()
+    """) ==
+        true;
   }
 
   dynamic _getValue(String index) {
@@ -305,14 +718,15 @@ class ComicSourceParser {
           await _runCode("""
           ComicSource.sources.$_key.account.login(${jsonEncode(account)},
           ${jsonEncode(pwd)})
-        """);
+          """);
           var source = ComicSource.find(_sourceKey!)!;
           source.data["account"] = <String>[account, pwd];
-          source.saveData(runtimeContext: _executionContext);
+          await source.saveData(runtimeContext: _executionContext);
           return const Res(true);
-        } catch (e, s) {
-          Log.error("Network", "$e\n$s");
-          return Res.error(e.toString());
+        } catch (e) {
+          final failure = FailureSanitizer.fromException(e);
+          Log.error("Network", failure.toJson().toString());
+          return Res.error(failure.message ?? "Account login failed");
         }
       };
     }
@@ -351,8 +765,9 @@ class ComicSourceParser {
             ComicSource.sources.$_key.account.loginWithCookies.validate(${jsonEncode(cookies)})
           """);
           return res;
-        } catch (e, s) {
-          Log.error("Network", "$e\n$s");
+        } catch (e) {
+          final failure = FailureSanitizer.fromException(e);
+          Log.error("Network", failure.toJson().toString());
           return false;
         }
       };
@@ -999,118 +1414,122 @@ class ComicSourceParser {
     FavoriteUpdateCheckData? updateCheck;
     final updateCheckValue = _getValue("favorites.updateCheck");
     if (updateCheckValue != null) {
-      if (updateCheckValue is! Map) {
-        throw ComicSourceParseException(
-          "favorites.updateCheck must be an object",
-        );
-      }
-      // markerScheme was part of the legacy source contract. It is accepted
-      // as an input-only compatibility field, but never validated, negotiated,
-      // prefixed, or used by the host.
-      final markerScheme = updateCheckValue["markerScheme"] is String
-          ? updateCheckValue["markerScheme"] as String
-          : null;
-      final rawInterval = updateCheckValue["scanInterval"];
-      if (rawInterval is! int || rawInterval < 900 || rawInterval > 2592000) {
-        throw ComicSourceParseException(
-          "favorites.updateCheck.scanInterval is invalid",
-        );
-      }
-      if (_getValue("favorites.updateCheck.load") == null) {
-        throw ComicSourceParseException(
-          "favorites.updateCheck.load is required",
-        );
-      }
-
-      FavoriteUpdateSnapshot parseSnapshot(dynamic value) {
-        if (value is! Map) {
+      try {
+        if (updateCheckValue is! Map) {
           throw ComicSourceParseException(
-            "favorites.updateCheck.load returned an invalid snapshot",
+            "favorites.updateCheck must be an object",
           );
         }
-        final rawComics = value["comics"];
-        final rawPageSize = value["pageSize"];
-        final rawTotal = value["total"];
-        if (rawComics is! List ||
-            rawPageSize is! int ||
-            rawPageSize < 1 ||
-            rawPageSize > 200 ||
-            rawTotal is! int ||
-            rawTotal != rawComics.length) {
+        // markerScheme was part of the legacy source contract. It is accepted
+        // as an input-only compatibility field, but never validated, negotiated,
+        // prefixed, or used by the host.
+        final markerScheme = updateCheckValue["markerScheme"] is String
+            ? updateCheckValue["markerScheme"] as String
+            : null;
+        final rawInterval = updateCheckValue["scanInterval"];
+        if (rawInterval is! int || rawInterval < 900 || rawInterval > 2592000) {
           throw ComicSourceParseException(
-            "favorites.updateCheck.load returned an invalid snapshot shape",
+            "favorites.updateCheck.scanInterval is invalid",
+          );
+        }
+        if (!_checkExists("favorites.updateCheck.load")) {
+          throw ComicSourceParseException(
+            "favorites.updateCheck.load is required",
           );
         }
 
-        final ids = <String>{};
-        final comics = <Comic>[];
-        for (final rawComic in rawComics) {
-          if (rawComic is! Map) {
+        FavoriteUpdateSnapshot parseSnapshot(dynamic value) {
+          if (value is! Map) {
             throw ComicSourceParseException(
-              "favorites.updateCheck.load returned an invalid comic",
+              "favorites.updateCheck.load returned an invalid snapshot",
             );
           }
-          final rawId = rawComic["id"];
-          if (rawId is! String || rawId.trim().isEmpty || !ids.add(rawId)) {
+          final rawComics = value["comics"];
+          final rawPageSize = value["pageSize"];
+          final rawTotal = value["total"];
+          if (rawComics is! List ||
+              rawPageSize is! int ||
+              rawPageSize < 1 ||
+              rawPageSize > 200 ||
+              rawTotal is! int ||
+              rawTotal != rawComics.length) {
             throw ComicSourceParseException(
-              "favorites.updateCheck.load returned duplicate or empty comic IDs",
+              "favorites.updateCheck.load returned an invalid snapshot shape",
             );
           }
-          final comic = Comic.fromJson(
-            Map<String, dynamic>.from(rawComic),
-            _sourceKey!,
-          );
-          final rawHint = rawComic["favoriteUpdate"];
-          final rawUpdateTime = rawHint is Map ? rawHint["updateTime"] : null;
-          if (rawHint is! Map ||
-              (rawUpdateTime != null && rawUpdateTime is! String)) {
-            throw ComicSourceParseException(
-              "favorites.updateCheck.load returned a comic without full update evidence",
-            );
-          }
-          final hint = comic.favoriteUpdate;
-          if (hint == null ||
-              hint.marker?.trim().isEmpty != false ||
-              (hint.updateTime != null &&
-                  (hint.updateTime!.trim().isEmpty ||
-                      parseFollowUpdateActivityTime(
-                            hint.updateTime,
-                            now: DateTime.now(),
-                          ) ==
-                          null))) {
-            throw ComicSourceParseException(
-              "favorites.updateCheck.load returned a comic without full update evidence",
-            );
-          }
-          comics.add(comic);
-        }
-        return FavoriteUpdateSnapshot(
-          comics: comics,
-          pageSize: rawPageSize,
-          total: rawTotal,
-        );
-      }
 
-      updateCheck = FavoriteUpdateCheckData(
-        markerScheme: markerScheme,
-        scanInterval: Duration(seconds: rawInterval),
-        load: ([String? folderId]) async {
-          Future<Res<FavoriteUpdateSnapshot>> func() async {
-            try {
-              final res = await _runCode("""
-                ComicSource.sources.$_key.favorites.updateCheck.load(
-                  ${jsonEncode(folderId)})
-              """);
-              return Res(parseSnapshot(res));
-            } catch (e, s) {
-              Log.error("Network", "$e\n$s");
-              return Res.error(e.toString());
+          final ids = <String>{};
+          final comics = <Comic>[];
+          for (final rawComic in rawComics) {
+            if (rawComic is! Map) {
+              throw ComicSourceParseException(
+                "favorites.updateCheck.load returned an invalid comic",
+              );
             }
+            final rawId = rawComic["id"];
+            if (rawId is! String || rawId.trim().isEmpty || !ids.add(rawId)) {
+              throw ComicSourceParseException(
+                "favorites.updateCheck.load returned duplicate or empty comic IDs",
+              );
+            }
+            final comic = Comic.fromJson(
+              Map<String, dynamic>.from(rawComic),
+              _sourceKey!,
+            );
+            final rawHint = rawComic["favoriteUpdate"];
+            final rawUpdateTime = rawHint is Map ? rawHint["updateTime"] : null;
+            if (rawHint is! Map ||
+                (rawUpdateTime != null && rawUpdateTime is! String)) {
+              throw ComicSourceParseException(
+                "favorites.updateCheck.load returned a comic without full update evidence",
+              );
+            }
+            final hint = comic.favoriteUpdate;
+            if (hint == null ||
+                hint.marker?.trim().isEmpty != false ||
+                (hint.updateTime != null &&
+                    (hint.updateTime!.trim().isEmpty ||
+                        parseFollowUpdateActivityTime(
+                              hint.updateTime,
+                              now: DateTime.now(),
+                            ) ==
+                            null))) {
+              throw ComicSourceParseException(
+                "favorites.updateCheck.load returned a comic without full update evidence",
+              );
+            }
+            comics.add(comic);
           }
+          return FavoriteUpdateSnapshot(
+            comics: comics,
+            pageSize: rawPageSize,
+            total: rawTotal,
+          );
+        }
 
-          return retryZone(func);
-        },
-      );
+        updateCheck = FavoriteUpdateCheckData(
+          markerScheme: markerScheme,
+          scanInterval: Duration(seconds: rawInterval),
+          load: ([String? folderId]) async {
+            Future<Res<FavoriteUpdateSnapshot>> func() async {
+              try {
+                final res = await _runCode("""
+                  ComicSource.sources.$_key.favorites.updateCheck.load(
+                    ${jsonEncode(folderId)})
+                """);
+                return Res(parseSnapshot(res));
+              } catch (e, s) {
+                Log.error("Network", "$e\n$s");
+                return Res.error(e.toString());
+              }
+            }
+
+            return retryZone(func);
+          },
+        );
+      } finally {
+        _freeScanJsRefs(updateCheckValue);
+      }
     }
 
     Future<Res<Map<String, String>>> Function([String? comicId])? loadFolders;

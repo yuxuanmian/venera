@@ -24,6 +24,9 @@ import 'package:venera/utils/translations.dart';
 
 import '../js_engine.dart';
 import '../log.dart';
+import '../scan/failure_sanitizer.dart';
+import '../scan/models.dart';
+import '../scan/source_adapter.dart';
 
 part 'category.dart';
 
@@ -49,9 +52,15 @@ class ComicSourceManager with ChangeNotifier, Init {
   /// Atomically installs a fully prepared Catalog assembly. Preparation must
   /// not mutate this list; callers invoke this only at the publish barrier.
   void installPreparedSources(Iterable<ComicSource> sources) {
+    final next = List<ComicSource>.from(sources);
+    for (final source in _sources) {
+      if (!next.any((candidate) => identical(candidate, source))) {
+        source.scan?.dispose();
+      }
+    }
     _sources
       ..clear()
-      ..addAll(sources);
+      ..addAll(next);
     notifyListeners();
   }
 
@@ -71,7 +80,11 @@ class ComicSourceManager with ChangeNotifier, Init {
   }
 
   void remove(String key) {
+    final removed = _sources.where((element) => element.key == key).toList();
     _sources.removeWhere((element) => element.key == key);
+    for (final source in removed) {
+      source.scan?.dispose();
+    }
     notifyListeners();
   }
 
@@ -192,6 +205,11 @@ class ComicSource {
   final StarRatingFunc? starRatingFunc;
 
   final ArchiveDownloader? archiveDownloader;
+
+  /// Optional debug-only scan capability. A missing value is intentionally
+  /// different from an invalid declaration; both leave ordinary source
+  /// browsing available.
+  final ScanCapabilities? scan;
 
   Future<void> loadData({ManagedSourceContext? context}) async {
     final managedContext = context ?? runtimeContext;
@@ -325,6 +343,7 @@ class ComicSource {
     this.starRatingFunc,
     this.archiveDownloader, {
     this.runtimeContext,
+    this.scan,
   });
 }
 

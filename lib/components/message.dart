@@ -251,12 +251,21 @@ LoadingDialogController showLoadingDialog(
   void Function()? onCancel,
   bool barrierDismissible = true,
   bool allowCancel = true,
+  bool closeOnCancel = true,
   String? message,
   String cancelButtonText = "Cancel",
   bool withProgress = false,
 }) {
   var controller = LoadingDialogController();
   controller._message = message;
+
+  var cancelInvoked = false;
+  void cancel() {
+    if (cancelInvoked) return;
+    cancelInvoked = true;
+    onCancel?.call();
+    if (closeOnCancel) controller.close();
+  }
 
   if (withProgress) {
     controller._progress = 0;
@@ -278,23 +287,26 @@ LoadingDialogController showLoadingDialog(
               controller._message = message;
             });
           };
-          return ContentDialog(
-            title: controller._message ?? 'Loading',
-            content: LinearProgressIndicator(
-              value: controller._progress,
-              backgroundColor: context.colorScheme.surfaceContainer,
-            ).paddingHorizontal(16).paddingVertical(16),
-            actions: [
-              FilledButton(
-                onPressed: allowCancel
-                    ? () {
-                        controller.close();
-                        onCancel?.call();
-                      }
-                    : null,
-                child: Text(cancelButtonText.tl),
-              ),
-            ],
+          return PopScope<void>(
+            canPop: !allowCancel,
+            onPopInvokedWithResult: (didPop, result) {
+              if (allowCancel) cancel();
+            },
+            child: ContentDialog(
+              title: controller._message ?? 'Loading',
+              dismissible: barrierDismissible,
+              onDismiss: allowCancel ? cancel : null,
+              content: LinearProgressIndicator(
+                value: controller._progress,
+                backgroundColor: context.colorScheme.surfaceContainer,
+              ).paddingHorizontal(16).paddingVertical(16),
+              actions: [
+                FilledButton(
+                  onPressed: allowCancel ? cancel : null,
+                  child: Text(cancelButtonText.tl),
+                ),
+              ],
+            ),
           );
         },
       );
@@ -318,6 +330,7 @@ class ContentDialog extends StatelessWidget {
     this.title, // 如果不传 title 将不会展示
     required this.content,
     this.dismissible = true,
+    this.onDismiss,
     this.actions = const [],
   });
 
@@ -328,6 +341,8 @@ class ContentDialog extends StatelessWidget {
   final List<Widget> actions;
 
   final bool dismissible;
+
+  final VoidCallback? onDismiss;
 
   @override
   Widget build(BuildContext context) {
@@ -340,7 +355,9 @@ class ContentDialog extends StatelessWidget {
               ? Appbar(
                   leading: IconButton(
                     icon: const Icon(Icons.close),
-                    onPressed: dismissible ? context.pop : null,
+                    onPressed: dismissible || onDismiss != null
+                        ? (onDismiss ?? context.pop)
+                        : null,
                   ),
                   title: Text(title!),
                   backgroundColor: Colors.transparent,

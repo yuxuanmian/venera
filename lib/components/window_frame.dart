@@ -4,8 +4,12 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/follow_update_availability.dart';
+import 'package:venera/foundation/scan/models.dart';
+import 'package:venera/foundation/scan/failure_sanitizer.dart';
+import 'package:venera/foundation/scan/scan_debug_service.dart';
 import 'package:venera/utils/translations.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -277,6 +281,7 @@ Future<void> showDebugMenuSheet() async {
 void handleDebugMenuSelected(String value) {
   switch (value) {
     case 'clearFavorites':
+      scanDebugService.cancel(ScanControlReason.cacheInvalidated);
       App.favorites.clearAllCache();
       App.rootContext.showMessage(message: 'Favorites cache cleared'.tl);
       break;
@@ -286,9 +291,7 @@ void handleDebugMenuSelected(String value) {
       );
       break;
     case 'forceScanAll':
-      App.rootContext.showMessage(
-        message: followUpdateScannerUnavailableMessage.tl,
-      );
+      unawaited(_runDebugFullScan());
       break;
     case 'refreshRandomComics':
       App.rootContext.showMessage(
@@ -296,6 +299,90 @@ void handleDebugMenuSelected(String value) {
       );
       break;
   }
+}
+
+Future<void> _runDebugFullScan() async {
+  final service = scanDebugService;
+  if (service.isRunning) {
+    App.rootContext.showMessage(message: 'Scan already running'.tl);
+    return;
+  }
+
+  final scanFuture = service.startFullScan();
+  final controller = showLoadingDialog(
+    App.rootContext,
+    message: _scanProgressMessage(service.progress.value),
+    barrierDismissible: false,
+    allowCancel: true,
+    closeOnCancel: false,
+    onCancel: service.cancel,
+  );
+  void onProgress() {
+    controller.setMessage(_scanProgressMessage(service.progress.value));
+  }
+
+  service.progress.addListener(onProgress);
+  try {
+    final summary = await scanFuture;
+    controller.close();
+    App.rootContext.showMessage(message: _scanSummaryMessage(summary));
+  } catch (error) {
+    controller.close();
+    App.rootContext.showMessage(
+      message: '${'Scan failed'.tl}: ${_safeScanError(error)}',
+    );
+  } finally {
+    service.progress.removeListener(onProgress);
+  }
+}
+
+String _scanProgressMessage(ScanProgress progress) => [
+  '${'Scan works found'.tl}: ${progress.discoveredWorks}',
+  '${'Scan works active'.tl}: ${progress.activeWorks}',
+  '${'Persisted items'.tl}: ${progress.persistedItems}',
+  '${'Scan works failed'.tl}: ${progress.failedWorks}',
+  if (progress.canceledWorks > 0)
+    '${'Scan works canceled'.tl}: ${progress.canceledWorks}',
+  if (progress.skippedSources.isNotEmpty)
+    '${'Skipped sources'.tl}: ${progress.skippedSources.map(_scanSkipText).join(', ')}',
+].join('\n');
+
+String _scanSummaryMessage(FullScanSummary summary) {
+  final progress = summary.progress;
+  final disposition = switch (summary.disposition) {
+    FullScanDisposition.completed => 'Scan completed'.tl,
+    FullScanDisposition.canceled => 'Scan canceled'.tl,
+    FullScanDisposition.failed => 'Scan failed'.tl,
+    FullScanDisposition.alreadyRunning => 'Scan already running'.tl,
+  };
+  final details = [
+    disposition,
+    '${'Scan works found'.tl}: ${progress.discoveredWorks}',
+    '${'Persisted items'.tl}: ${progress.persistedItems}',
+    '${'Scan works failed'.tl}: ${progress.failedWorks}',
+    '${'Scan works canceled'.tl}: ${progress.canceledWorks}',
+    '${'Skipped sources'.tl}: ${progress.skippedSources.isEmpty ? 0 : progress.skippedSources.map(_scanSkipText).join(', ')}',
+    if (summary.errorMessage != null) summary.errorMessage!,
+  ];
+  return details.join(' · ');
+}
+
+String _scanSkipText(ScanSourceSkip skip) {
+  final reason = switch (skip.reason) {
+    ScanSourceSkipReason.absent => 'Source capability absent'.tl,
+    ScanSourceSkipReason.invalid => 'Source capability invalid'.tl,
+    ScanSourceSkipReason.disabled => 'Source disabled'.tl,
+    ScanSourceSkipReason.notLoggedIn => 'Source not logged in'.tl,
+  };
+  return '${skip.sourceKey} ($reason)';
+}
+
+String _safeScanError(Object error) {
+  final raw = error is ScanStorageException
+      ? error.message
+      : 'Scan operation failed (${error.runtimeType})';
+  return FailureSanitizer.sanitize({'message': raw}).message ??
+      'Scan failed'.tl;
 }
 
 class _WindowButtons extends StatefulWidget {

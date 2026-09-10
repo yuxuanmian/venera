@@ -10,6 +10,8 @@ class ComicDebugPage extends StatefulWidget {
     required this.sourceKey,
     required this.comicId,
     this.details,
+    this.scanRepository,
+    this.favoriteCache,
   });
 
   final String sourceKey;
@@ -20,12 +22,73 @@ class ComicDebugPage extends StatefulWidget {
   /// view. Null while the details page is still loading/errored.
   final ComicDetails? details;
 
+  /// Test and embedded-debug injection point. Production callers use the
+  /// app-owned latest-result repository.
+  final ScanResultRepository? scanRepository;
+
+  final NetworkFavoriteCacheManager? favoriteCache;
+
   @override
   State<ComicDebugPage> createState() => _ComicDebugPageState();
 }
 
 class _ComicDebugPageState extends State<ComicDebugPage> {
-  final _cache = NetworkFavoriteCacheManager();
+  late final NetworkFavoriteCacheManager _cache;
+  ScanStoredItem? _scanItem;
+  ScanStoredScope? _scanScope;
+  bool _scanLoaded = false;
+  StreamSubscription<ScanRepositoryEvent>? _scanEvents;
+
+  @override
+  void initState() {
+    super.initState();
+    _cache = widget.favoriteCache ?? NetworkFavoriteCacheManager();
+    _reloadScanResult();
+    final repository = widget.scanRepository ?? scanResultRepository;
+    _scanEvents = repository.events.listen((event) {
+      final item = event.item?.result;
+      final scope = event.scope;
+      if (item != null &&
+          (item.sourceKey != widget.sourceKey ||
+              item.comicId != widget.comicId)) {
+        return;
+      }
+      if (scope != null && scope.sourceKey != widget.sourceKey) return;
+      _reloadScanResult();
+    });
+  }
+
+  @override
+  void dispose() {
+    _scanEvents?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _reloadScanResult() async {
+    try {
+      final repository = widget.scanRepository ?? scanResultRepository;
+      final item = await repository.readLatestItem(
+        widget.sourceKey,
+        widget.comicId,
+      );
+      final scope = item == null
+          ? null
+          : await repository.readScopeByAttemptId(
+              item.result.sourceKey,
+              item.result.producer,
+              item.result.scopeAttemptId,
+            );
+      if (!mounted) return;
+      setState(() {
+        _scanItem = item;
+        _scanScope = scope;
+        _scanLoaded = true;
+      });
+    } catch (_) {
+      // A corrupt/unavailable scan database must not break the existing
+      // details debug page.
+    }
+  }
 
   /// Follow-up state of this comic, from whichever favorite folder row the
   /// cache knows about (state is comic-level, shared across folders).
@@ -111,6 +174,8 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
         padding: const EdgeInsets.only(bottom: 24),
         children: [
           ..._buildActions(),
+          const Divider(),
+          ..._buildRawScanSection(),
           const Divider(),
           ..._buildFollowUpSection(),
           const Divider(),
@@ -382,5 +447,142 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
         ],
       ),
     ];
+  }
+
+  List<Widget> _buildRawScanSection() {
+    if (!_scanLoaded) return const [];
+    final stored = _scanItem;
+    if (stored == null) {
+      return [
+        ListTile(
+          title: Text('Raw Scan Result'.tl),
+          subtitle: Text('No persisted scan result'.tl),
+        ),
+      ];
+    }
+    final result = stored.result;
+    final scope = _scanScope;
+    return [
+      ListTile(title: Text('Raw Scan Result'.tl)),
+      _infoRow('Scan Source', result.sourceKey),
+      _infoRow('Scan Comic ID', result.comicId),
+      _infoRow('Scan Producer', result.producer.value),
+      _infoRow('Definition Revision', result.definitionRevision),
+      _infoRow('Attempt ID', result.attemptId),
+      _infoRow('Scope Attempt ID', result.scopeAttemptId),
+      _infoRow('Observed At', result.observedAt),
+      _infoRow(
+        'Committed At',
+        _fmt(
+          DateTime.fromMillisecondsSinceEpoch(
+            stored.committedAtMs,
+            isUtc: true,
+          ),
+        ),
+      ),
+      ..._scanFactRows(result),
+      if (result.observation != null)
+        _scanPayload('Observation', result.observation!.toJson())
+      else
+        _scanPayload('Failure', result.failure?.toJson() ?? const {}),
+      if (scope != null) ...[
+        _infoRow('Scope Status', scope.status.value),
+        _infoRow('Scope Item Count', '${scope.itemCount}'),
+        _infoRow('Scope Attempt ID', scope.scopeAttemptId),
+      ] else
+        _infoRow('Scope Status', 'Associated scope was replaced'.tl),
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: Button.outlined(
+            onPressed: _copyScanResult,
+            child: Text('Copy Scan Result'.tl),
+          ),
+        ),
+      ),
+    ];
+  }
+
+  Widget _scanPayload(String title, Map<String, dynamic> value) {
+    return ExpansionTile(
+      title: Text(title.tl),
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+          child: SelectableText(
+            const JsonEncoder.withIndent('  ').convert(value),
+            style: ts.s14,
+          ),
+        ),
+      ],
+    );
+  }
+
+  List<Widget> _scanFactRows(ScanItemResult result) {
+    final observation = result.observation;
+    if (observation != null) {
+      final update = observation.update;
+      return [
+        if (observation.sourceUnread != null)
+          _infoRow('Source Unread', _yesNo(observation.sourceUnread!)),
+        if (update?.updatedAt != null)
+          _infoRow('Updated At', update!.updatedAt!),
+        if (update?.latestChapterId != null)
+          _infoRow('Latest Chapter ID', update!.latestChapterId!),
+        if (update?.chapterCount != null)
+          _infoRow('Chapter Count', '${update!.chapterCount}'),
+        if (update?.recentChapterIds.isNotEmpty == true)
+          _infoRow('Recent Chapter IDs', update!.recentChapterIds.join(', ')),
+      ];
+    }
+    final failure = result.failure;
+    if (failure == null) return const [];
+    return [
+      if (failure.httpStatus != null)
+        _infoRow('HTTP Status', '${failure.httpStatus}'),
+      if (failure.sourceCode != null)
+        _infoRow('Source Code', failure.sourceCode!),
+      if (failure.exceptionType != null)
+        _infoRow('Exception Type', failure.exceptionType!),
+      if (failure.message != null)
+        _infoRow('Failure Message', failure.message!),
+      if (failure.retryAfter != null)
+        _infoRow('Retry After', failure.retryAfter!),
+    ];
+  }
+
+  String _scanJson() {
+    final item = _scanItem;
+    if (item == null) return '{}';
+    final result = item.result;
+    final scope = _scanScope;
+    return const JsonEncoder.withIndent('  ').convert({
+      'result': result.toJson(),
+      'attemptOrdinal': item.attemptOrdinal,
+      'observedAtMs': item.observedAtMs,
+      'committedAtMs': item.committedAtMs,
+      if (scope != null)
+        'scope': {
+          'sourceKey': scope.sourceKey,
+          'producer': scope.producer.value,
+          'scopeKey': scope.scopeKey,
+          'scopeAttemptId': scope.scopeAttemptId,
+          'attemptOrdinal': scope.attemptOrdinal,
+          'definitionRevision': scope.definitionRevision,
+          'startedAtMs': scope.startedAtMs,
+          'finishedAtMs': scope.finishedAtMs,
+          'status': scope.status.value,
+          'itemCount': scope.itemCount,
+          if (scope.failure != null) 'failure': scope.failure!.toJson(),
+        }
+      else
+        'scope': null,
+    });
+  }
+
+  void _copyScanResult() {
+    Clipboard.setData(ClipboardData(text: _scanJson()));
+    context.showMessage(message: 'Copied'.tl);
   }
 }

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -5,13 +7,19 @@ import 'package:venera/components/components.dart';
 import 'package:venera/components/window_frame.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
+import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_update_availability.dart';
+import 'package:venera/foundation/scan/models.dart';
+import 'package:venera/foundation/scan/scan_debug_service.dart';
+import 'package:venera/foundation/scan/scan_result_repository.dart';
+import 'package:venera/foundation/scan/target_provider.dart';
 import 'package:venera/foundation/tracking/diagnostics.dart';
 import 'package:venera/pages/comic_details_page/comic_page.dart';
 import 'package:venera/pages/follow_updates_page.dart';
 import 'package:venera/utils/translations.dart';
 
 import 'fixtures.dart';
+import '../scan_kernel/fakes.dart' as scan_fakes;
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -106,17 +114,14 @@ void main() {
   });
 
   testWidgets(
-    'desktop debug menu and mobile sheet keep every retired handler unavailable',
+    'desktop debug menu and mobile sheet keep retired handlers unavailable',
     (tester) async {
       final beforeState = snapshotRetirementState(fixture.databasePath);
       await pumpWindow(tester);
-      final menuEntries = [
-        'Clear Baselines'.tl,
-        'Force Scan All Comics'.tl,
-        'Random Refresh Comics'.tl,
-      ];
+      const forceScanLabel = 'Force Scan All Comics';
+      final retiredEntries = ['Clear Baselines'.tl, 'Random Refresh Comics'.tl];
 
-      for (final entry in menuEntries) {
+      for (final entry in retiredEntries) {
         for (var i = 0; i < 10; i++) {
           await tester.tap(find.text('Debug'));
           await tester.pumpAndSettle();
@@ -125,7 +130,7 @@ void main() {
         }
       }
 
-      for (final entry in menuEntries) {
+      for (final entry in retiredEntries) {
         for (var i = 0; i < 10; i++) {
           final sheet = showDebugMenuSheet();
           await tester.pumpAndSettle();
@@ -135,10 +140,97 @@ void main() {
         }
       }
 
+      // 004 deliberately authorizes only this existing menu item. Its full
+      // execution path is covered by scan_kernel service/widget tests; this
+      // retirement regression only protects the other two handlers.
+      await tester.tap(find.text('Debug'));
+      await tester.pumpAndSettle();
+      expect(find.text(forceScanLabel.tl), findsOneWidget);
+      await tester.tapAt(const Offset(20, 20));
+      await tester.pumpAndSettle();
+
       expect(snapshotRetirementState(fixture.databasePath), beforeState);
       expect(FollowUpdatesService.taskRunning.value, isFalse);
     },
   );
+
+  testWidgets('clear favorites cancels scan before invalidating its cache', (
+    tester,
+  ) async {
+    final beforeState = snapshotRetirementState(fixture.databasePath);
+    final repository = scan_fakes.FakeScanResultRepository();
+    final existingScope = await repository.beginScope(
+      sourceKey: 'scan-source',
+      producer: ScanProducer.comic,
+      scopeKey: 'scan-comic',
+      definitionRevision: 'rev',
+    );
+    final existingItem = ScanItemResult.observed(
+      attemptId: scanUuidV5(
+        existingScope.scopeAttemptId,
+        'scan-source\u0000scan-comic',
+      ),
+      scopeAttemptId: existingScope.scopeAttemptId,
+      sourceKey: 'scan-source',
+      comicId: 'scan-comic',
+      producer: ScanProducer.comic,
+      definitionRevision: 'rev',
+      observedAt: '2026-09-10T00:00:00.000Z',
+      observation: ScanObservation(
+        update: UpdateDescriptor(latestChapterId: 'existing-scan-result'),
+      ),
+    );
+    await repository.saveItem(
+      ScanIngestionContext(scope: existingScope),
+      existingItem,
+    );
+    await repository.finishScope(
+      ScanIngestionContext(scope: existingScope),
+      ScanScopeStatus.completed,
+    );
+
+    final provider = _CacheBlockingTargetProvider(fixture.cache);
+    final service = ScanDebugService(
+      repository: repository,
+      targetProvider: provider,
+    );
+    final previousService = scanDebugService;
+    scanDebugService = service;
+    addTearDown(() async {
+      if (service.isRunning) service.cancel();
+      scanDebugService = previousService;
+      await repository.close();
+    });
+
+    await pumpWindow(tester);
+    final running = service.startFullScan();
+    await provider.started.future;
+    final generation = fixture.cache.cacheGeneration;
+
+    await tester.tap(find.text('Debug'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Clear Favorites Cache'.tl));
+    await tester.pump();
+    expect(fixture.cache.cacheGeneration, generation + 1);
+    final afterClearState = snapshotRetirementState(fixture.databasePath);
+    expect(
+      afterClearState['comic_check_state'],
+      beforeState['comic_check_state'],
+    );
+    expect(afterClearState['scan_queue'], beforeState['scan_queue']);
+    expect(
+      afterClearState['follow_update_run'],
+      beforeState['follow_update_run'],
+    );
+    expect(afterClearState['favorite_update_scan_state'], isEmpty);
+
+    provider.release.complete();
+    final summary = await running.timeout(const Duration(seconds: 5));
+    expect(summary.disposition, FullScanDisposition.canceled);
+    expect(service.isRunning, isFalse);
+    expect(repository.items, contains('scan-source\u0000scan-comic'));
+    await tester.pump(const Duration(seconds: 3));
+  });
 
   testWidgets('Debug copy actions preserve history and redact sensitive data', (
     tester,
@@ -281,4 +373,23 @@ void main() {
     expect(find.text('Ready'.tl), findsNothing);
     expect(find.text('In Cooldown'.tl), findsNothing);
   });
+}
+
+class _CacheBlockingTargetProvider extends ScanTargetProvider {
+  _CacheBlockingTargetProvider(this.scanCache)
+    : super(cache: scanCache, sources: () => const []);
+
+  final NetworkFavoriteCacheManager scanCache;
+  final started = Completer<void>();
+  final release = Completer<void>();
+
+  @override
+  Future<ScanTargetSnapshot> snapshot() async {
+    if (!started.isCompleted) started.complete();
+    await release.future;
+    return ScanTargetSnapshot(
+      works: const [],
+      cacheGeneration: scanCache.cacheGeneration,
+    );
+  }
 }
