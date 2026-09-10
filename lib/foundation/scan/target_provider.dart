@@ -138,7 +138,7 @@ class ScanTargetProvider {
         }
       } else {
         final collectionKeys = <String>{};
-        if (source.favoriteData?.singleFolderForSingleComic == true) {
+        if (source.favoriteData?.multiFolder == false) {
           if (sourceFolders.any(
             (folder) => cache.countCachedComics(folder) > 0,
           )) {

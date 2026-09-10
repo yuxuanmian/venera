@@ -186,6 +186,7 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
           ..._buildSourceSection(),
           const Divider(),
           ..._buildRawDataSection(),
+          ..._buildScanFieldsSection(),
         ],
       ),
     );
@@ -444,6 +445,27 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
             child: SelectableText(_rawJson(), style: ts.s14),
           ),
           const SizedBox(height: 12),
+        ],
+      ),
+    ];
+  }
+
+  List<Widget> _buildScanFieldsSection() {
+    return [
+      ExpansionTile(
+        title: Text('Scan Fields'.tl),
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            child: SelectableText(
+              !_scanLoaded
+                  ? 'Loading'.tl
+                  : _scanItem == null
+                  ? 'No persisted scan result'.tl
+                  : _scanJson(),
+              style: ts.s14,
+            ),
+          ),
         ],
       ),
     ];
