@@ -14,6 +14,7 @@ class FakeScanAdapter implements ScanSourceAdapter {
   FakeScanAdapter({
     required this.sourceKey,
     this.definitionRevision = 'fake-revision',
+    this.evidenceSchema,
     this.comicLoader,
     this.collectionLoader,
     this.runtimeContext,
@@ -24,6 +25,9 @@ class FakeScanAdapter implements ScanSourceAdapter {
 
   @override
   final String definitionRevision;
+
+  @override
+  final String? evidenceSchema;
 
   @override
   final ManagedSourceContext? runtimeContext;
@@ -205,6 +209,10 @@ class FakeScanResultRepository implements ScanResultRepository {
   ) async {
     return items[_itemKey(sourceKey, comicId)];
   }
+
+  @override
+  Future<List<ScanStoredItem>> readAllItems() async =>
+      List<ScanStoredItem>.unmodifiable(items.values);
 
   @override
   Future<ScanStoredScope?> readMatchingScope(

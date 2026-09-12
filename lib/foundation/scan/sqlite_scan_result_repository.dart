@@ -131,6 +131,7 @@ class SqliteScanResultRepository implements ScanResultRepository {
         access_context_key TEXT,
         producer TEXT NOT NULL CHECK (producer IN ('comic', 'collection')),
         definition_revision TEXT NOT NULL,
+        evidence_schema TEXT,
         observed_at_ms INTEGER NOT NULL,
         committed_at_ms INTEGER NOT NULL,
         observation_json TEXT,
@@ -140,10 +141,34 @@ class SqliteScanResultRepository implements ScanResultRepository {
                (observation_json IS NULL AND failure_json IS NOT NULL))
       )
     ''');
+    _migrateItemSchema();
     database.execute(
       'CREATE INDEX IF NOT EXISTS scan_item_scope_idx ON scan_item_state(scope_attempt_id)',
     );
     database.execute('PRAGMA user_version = 1');
+  }
+
+  /// Adds columns that `CREATE TABLE IF NOT EXISTS` cannot add to a table that
+  /// already exists on a device.
+  ///
+  /// `scan_results.db` predates this feature, so skipping the migration would
+  /// fail on real hardware.  The pattern mirrors `favorites.dart`:
+  /// `PRAGMA table_info` then one `ALTER TABLE ADD COLUMN` per missing column.
+  ///
+  /// Existing rows keep a NULL `evidence_schema`, which judgment reads as "no
+  /// recorded label" and therefore treats as a label change — the safe
+  /// direction: the first post-upgrade run only rebuilds baselines and cannot
+  /// raise a full-library false alarm (Contract C7).
+  void _migrateItemSchema() {
+    final columns = database
+        .select('PRAGMA table_info(scan_item_state)')
+        .map((row) => row['name'] as String)
+        .toSet();
+    if (!columns.contains('evidence_schema')) {
+      database.execute(
+        'ALTER TABLE scan_item_state ADD COLUMN evidence_schema TEXT',
+      );
+    }
   }
 
   @override
@@ -302,6 +327,7 @@ class SqliteScanResultRepository implements ScanResultRepository {
                 current['scope_attempt_id'] == item.scopeAttemptId &&
                 current['producer'] == item.producer.value &&
                 current['definition_revision'] == item.definitionRevision &&
+                current['evidence_schema'] == item.evidenceSchema &&
                 current['observed_at_ms'] ==
                     observedAt.millisecondsSinceEpoch &&
                 current['observation_json'] == observationJson &&
@@ -330,9 +356,9 @@ class SqliteScanResultRepository implements ScanResultRepository {
         database.execute(
           '''INSERT INTO scan_item_state (
                source_key, comic_id, attempt_id, scope_attempt_id, attempt_ordinal,
-               access_context_key, producer, definition_revision, observed_at_ms,
-               committed_at_ms, observation_json, failure_json
-             ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
+               access_context_key, producer, definition_revision, evidence_schema,
+               observed_at_ms, committed_at_ms, observation_json, failure_json
+             ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(source_key, comic_id) DO UPDATE SET
                attempt_id = excluded.attempt_id,
                scope_attempt_id = excluded.scope_attempt_id,
@@ -340,6 +366,7 @@ class SqliteScanResultRepository implements ScanResultRepository {
                access_context_key = NULL,
                producer = excluded.producer,
                definition_revision = excluded.definition_revision,
+               evidence_schema = excluded.evidence_schema,
                observed_at_ms = excluded.observed_at_ms,
                committed_at_ms = excluded.committed_at_ms,
                observation_json = excluded.observation_json,
@@ -352,6 +379,7 @@ class SqliteScanResultRepository implements ScanResultRepository {
             context.scope.attemptOrdinal,
             item.producer.value,
             item.definitionRevision,
+            item.evidenceSchema,
             observedAt.millisecondsSinceEpoch,
             commitAt,
             observationJson,
@@ -490,6 +518,22 @@ class SqliteScanResultRepository implements ScanResultRepository {
   }
 
   @override
+  Future<List<ScanStoredItem>> readAllItems() async {
+    await ensureOpen();
+    try {
+      // A purely additive read: no existing behaviour, schema or write path is
+      // touched.  This is judgment's only way to discover which
+      // (sourceKey, comicId) pairs exist.
+      return database
+          .select('SELECT * FROM scan_item_state')
+          .map(_itemFromRow)
+          .toList();
+    } catch (error) {
+      throw ScanStorageException('Unable to read scan items', error);
+    }
+  }
+
+  @override
   Future<ScanStoredScope?> readMatchingScope(
     String sourceKey,
     ScanProducer producer,
@@ -554,6 +598,7 @@ class SqliteScanResultRepository implements ScanResultRepository {
     }
     final observationJson = row['observation_json'] as String?;
     final failureJson = row['failure_json'] as String?;
+    final evidenceSchema = row['evidence_schema'] as String?;
     final common = {
       'attemptId': row['attempt_id'],
       'scopeAttemptId': row['scope_attempt_id'],
@@ -561,6 +606,7 @@ class SqliteScanResultRepository implements ScanResultRepository {
       'comicId': row['comic_id'],
       'producer': producer.value,
       'definitionRevision': row['definition_revision'],
+      'evidenceSchema': evidenceSchema,
       'observedAt': DateTime.fromMillisecondsSinceEpoch(
         row['observed_at_ms'] as int,
         isUtc: true,
@@ -575,6 +621,7 @@ class SqliteScanResultRepository implements ScanResultRepository {
             producer: producer,
             definitionRevision: common['definitionRevision'] as String,
             observedAt: common['observedAt'] as String,
+            evidenceSchema: common['evidenceSchema'] as String?,
             observation: const ObservationCodec().normalizeObservation(
               jsonDecode(observationJson)['observation'] ??
                   jsonDecode(observationJson),
@@ -588,6 +635,7 @@ class SqliteScanResultRepository implements ScanResultRepository {
             producer: producer,
             definitionRevision: common['definitionRevision'] as String,
             observedAt: common['observedAt'] as String,
+            evidenceSchema: common['evidenceSchema'] as String?,
             failure: FailureSanitizer.sanitize(
               jsonDecode(failureJson ?? '{}'),
               limits: limits,

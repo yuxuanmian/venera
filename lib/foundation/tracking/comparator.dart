@@ -1,14 +1,18 @@
+import 'judgment.dart';
 import 'update_state.dart';
+
+export 'judgment.dart'
+    show
+        JudgmentConclusion,
+        JudgmentConclusionValue,
+        JudgmentEvidence,
+        JudgmentEvidenceValue,
+        JudgmentReason,
+        JudgmentReasonValue;
 
 enum ContentChange { changed, unchanged, rebaseline, unknown }
 
-enum EvidenceType {
-  updatedAt,
-  latestChapterId,
-  chapterCount,
-  recentChapterIds,
-  marker,
-}
+enum EvidenceType { updatedAt, latestChapterId, chapterCount, recentChapterIds }
 
 class ComparisonDecision {
   const ComparisonDecision({
@@ -21,35 +25,38 @@ class ComparisonDecision {
 
   final ContentChange contentChange;
   final EvidenceType? selectedEvidence;
-  final String reason;
+
+  /// Taken from the frozen [JudgmentReason] vocabulary (Contract J5) so the
+  /// same value can be persisted and displayed without a second mapping.
+  final JudgmentReason reason;
+
   final Object? previousValue;
   final Object? currentValue;
 }
 
 /// Compares only the strongest evidence available in both baselines.
+///
+/// The `marker` tier was retired by feature 005: it is no longer accepted as
+/// an input and never selected as evidence (Contract J2).
 ComparisonDecision compareTrackingEvidence({
   required UpdateState? previousState,
-  required String? previousMarker,
   required UpdateState? currentState,
-  required String? currentMarker,
 }) {
   final usableCurrentState = currentState?.isUsable == true;
   final usablePreviousState = previousState?.isUsable == true;
-  final usableCurrentMarker = _usableMarker(currentMarker);
-  final usablePreviousMarker = _usableMarker(previousMarker);
 
-  if (!usableCurrentState && !usableCurrentMarker) {
+  if (!usableCurrentState) {
     return const ComparisonDecision(
       contentChange: ContentChange.unknown,
       selectedEvidence: null,
-      reason: 'noUsableEvidence',
+      reason: JudgmentReason.noUsableEvidence,
     );
   }
-  if (!usablePreviousState && !usablePreviousMarker) {
+  if (!usablePreviousState) {
     return const ComparisonDecision(
       contentChange: ContentChange.rebaseline,
       selectedEvidence: null,
-      reason: 'noPreviousEvidence',
+      reason: JudgmentReason.noPreviousEvidence,
     );
   }
 
@@ -65,18 +72,16 @@ ComparisonDecision compareTrackingEvidence({
       result,
       EvidenceType.updatedAt,
       result == ContentChange.changed
-          ? 'later'
+          ? JudgmentReason.later
           : result == ContentChange.rebaseline
-          ? 'regressed'
-          : 'equal',
+          ? JudgmentReason.regressed
+          : JudgmentReason.equal,
       previous,
       current,
       lowerEvidenceDisagrees: _lowerEvidenceDisagrees(
         previousState,
         currentState,
         selected: EvidenceType.updatedAt,
-        previousMarker: previousMarker,
-        currentMarker: currentMarker,
       ),
     );
   }
@@ -91,15 +96,13 @@ ComparisonDecision compareTrackingEvidence({
     return _decision(
       result,
       EvidenceType.latestChapterId,
-      previous == current ? 'equal' : 'different',
+      previous == current ? JudgmentReason.equal : JudgmentReason.different,
       previous,
       current,
       lowerEvidenceDisagrees: _lowerEvidenceDisagrees(
         previousState,
         currentState,
         selected: EvidenceType.latestChapterId,
-        previousMarker: previousMarker,
-        currentMarker: currentMarker,
       ),
     );
   }
@@ -117,18 +120,16 @@ ComparisonDecision compareTrackingEvidence({
       result,
       EvidenceType.chapterCount,
       result == ContentChange.changed
-          ? 'increased'
+          ? JudgmentReason.increased
           : result == ContentChange.rebaseline
-          ? 'decreased'
-          : 'equal',
+          ? JudgmentReason.decreased
+          : JudgmentReason.equal,
       previous,
       current,
       lowerEvidenceDisagrees: _lowerEvidenceDisagrees(
         previousState,
         currentState,
         selected: EvidenceType.chapterCount,
-        previousMarker: previousMarker,
-        currentMarker: currentMarker,
       ),
     );
   }
@@ -141,16 +142,18 @@ ComparisonDecision compareTrackingEvidence({
     final previousAnchor = currentRecent.indexOf(previousFirst);
     final currentAnchor = previousRecent.indexOf(currentFirst);
     final ContentChange result;
-    final String reason;
+    final JudgmentReason reason;
     if (currentFirst == previousFirst) {
       result = ContentChange.unchanged;
-      reason = 'sameFirst';
+      reason = JudgmentReason.sameFirst;
     } else if (previousAnchor > 0) {
       result = ContentChange.changed;
-      reason = 'newerAnchor';
+      reason = JudgmentReason.newerAnchor;
     } else {
       result = ContentChange.rebaseline;
-      reason = currentAnchor > 0 ? 'regressed' : 'noSafeAnchor';
+      reason = currentAnchor > 0
+          ? JudgmentReason.regressed
+          : JudgmentReason.noSafeAnchor;
     }
     return _decision(
       result,
@@ -162,53 +165,41 @@ ComparisonDecision compareTrackingEvidence({
         previousState!,
         currentState!,
         selected: EvidenceType.recentChapterIds,
-        previousMarker: previousMarker,
-        currentMarker: currentMarker,
       ),
     );
   }
 
-  if (usablePreviousMarker && usableCurrentMarker) {
-    final same = previousMarker == currentMarker;
-    return ComparisonDecision(
-      contentChange: same ? ContentChange.unchanged : ContentChange.changed,
-      selectedEvidence: EvidenceType.marker,
-      reason: same ? 'equal' : 'different',
-      previousValue: previousMarker,
-      currentValue: currentMarker,
-    );
-  }
-
+  // Both sides carry content evidence but share no field.
+  //
+  // The conclusion is `unknown`, not `rebaseline`: advancing the fact here
+  // would let alternating field sets swallow a real change forever
+  // (research R-02 / Contract J4).
   return const ComparisonDecision(
-    contentChange: ContentChange.rebaseline,
+    contentChange: ContentChange.unknown,
     selectedEvidence: null,
-    reason: 'noCommonEvidence',
+    reason: JudgmentReason.noCommonEvidence,
   );
 }
 
 ComparisonDecision _decision(
   ContentChange contentChange,
   EvidenceType evidence,
-  String reason,
+  JudgmentReason reason,
   Object previousValue,
   Object currentValue, {
   required bool lowerEvidenceDisagrees,
 }) => ComparisonDecision(
   contentChange: contentChange,
   selectedEvidence: evidence,
-  reason: lowerEvidenceDisagrees ? 'priority' : reason,
+  reason: lowerEvidenceDisagrees ? JudgmentReason.priority : reason,
   previousValue: previousValue,
   currentValue: currentValue,
 );
-
-bool _usableMarker(String? value) => value != null && value.trim().isNotEmpty;
 
 bool _lowerEvidenceDisagrees(
   UpdateState previous,
   UpdateState current, {
   required EvidenceType selected,
-  required String? previousMarker,
-  required String? currentMarker,
 }) {
   final selectedIndex = EvidenceType.values.indexOf(selected);
   for (
@@ -241,12 +232,6 @@ bool _lowerEvidenceDisagrees(
             current.recentChapterIds?.isNotEmpty == true &&
             previous.recentChapterIds!.first !=
                 current.recentChapterIds!.first) {
-          return true;
-        }
-      case EvidenceType.marker:
-        if (_usableMarker(previousMarker) &&
-            _usableMarker(currentMarker) &&
-            previousMarker != currentMarker) {
           return true;
         }
     }

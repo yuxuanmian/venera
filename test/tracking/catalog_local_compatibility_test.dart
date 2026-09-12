@@ -15,15 +15,11 @@ void main() {
     expect(data.key, 'ordinary-source');
   });
 
-  test(
-    'FavoriteUpdateCheckData keeps scan interval independent of legacy scheme',
-    () {
-      final data = FavoriteUpdateCheckData(
-        scanInterval: const Duration(hours: 1),
-        load: ([_]) async => const Res.error('unused'),
-      );
-      expect(data.scanInterval, const Duration(hours: 1));
-      expect(data.markerScheme, isNull);
-    },
-  );
+  test('FavoriteUpdateCheckData keeps a scan interval and a loader', () {
+    final data = FavoriteUpdateCheckData(
+      scanInterval: const Duration(hours: 1),
+      load: ([_]) async => const Res.error('unused'),
+    );
+    expect(data.scanInterval, const Duration(hours: 1));
+  });
 }

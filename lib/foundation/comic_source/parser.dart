@@ -297,6 +297,29 @@ class ComicSourceParser {
           if (typeof value.load !== "function") {
             return {invalid: name + ".load must be a function"};
           }
+          // Contract C1: the mapping declaration is required on every branch
+          // that has a load function. Presence and shape are checked here; the
+          // Dart side judges the declaration itself against Contract C6.
+          if (!Object.prototype.hasOwnProperty.call(value, "fieldSource")) {
+            return {present: true, hasLoad: true, fieldSourceMissing: true};
+          }
+          const fieldSource = value.fieldSource;
+          if (fieldSource === null || typeof fieldSource !== "object" ||
+              Array.isArray(fieldSource)) {
+            return {present: true, hasLoad: true, fieldSourceInvalid: true};
+          }
+          // Hand the declaration over as one JSON string.  A JS object's own
+          // keys do not survive the bridge as reliable Dart strings, and the
+          // values are opaque text the host never evaluates anyway.
+          let fieldSourceJson;
+          try {
+            fieldSourceJson = JSON.stringify(fieldSource);
+          } catch (error) {
+            return {present: true, hasLoad: true, fieldSourceInvalid: true};
+          }
+          if (typeof fieldSourceJson !== "string") {
+            return {present: true, hasLoad: true, fieldSourceInvalid: true};
+          }
           const owner = ComicSource.sources.$_key;
           const original = value.load;
           const active = [];
@@ -400,7 +423,8 @@ class ComicSourceParser {
               throw error;
             }
           };
-          return {present: true, hasLoad: true, load: wrapped};
+          return {present: true, hasLoad: true,
+                  fieldSourceJson: fieldSourceJson, load: wrapped};
         };
         return {
           comic: describe("comic"),
@@ -440,6 +464,43 @@ class ComicSourceParser {
     }
     if (collection['invalid'] is String) {
       return ScanCapabilities.invalid(collection['invalid'] as String);
+    }
+
+    // Contract C6: a branch with a load function but no usable declaration
+    // makes the whole capability invalid.  The source itself still loads, so
+    // ordinary source features are unaffected.
+    if (comic['fieldSourceMissing'] == true) {
+      return const ScanCapabilities.invalid('comic.fieldSource is required');
+    }
+    if (collection['fieldSourceMissing'] == true) {
+      return const ScanCapabilities.invalid(
+        'collection.fieldSource is required',
+      );
+    }
+    if (comic['fieldSourceInvalid'] == true) {
+      return const ScanCapabilities.invalid(
+        'comic.fieldSource must be an object',
+      );
+    }
+    if (collection['fieldSourceInvalid'] == true) {
+      return const ScanCapabilities.invalid(
+        'collection.fieldSource must be an object',
+      );
+    }
+
+    // Contract C6: an unknown key, a non-string value, an empty object or a
+    // granularity on a non-time field makes the whole declaration invalid.
+    // The source still loads, so ordinary source features are unaffected.
+    for (final entry in {'comic': comic, 'collection': collection}.entries) {
+      final name = entry.key;
+      final branch = entry.value;
+      if (branch['present'] != true || branch['hasLoad'] != true) continue;
+      final validation = ComparableLabel.validate(_declarationOf(branch, name));
+      if (!validation.isValid) {
+        return ScanCapabilities.invalid(
+          '$name.fieldSource is invalid: ${validation.reason}',
+        );
+      }
     }
 
     final comicLoad = comic['hasLoad'] == true ? comic['load'] : null;
@@ -505,12 +566,16 @@ class ComicSourceParser {
 
     if (hasComic) {
       final function = ownFunction(comicLoad);
-      comicCapability = ScanCapability.comic(_wrapScanComicLoader(function));
+      comicCapability = ScanCapability.comic(
+        _wrapScanComicLoader(function),
+        evidenceSchema: _evidenceSchemaFor(comic),
+      );
     }
     if (hasCollection) {
       final function = ownFunction(collectionLoad);
       collectionCapability = ScanCapability.collection(
         _wrapScanCollectionLoader(function),
+        evidenceSchema: _evidenceSchemaFor(collection),
       );
     }
     void disposeFunctions() {
@@ -528,6 +593,54 @@ class ComicSourceParser {
     );
     JsEngine().registerScanCapabilities(capabilities);
     return capabilities;
+  }
+
+  /// Reads one branch's declared `fieldSource` into a plain map.
+  ///
+  /// The declaration is delivered as a single JSON string rather than as a
+  /// nested object, because a JS object's own keys do not survive the bridge as
+  /// reliable Dart strings.  The host never evaluates the declaration values
+  /// (Contract C3); it only needs their text.
+  ///
+  /// Returns an empty map when the declaration is unusable, which the Contract
+  /// C6 validator then rejects.
+  Map<String, Object?> _declarationOf(
+    Map<dynamic, dynamic> branch,
+    String branchName,
+  ) {
+    final encoded = branch['fieldSourceJson'];
+    if (encoded is! String || encoded.isEmpty) return const {};
+    Object? decoded;
+    try {
+      decoded = jsonDecode(encoded);
+    } catch (_) {
+      return const {};
+    }
+    if (decoded is! Map) return const {};
+    // A non-string value is carried as null so the validator reports it rather
+    // than the decoder silently dropping the key.
+    return {
+      for (final entry in decoded.entries)
+        if (entry.key is String && (entry.key as String).isNotEmpty)
+          entry.key as String: entry.value,
+    };
+  }
+
+  /// Normalizes one branch's `fieldSource` declaration into its comparable
+  /// label (Contract C5).
+  ///
+  /// The host must not evaluate these values (Contract C3); it only normalizes
+  /// and compares them.  The declaration has already passed the Contract C6
+  /// checks above, so an invalid one reaching here means the two layers
+  /// disagree; returning null is then the safe direction, because a missing
+  /// label makes judgment rebuild the baseline instead of comparing
+  /// incomparable values.
+  String? _evidenceSchemaFor(Map<dynamic, dynamic> branch) {
+    final declaration = _declarationOf(branch, 'branch');
+    if (!ComparableLabel.validate(declaration).isValid) return null;
+    return ComparableLabel.of(
+      declaration.map((key, value) => MapEntry(key, '$value')),
+    );
   }
 
   List<JSInvokable> _scanJsFunctions(dynamic value) {
@@ -1411,126 +1524,17 @@ class ComicSourceParser {
       };
     }
 
-    FavoriteUpdateCheckData? updateCheck;
-    final updateCheckValue = _getValue("favorites.updateCheck");
-    if (updateCheckValue != null) {
-      try {
-        if (updateCheckValue is! Map) {
-          throw ComicSourceParseException(
-            "favorites.updateCheck must be an object",
-          );
-        }
-        // markerScheme was part of the legacy source contract. It is accepted
-        // as an input-only compatibility field, but never validated, negotiated,
-        // prefixed, or used by the host.
-        final markerScheme = updateCheckValue["markerScheme"] is String
-            ? updateCheckValue["markerScheme"] as String
-            : null;
-        final rawInterval = updateCheckValue["scanInterval"];
-        if (rawInterval is! int || rawInterval < 900 || rawInterval > 2592000) {
-          throw ComicSourceParseException(
-            "favorites.updateCheck.scanInterval is invalid",
-          );
-        }
-        if (!_checkExists("favorites.updateCheck.load")) {
-          throw ComicSourceParseException(
-            "favorites.updateCheck.load is required",
-          );
-        }
-
-        FavoriteUpdateSnapshot parseSnapshot(dynamic value) {
-          if (value is! Map) {
-            throw ComicSourceParseException(
-              "favorites.updateCheck.load returned an invalid snapshot",
-            );
-          }
-          final rawComics = value["comics"];
-          final rawPageSize = value["pageSize"];
-          final rawTotal = value["total"];
-          if (rawComics is! List ||
-              rawPageSize is! int ||
-              rawPageSize < 1 ||
-              rawPageSize > 200 ||
-              rawTotal is! int ||
-              rawTotal != rawComics.length) {
-            throw ComicSourceParseException(
-              "favorites.updateCheck.load returned an invalid snapshot shape",
-            );
-          }
-
-          final ids = <String>{};
-          final comics = <Comic>[];
-          for (final rawComic in rawComics) {
-            if (rawComic is! Map) {
-              throw ComicSourceParseException(
-                "favorites.updateCheck.load returned an invalid comic",
-              );
-            }
-            final rawId = rawComic["id"];
-            if (rawId is! String || rawId.trim().isEmpty || !ids.add(rawId)) {
-              throw ComicSourceParseException(
-                "favorites.updateCheck.load returned duplicate or empty comic IDs",
-              );
-            }
-            final comic = Comic.fromJson(
-              Map<String, dynamic>.from(rawComic),
-              _sourceKey!,
-            );
-            final rawHint = rawComic["favoriteUpdate"];
-            final rawUpdateTime = rawHint is Map ? rawHint["updateTime"] : null;
-            if (rawHint is! Map ||
-                (rawUpdateTime != null && rawUpdateTime is! String)) {
-              throw ComicSourceParseException(
-                "favorites.updateCheck.load returned a comic without full update evidence",
-              );
-            }
-            final hint = comic.favoriteUpdate;
-            if (hint == null ||
-                hint.marker?.trim().isEmpty != false ||
-                (hint.updateTime != null &&
-                    (hint.updateTime!.trim().isEmpty ||
-                        parseFollowUpdateActivityTime(
-                              hint.updateTime,
-                              now: DateTime.now(),
-                            ) ==
-                            null))) {
-              throw ComicSourceParseException(
-                "favorites.updateCheck.load returned a comic without full update evidence",
-              );
-            }
-            comics.add(comic);
-          }
-          return FavoriteUpdateSnapshot(
-            comics: comics,
-            pageSize: rawPageSize,
-            total: rawTotal,
-          );
-        }
-
-        updateCheck = FavoriteUpdateCheckData(
-          markerScheme: markerScheme,
-          scanInterval: Duration(seconds: rawInterval),
-          load: ([String? folderId]) async {
-            Future<Res<FavoriteUpdateSnapshot>> func() async {
-              try {
-                final res = await _runCode("""
-                  ComicSource.sources.$_key.favorites.updateCheck.load(
-                    ${jsonEncode(folderId)})
-                """);
-                return Res(parseSnapshot(res));
-              } catch (e, s) {
-                Log.error("Network", "$e\n$s");
-                return Res.error(e.toString());
-              }
-            }
-
-            return retryZone(func);
-          },
-        );
-      } finally {
-        _freeScanJsRefs(updateCheckValue);
-      }
-    }
+    // The list-level `favorites.updateCheck` channel was retired on the
+    // application side by feature 005 (FR-044/FR-045): the debug full scan and
+    // the judgment domain replaced it, and `FavoriteUpdateHint` is no longer
+    // produced from a favorites-list snapshot.
+    //
+    // Source configs still declare the channel because sources are distributed
+    // remotely and older app versions keep reading it; deleting it from a
+    // source would take list-level observations away from those users.  This
+    // build therefore parses nothing here and leaves `updateCheck` null, which
+    // is what makes every `updateCheck != null` check resolve to the detail
+    // path.
 
     Future<Res<Map<String, String>>> Function([String? comicId])? loadFolders;
 
@@ -1597,7 +1601,9 @@ class ComicSourceParser {
       deleteFolder: deleteFolder,
       addOrDelFavorite: addOrDelFavFunc,
       singleFolderForSingleComic: singleFolderForSingleComic ?? false,
-      updateCheck: updateCheck,
+      // `updateCheck` is intentionally never populated: the list-level channel
+      // was retired on the application side (FR-044).
+      updateCheck: null,
     );
   }
 

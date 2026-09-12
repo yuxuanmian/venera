@@ -3,7 +3,7 @@ import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/tracking/normalizer.dart';
 
 void main() {
-  test('normalizes detail time and the first ten chapter IDs', () {
+  test('normalizes detail time and the first five chapter IDs', () {
     final details = ComicDetails.fromJson({
       'title': 'Comic',
       'cover': '',
@@ -30,17 +30,14 @@ void main() {
     expect(normalized.state?.updatedAt, DateTime.utc(2026, 9, 2, 8, 15, 30));
     expect(normalized.state?.latestChapterId, 'chapter-12');
     expect(normalized.state?.chapterCount, 11);
+    // The cap is the observation contract's independent normalization table
+    // (specs/004-minimal-scan-kernel/contracts/observation-v1.md line 28).
     expect(normalized.state?.recentChapterIds, [
       'chapter-12',
       'chapter-11',
       'chapter-10',
       'chapter-09',
       'chapter-08',
-      'chapter-07',
-      'chapter-06',
-      'chapter-05',
-      'chapter-04',
-      'chapter-03',
     ]);
   });
 

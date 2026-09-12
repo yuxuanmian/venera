@@ -134,6 +134,15 @@ abstract class ScanResultRepository {
 
   Future<ScanStoredItem?> readLatestItem(String sourceKey, String comicId);
 
+  /// Enumerates every stored item.
+  ///
+  /// This is the only method that can answer "which (sourceKey, comicId)
+  /// exist".  The four read methods above are all point lookups: they require
+  /// the comic or scope identity up front.  The `events` broadcast cannot
+  /// substitute — it has no replay, lives only in memory and is empty after a
+  /// restart.
+  Future<List<ScanStoredItem>> readAllItems();
+
   Future<ScanStoredScope?> readMatchingScope(
     String sourceKey,
     ScanProducer producer,

@@ -63,8 +63,23 @@ class Comic {
   /// 0-5
   final double? stars;
 
-  /// Optional evidence returned by a source's favorite-list update strategy.
-  /// This is intentionally not part of persisted favorite/history summaries.
+  /// Evidence a source attaches to a favorite-list entry.
+  ///
+  /// **Status after 005: passthrough, not consumed.**  This app no longer reads
+  /// it — a full search of `lib/` finds no reader of `Comic.favoriteUpdate`
+  /// other than this declaration.  It is deliberately **not** removed, because:
+  ///
+  ///  * `manwa.js` still emits it (`parseFavoriteComic` feeds the ordinary
+  ///    `favorites.loadComics` path, not only the retained list-level
+  ///    `updateCheck` channel), and FR-045 keeps the source side intact for
+  ///    devices running older app versions;
+  ///  * `toJson`/`fromJson` carry it through `favorite_items.comic_json`, so
+  ///    narrowing or deleting it would silently change how already-cached
+  ///    favorites round-trip.
+  ///
+  /// Deleting it is therefore a source-contract change, not dead-code cleanup,
+  /// and belongs with the deferred source-side removal of `updateCheck`
+  /// (see T047's scope boundary).
   final FavoriteUpdateHint? favoriteUpdate;
 
   const Comic(
@@ -138,6 +153,14 @@ class FavoriteUpdateHint {
 
   final UpdateState? state;
   final bool? sourceUnread;
+
+  /// The opaque stable-identity string a source may emit instead of structured
+  /// state.
+  ///
+  /// Retained even though 005 retired `marker` as a judgment evidence tier:
+  /// the source side still produces it for older app versions (FR-045), and
+  /// this type is what carries that payload into the favorites cache.  Judgment
+  /// never reads it — `EvidenceType` has no marker member.
   final String? marker;
   final Map<String, dynamic>? metadata;
 

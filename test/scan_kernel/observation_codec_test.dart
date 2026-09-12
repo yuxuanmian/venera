@@ -15,7 +15,8 @@ void main() {
         'latestChapterId': '  chapter-7  ',
         'chapterCount': 0,
         'recentChapterIds': [' a ', 'a', '', 1, 'b', 'c', 'd', 'e', 'f'],
-        'marker': 'legacy',
+        // An unrecognized key is ignored, not an error.
+        'unknownField': 'ignored',
       },
       'sourceUnread': false,
       'hasNewUpdate': true,
@@ -162,6 +163,40 @@ void main() {
     expect(fixture, isA<List<dynamic>>());
   });
 
+  test('rejects an identifier containing U+0000', () {
+    // Observation identity is built by joining with U+0000, so an identifier
+    // carrying that character would make the join ambiguous (FR-030).
+    for (final identifier in const ['bad\u0000id', '\u0000', 'prefix\u0000']) {
+      final observation = codec.normalizeObservation({
+        'update': {'latestChapterId': identifier, 'chapterCount': 3},
+      });
+      // The identifier is dropped; its valid sibling survives untouched.
+      expect(observation.update!.latestChapterId, isNull, reason: identifier);
+      expect(observation.update!.chapterCount, 3, reason: identifier);
+    }
+    final recent = codec.normalizeObservation({
+      'update': {
+        'recentChapterIds': ['ok-1', 'bad\u0000id', 'ok-2'],
+      },
+    });
+    expect(recent.update!.recentChapterIds, ['ok-1', 'ok-2']);
+  });
+
+  test('rejects a collection comicId containing U+0000', () {
+    expect(
+      () => codec.decodeCollectionPage({
+        'items': [
+          {
+            'comicId': 'bad\u0000id',
+            'observation': {'sourceUnread': false},
+          },
+        ],
+        'next': null,
+      }),
+      throwsA(isA<ScanCodecException>()),
+    );
+  });
+
   test('scan item JSON round-trips both observation and failure payloads', () {
     final observed = ScanItemResult.observed(
       attemptId: 'attempt',
@@ -171,6 +206,7 @@ void main() {
       producer: ScanProducer.comic,
       definitionRevision: 'rev',
       observedAt: '2026-09-10T00:00:00.000Z',
+      evidenceSchema: '{"latestchapterid":"last_chapter.id"}',
       observation: ScanObservation(
         update: UpdateDescriptor(
           updatedAt: '2026-09-10',
@@ -189,10 +225,36 @@ void main() {
       producer: ScanProducer.comic,
       definitionRevision: 'rev',
       observedAt: '2026-09-10T00:00:00.000Z',
+      evidenceSchema: '{"latestchapterid":"last_chapter.id"}',
       failure: const ScanFailure(httpStatus: 503, message: 'unavailable'),
     );
 
     expect(ScanItemResult.fromJson(observed.toJson()), observed);
     expect(ScanItemResult.fromJson(failed.toJson()), failed);
+    // The comparable label rides beside definitionRevision and never enters
+    // the observation payload (Contract C5).
+    expect(observed.toJson().containsKey('evidenceSchema'), isTrue);
+    expect(
+      observed.observation!.toJson().containsKey('evidenceSchema'),
+      isFalse,
+    );
+  });
+
+  test('scan item JSON round-trips a null comparable label', () {
+    final observed = ScanItemResult.observed(
+      attemptId: 'attempt',
+      scopeAttemptId: 'scope',
+      sourceKey: 'source',
+      comicId: 'comic',
+      producer: ScanProducer.comic,
+      definitionRevision: 'rev',
+      observedAt: '2026-09-10T00:00:00.000Z',
+      observation: ScanObservation(
+        update: UpdateDescriptor(latestChapterId: 'chapter'),
+      ),
+    );
+    expect(observed.evidenceSchema, isNull);
+    expect(observed.toJson().containsKey('evidenceSchema'), isFalse);
+    expect(ScanItemResult.fromJson(observed.toJson()).evidenceSchema, isNull);
   });
 }

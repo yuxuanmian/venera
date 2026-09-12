@@ -214,7 +214,9 @@ void main() {
     // second selection must only report re-entry and must not reset progress.
     final sheet = showDebugMenuSheet();
     await tester.pumpAndSettle();
-    expect(find.byType(ListTile), findsNWidgets(4));
+    // Clear favorites, clear baselines, force scan, rerun judgment,
+    // clear observation facts, random refresh.
+    expect(find.byType(ListTile), findsNWidgets(6));
     // The sheet is intentionally anchored at the bottom of the oversized
     // test viewport. Invoke the real tile callback so this assertion remains
     // about menu wiring rather than pixel hit-testing.

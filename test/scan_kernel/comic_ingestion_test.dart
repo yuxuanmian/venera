@@ -139,6 +139,7 @@ class RealComicIngestionSource extends ComicSource {
   scan = {
     primary: "comic",
     comic: {
+      fieldSource: {latestChapterId: "comic.id"},
       load: async (id, request) => {
         const response = await request({
           method: "GET",

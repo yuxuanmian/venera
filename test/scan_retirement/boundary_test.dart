@@ -51,4 +51,32 @@ void main() {
       contains('CREATE TABLE IF NOT EXISTS favorite_update_scan_state'),
     );
   });
+
+  test('retired source-declaration fields leave no app-side residue', () {
+    final favorites = _read('lib/foundation/favorites.dart');
+    final comicSourceFavorites = _read(
+      'lib/foundation/comic_source/favorites.dart',
+    );
+    final models = _read('lib/foundation/comic_source/models.dart');
+    final normalizer = _read('lib/foundation/tracking/normalizer.dart');
+
+    // T069: `FavoriteUpdateCheckData.markerScheme` had no reader and the
+    // application-side parser no longer supplies it, so the field and its
+    // parameter are gone.  The legacy *database column* lives on
+    // `FavoriteUpdateScanState` and is deliberately still here.
+    expect(comicSourceFavorites, isNot(contains('markerScheme')));
+    expect(comicSourceFavorites, contains('class FavoriteUpdateCheckData'));
+    expect(favorites, contains('lastComicCount'));
+
+    // T068: `FavoriteUpdateHint` is a passthrough carrier kept for source
+    // compatibility and theme-cache round-tripping, not dead code that may be
+    // deleted.  Its presence is asserted so a later "cleanup" has to argue with
+    // this test rather than silently drop cached favorite data.
+    expect(models, contains('class FavoriteUpdateHint'));
+    expect(models, contains('favoriteUpdate = FavoriteUpdateHint.fromJson'));
+    expect(models, isNot(contains('fromFavoriteUpdate')));
+
+    // The application side must not resurrect the list-level channel.
+    expect(normalizer, isNot(contains('fromFavoriteUpdate')));
+  });
 }

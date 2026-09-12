@@ -134,9 +134,7 @@ class TrackingApplyService {
     );
     final decision = compareTrackingEvidence(
       previousState: previous?.state,
-      previousMarker: previous?.marker,
       currentState: observation.state,
-      currentMarker: observation.marker,
     );
     final nextHasNewUpdate = resolveHasNewUpdate(
       previousHasNewUpdate: previous?.hasNewUpdate ?? false,
@@ -146,7 +144,6 @@ class TrackingApplyService {
     final persistBaseline = decision.contentChange != ContentChange.unknown;
     final next = TrackingBaseline(
       state: persistBaseline ? observation.state : previous?.state,
-      marker: persistBaseline ? observation.marker : previous?.marker,
       metadata: persistBaseline ? observation.metadata : previous?.metadata,
       hasNewUpdate: nextHasNewUpdate,
       baselineAt: persistBaseline
@@ -166,7 +163,7 @@ class TrackingApplyService {
       previous: previous,
       comparison: ComparisonDecisionView(
         contentChange: decision.contentChange.name,
-        reason: decision.reason,
+        reason: decision.reason.value,
         selectedEvidence: decision.selectedEvidence?.name,
         currentValue: _diagnosticValue(decision.currentValue),
       ),

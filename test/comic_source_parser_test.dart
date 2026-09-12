@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/js_engine.dart';
+import 'package:venera/foundation/scan/source_adapter.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -74,7 +75,7 @@ class ParserFullSearchSource extends ComicSource {
     expect(source.onTagSuggestionSelected!('artist', 'alice'), 'artist:alice');
   });
 
-  test('parses the optional favorite list update capability', () async {
+  test('a declared list update capability is no longer parsed', () async {
     const key = 'parser_favorite_update_case';
     final source = await ComicSourceParser().parse('''
 class ParserFavoriteUpdateSource extends ComicSource {
@@ -105,99 +106,172 @@ class ParserFavoriteUpdateSource extends ComicSource {
         total: 1,
       }),
     },
+    loadComics: async (page, folder) => ({comics: [], maxPage: 1}),
   };
 }
 ''', '$key.js');
 
-    final updateCheck = source.favoriteData!.updateCheck;
-    expect(updateCheck, isNotNull);
-    expect(updateCheck!.markerScheme, 'test-list-v1');
-    expect(updateCheck.scanInterval, const Duration(hours: 1));
-    final result = await updateCheck.load(null);
-    expect(result.success, isTrue);
-    expect(result.data.comics.single.favoriteUpdate!.marker, 'marker-1');
-    expect(result.data.comics.single.favoriteUpdate!.metadata, {
-      'fullIsNew': true,
-    });
+    // FR-044/FR-045: the application side reads no list-level snapshot.  The
+    // source still declares it for older app versions, so parsing must succeed
+    // and simply leave the capability absent, while the ordinary favorites
+    // loader keeps working.
+    expect(source.key, key);
+    expect(source.favoriteData, isNotNull);
+    expect(source.favoriteData!.updateCheck, isNull);
+    expect(source.favoriteData!.loadComic, isNotNull);
+    final page = await source.favoriteData!.loadComic!(1);
+    expect(page.success, isTrue);
   });
 
-  test(
-    'accepts a nullable list update time but validates non-null times',
-    () async {
-      const key = 'parser_nullable_favorite_update_case';
-      final source = await ComicSourceParser().parse('''
-class ParserNullableFavoriteUpdateSource extends ComicSource {
-  name = "Parser nullable favorite update";
+  group('the required branch mapping declaration (Contract C1/C6)', () {
+    Future<ComicSource> parseScanSource(
+      String key,
+      String branchName,
+      String branchBody,
+    ) => ComicSourceParser().parse('''
+class ScanDeclarationSource extends ComicSource {
+  name = "Scan declaration";
   key = "$key";
   version = "1.0.0";
   minAppVersion = "1.0.0";
-  favorites = {
-    multiFolder: false,
-    updateCheck: {
-      markerScheme: "chapter-id-v1",
-      scanInterval: 43200,
-      load: async (folderId) => ({
-        comics: [new Comic({
-          id: "comic-1",
-          title: "Comic 1",
-          cover: "cover",
-          tags: [],
-          description: "",
-          favoriteUpdate: {
-            marker: "normal:chapter-1|full:",
-            updateTime: null,
-            isNew: true,
-            metadata: {fullIsNew: false},
-          },
-        })],
-        pageSize: 15,
-        total: 1,
-      }),
+  scan = {
+    primary: "$branchName",
+    $branchName: {$branchBody},
+  };
+}
+''', '$key.js');
+
+    const goodLoad = '''
+      load: async (id, request) => ({observation: {update: {latestChapterId: id}}}),
+''';
+
+    test('a valid declaration yields a normalized comparable label', () async {
+      final source = await parseScanSource('parser_scan_valid', 'comic', '''
+      fieldSource: {latestChapterId: "  Last_Chapter.ID  "},
+$goodLoad''');
+      expect(source.scan!.state, ScanCapabilitiesState.supported);
+      // Values are trimmed and lowercased; keys keep their declared spelling
+      // because a mis-cased key is rejected rather than corrected (C2/C5).
+      expect(
+        source.scan!.comic!.evidenceSchema,
+        '{"latestChapterId":"last_chapter.id"}',
+      );
+      expect(
+        source.scan!.selectedEvidenceSchema,
+        source.scan!.comic!.evidenceSchema,
+      );
+    });
+
+    test('a granularity marker is carried in the label', () async {
+      final source = await parseScanSource(
+        'parser_scan_granularity',
+        'comic',
+        '''
+      fieldSource: {updatedAt: "updated_at@day"},
+$goodLoad''',
+      );
+      expect(
+        source.scan!.selectedEvidenceSchema,
+        '{"updatedAt":"updated_at@day"}',
+      );
+    });
+
+    test('a missing declaration invalidates the capability', () async {
+      final source = await parseScanSource(
+        'parser_scan_missing',
+        'comic',
+        goodLoad,
+      );
+      expect(source.scan!.state, ScanCapabilitiesState.invalid);
+      expect(source.scan!.reason, contains('fieldSource is required'));
+      // The source itself still loads, so ordinary features are unaffected.
+      expect(source.key, 'parser_scan_missing');
+    });
+
+    test('a non-object declaration invalidates the capability', () async {
+      for (final declaration in const ['"comic.id"', 'null', '[1]']) {
+        final source = await parseScanSource(
+          'parser_scan_shape_${declaration.hashCode.abs()}',
+          'comic',
+          '      fieldSource: $declaration,\n$goodLoad',
+        );
+        expect(
+          source.scan!.state,
+          ScanCapabilitiesState.invalid,
+          reason: declaration,
+        );
+      }
+    });
+
+    test('an unknown field name invalidates the capability', () async {
+      final source = await parseScanSource(
+        'parser_scan_unknown_field',
+        'comic',
+        '''
+      fieldSource: {latestChapterID: "comic.id"},
+$goodLoad''',
+      );
+      expect(source.scan!.state, ScanCapabilitiesState.invalid);
+    });
+
+    test(
+      'a granularity on a non-time field invalidates the capability',
+      () async {
+        final source = await parseScanSource(
+          'parser_scan_bad_granularity',
+          'comic',
+          '''
+      fieldSource: {latestChapterId: "comic.id@day"},
+$goodLoad''',
+        );
+        expect(source.scan!.state, ScanCapabilitiesState.invalid);
+      },
+    );
+
+    test('an empty declaration invalidates the capability', () async {
+      final source = await parseScanSource('parser_scan_empty', 'comic', '''
+      fieldSource: {},
+$goodLoad''');
+      expect(source.scan!.state, ScanCapabilitiesState.invalid);
+    });
+
+    test('each branch carries its own label', () async {
+      const key = 'parser_scan_two_branches';
+      final source = await ComicSourceParser().parse('''
+class ScanTwoBranchSource extends ComicSource {
+  name = "Scan two branches";
+  key = "$key";
+  version = "1.0.0";
+  minAppVersion = "1.0.0";
+  scan = {
+    primary: "comic",
+    comic: {
+      fieldSource: {updatedAt: "updated_at@instant"},
+      load: async (id, request) => ({observation: {update: {latestChapterId: id}}}),
+    },
+    collection: {
+      fieldSource: {latestChapterId: "last_chapter.id"},
+      load: async (key, cursor, request) => ({items: [], next: null}),
     },
   };
 }
 ''', '$key.js');
 
-      final result = await source.favoriteData!.updateCheck!.load(null);
-      expect(result.success, isTrue);
-      expect(result.data.comics.single.favoriteUpdate!.updateTime, isNull);
-
-      const invalidKey = 'parser_invalid_favorite_time_case';
-      final invalidSource = await ComicSourceParser().parse('''
-class ParserInvalidFavoriteTimeSource extends ComicSource {
-  name = "Parser invalid favorite time";
-  key = "$invalidKey";
-  version = "1.0.0";
-  minAppVersion = "1.0.0";
-  favorites = {
-    multiFolder: false,
-    updateCheck: {
-      markerScheme: "chapter-id-v1",
-      scanInterval: 43200,
-      load: async (folderId) => ({
-        comics: [new Comic({
-          id: "comic-1",
-          title: "Comic 1",
-          cover: "cover",
-          tags: [],
-          description: "",
-          favoriteUpdate: {
-            marker: "marker-1",
-            updateTime: "not-a-date",
-          },
-        })],
-        pageSize: 15,
-        total: 1,
-      }),
-    },
-  };
-}
-''', '$invalidKey.js');
-      final invalidResult = await invalidSource.favoriteData!.updateCheck!.load(
-        null,
+      expect(source.scan!.state, ScanCapabilitiesState.supported);
+      expect(
+        source.scan!.comic!.evidenceSchema,
+        '{"updatedAt":"updated_at@instant"}',
       );
-      expect(invalidResult.success, isFalse);
-      expect(invalidResult.errorMessage, contains('full update evidence'));
-    },
-  );
+      expect(
+        source.scan!.collection!.evidenceSchema,
+        '{"latestChapterId":"last_chapter.id"}',
+      );
+      // Switching `primary` changes the selected label structurally, which is
+      // what makes a branch switch rebuild the baseline automatically.
+      expect(
+        source.scan!.selectedEvidenceSchema,
+        source.scan!.comic!.evidenceSchema,
+      );
+    });
+  });
 }

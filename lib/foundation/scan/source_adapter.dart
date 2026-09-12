@@ -107,12 +107,20 @@ class ScanHostRequestException implements Exception {
 enum ScanCapabilitiesState { absent, invalid, supported }
 
 class ScanCapability {
-  const ScanCapability.comic(this.load) : producer = ScanProducer.comic;
-  const ScanCapability.collection(this.load)
+  const ScanCapability.comic(this.load, {this.evidenceSchema})
+    : producer = ScanProducer.comic;
+  const ScanCapability.collection(this.load, {this.evidenceSchema})
     : producer = ScanProducer.collection;
 
   final ScanProducer producer;
   final Object load;
+
+  /// The normalized comparable label of this branch's mapping declaration.
+  ///
+  /// Null means the branch declared no usable mapping; such a branch is
+  /// reported as [ScanCapabilitiesState.invalid] and is not selectable
+  /// (Contract C1/C6).
+  final String? evidenceSchema;
 
   ScanComicLoader get comicLoad => load as ScanComicLoader;
   ScanCollectionLoader get collectionLoad => load as ScanCollectionLoader;
@@ -158,12 +166,22 @@ class ScanCapabilities {
   ScanCapability? get selected =>
       primary == ScanProducer.comic ? comic : collection;
 
+  /// The comparable label of the currently selected branch.
+  ///
+  /// A declaration lives on a branch, so switching `primary` changes the label
+  /// structurally rather than by convention (Contract C1).
+  String? get selectedEvidenceSchema => selected?.evidenceSchema;
+
   void dispose() => onDispose?.call();
 }
 
 abstract class ScanSourceAdapter {
   String get sourceKey;
   String get definitionRevision;
+
+  /// Comparable label of the branch this adapter was built from.
+  String? get evidenceSchema;
+
   ManagedSourceContext? get runtimeContext;
   ScanCapabilities get capabilities;
 

@@ -11,6 +11,7 @@ class ComicDebugPage extends StatefulWidget {
     required this.comicId,
     this.details,
     this.scanRepository,
+    this.judgmentRepository,
     this.favoriteCache,
   });
 
@@ -26,6 +27,10 @@ class ComicDebugPage extends StatefulWidget {
   /// app-owned latest-result repository.
   final ScanResultRepository? scanRepository;
 
+  /// Test injection point for the judgment state store. Production callers use
+  /// the app-owned judgment repository through [judgmentService].
+  final JudgmentStateRepository? judgmentRepository;
+
   final NetworkFavoriteCacheManager? favoriteCache;
 
   @override
@@ -39,11 +44,16 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
   bool _scanLoaded = false;
   StreamSubscription<ScanRepositoryEvent>? _scanEvents;
 
+  JudgmentState? _judgment;
+  bool _judgmentLoaded = false;
+  String? _judgmentError;
+
   @override
   void initState() {
     super.initState();
     _cache = widget.favoriteCache ?? NetworkFavoriteCacheManager();
     _reloadScanResult();
+    _reloadJudgment();
     final repository = widget.scanRepository ?? scanResultRepository;
     _scanEvents = repository.events.listen((event) {
       final item = event.item?.result;
@@ -62,6 +72,19 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
   void dispose() {
     _scanEvents?.cancel();
     super.dispose();
+  }
+
+  /// A widget test or a future in-page navigation can reuse this State for a
+  /// different comic, so identity changes must reload both stores.
+  @override
+  void didUpdateWidget(covariant ComicDebugPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.sourceKey == widget.sourceKey &&
+        oldWidget.comicId == widget.comicId) {
+      return;
+    }
+    _reloadScanResult();
+    _reloadJudgment();
   }
 
   Future<void> _reloadScanResult() async {
@@ -88,6 +111,40 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
       // A corrupt/unavailable scan database must not break the existing
       // details debug page.
     }
+  }
+
+  /// Reads the persisted judgment state.
+  ///
+  /// Contract U3 requires a storage failure to be *reported*, never silently
+  /// rendered as "no record": those are different situations and conflating
+  /// them hides a broken database.
+  Future<void> _reloadJudgment() async {
+    try {
+      final state = widget.judgmentRepository != null
+          ? await _readInjectedJudgment()
+          : await judgmentService.readFor(widget.sourceKey, widget.comicId);
+      if (!mounted) return;
+      setState(() {
+        _judgment = state;
+        _judgmentError = null;
+        _judgmentLoaded = true;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _judgment = null;
+        _judgmentError = error is JudgmentStorageException
+            ? error.message
+            : error.runtimeType.toString();
+        _judgmentLoaded = true;
+      });
+    }
+  }
+
+  Future<JudgmentState?> _readInjectedJudgment() async {
+    final repository = widget.judgmentRepository!;
+    await repository.ensureOpen();
+    return repository.readFor(widget.sourceKey, widget.comicId);
   }
 
   /// Follow-up state of this comic, from whichever favorite folder row the
@@ -174,6 +231,8 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
         padding: const EdgeInsets.only(bottom: 24),
         children: [
           ..._buildActions(),
+          const Divider(),
+          ..._buildJudgmentSection(),
           const Divider(),
           ..._buildRawScanSection(),
           const Divider(),
@@ -469,6 +528,162 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
         ],
       ),
     ];
+  }
+
+  // ---------------------------------------------------------------------------
+  // Judgment (Contract U1/U2/U3)
+  // ---------------------------------------------------------------------------
+
+  /// Renders the Judgment section, kept separate from Raw Scan Result so a
+  /// reader can tell "what the source said" from "what we concluded".
+  ///
+  /// Every value comes from persisted state, so it survives a restart.
+  List<Widget> _buildJudgmentSection() {
+    final header = [ListTile(title: Text('Judgment'.tl))];
+    if (!_judgmentLoaded) {
+      return [...header, _infoRow('Conclusion', 'Loading'.tl)];
+    }
+    if (_judgmentError != null) {
+      // A broken store is reported, never rendered as an empty record.
+      return [
+        ...header,
+        _infoRow('Judgment State Unreadable'.tl, _judgmentError!),
+      ];
+    }
+    final state = _judgment;
+    if (state == null) {
+      // "No record at all" is distinct from "a record whose fields are empty".
+      return [...header, _infoRow('No Judgment Record'.tl, '-')];
+    }
+
+    final item = _scanItem;
+    return [
+      ...header,
+      // U2.1 decision result.
+      _infoRow('Conclusion', state.lastDecision.value),
+      _infoRow('Selected Evidence', state.lastEvidence?.value ?? 'None'.tl),
+      _infoRow(
+        'Previous Value',
+        state.lastPreviousValue ?? 'No Previous Fact'.tl,
+      ),
+      _infoRow('Current Value', _currentValueText(state)),
+      _infoRow('Reason', state.lastReason.value),
+      // U2.2 fact.
+      if (state.factJson != null)
+        _judgmentFactTile(state.factJson!)
+      else
+        _infoRow('Fact Content', 'No Previous Fact'.tl),
+      _infoRow(
+        'Fact Observed At',
+        state.factObservedAtMs == null
+            ? 'No Previous Fact'.tl
+            : _fmt(
+                DateTime.fromMillisecondsSinceEpoch(
+                  state.factObservedAtMs!,
+                  isUtc: true,
+                ),
+              ),
+      ),
+      _infoRow('Comparable Label', state.evidenceSchema ?? 'None'.tl),
+      // U2.3 visible flag and diagnostics.
+      _infoRow('Has New Update', _yesNo(state.hasNewUpdate)),
+      _infoRow(
+        'Decided At',
+        _fmt(
+          DateTime.fromMillisecondsSinceEpoch(state.decidedAtMs, isUtc: true),
+        ),
+      ),
+      _infoRow('No Common Field Streak', '${state.noCommonStreak}'),
+      // U3: the reasons the current observation contributed nothing.
+      _infoRow('Scan Evidence', _scanEvidenceText(item)),
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: Button.outlined(
+            onPressed: _copyJudgment,
+            child: Text('Copy Judgment Data'.tl),
+          ),
+        ),
+      ),
+    ];
+  }
+
+  /// U3: distinguishes "there is no scan evidence" from "this comic's scan
+  /// failed" from "there is evidence but it carries nothing usable".
+  String _scanEvidenceText(ScanStoredItem? item) {
+    if (!_scanLoaded) return 'Loading'.tl;
+    if (item == null) return 'No Scan Evidence'.tl;
+    if (!item.result.isSuccess) return 'Scan Failed For This Comic'.tl;
+    return 'OK'.tl;
+  }
+
+  /// U3: an empty current value means either "no usable evidence" or "no
+  /// comparison happened yet"; the two are reported differently.
+  String _currentValueText(JudgmentState state) {
+    final value = state.lastCurrentValue;
+    if (value != null && value.isNotEmpty) return value;
+    return switch (state.lastReason) {
+      JudgmentReason.noUsableEvidence => 'No Usable Evidence'.tl,
+      JudgmentReason.noPreviousEvidence => 'No Previous Fact'.tl,
+      _ => 'None'.tl,
+    };
+  }
+
+  Widget _judgmentFactTile(String factJson) {
+    String pretty = factJson;
+    try {
+      pretty = const JsonEncoder.withIndent(
+        '  ',
+      ).convert(TrackingDiagnostics.redactForDisplay(jsonDecode(factJson)));
+    } catch (_) {
+      // A malformed fact is shown verbatim rather than hidden.
+    }
+    return ExpansionTile(
+      title: Text('Fact Content'.tl),
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+          child: SelectableText(pretty, style: ts.s14),
+        ),
+      ],
+    );
+  }
+
+  /// U2.4: exports persisted judgment fields only, and goes through the same
+  /// redaction allow-list as the existing diagnostics because the fact holds
+  /// source-provided observation JSON.
+  String _judgmentJson() {
+    final state = _judgment;
+    if (_judgmentError != null) {
+      return const JsonEncoder.withIndent(
+        '  ',
+      ).convert({'state': 'unreadable', 'error': _judgmentError});
+    }
+    if (state == null) return '{}';
+    return const JsonEncoder.withIndent('  ').convert(
+      TrackingDiagnostics.redactForDisplay({
+        'sourceKey': state.sourceKey,
+        'comicId': state.comicId,
+        'conclusion': state.lastDecision.value,
+        'selectedEvidence': state.lastEvidence?.value,
+        'previousValue': state.lastPreviousValue,
+        'currentValue': state.lastCurrentValue,
+        'reason': state.lastReason.value,
+        'decidedAtMs': state.decidedAtMs,
+        'noCommonStreak': state.noCommonStreak,
+        'hasNewUpdate': state.hasNewUpdate,
+        'processedAttemptId': state.processedAttemptId,
+        'factObservedAtMs': state.factObservedAtMs,
+        'comparableLabel': state.evidenceSchema,
+        'fact': state.factJson == null ? null : jsonDecode(state.factJson!),
+      }),
+    );
+  }
+
+  void _copyJudgment() {
+    Clipboard.setData(ClipboardData(text: _judgmentJson()));
+    context.showMessage(message: 'Copied'.tl);
   }
 
   List<Widget> _buildRawScanSection() {

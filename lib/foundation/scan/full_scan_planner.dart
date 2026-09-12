@@ -80,6 +80,11 @@ class ScanWork {
   String? get comicId => spec.comicId;
   ScanSourceAdapter get adapter => spec.adapter;
   String get definitionRevision => adapter.definitionRevision;
+
+  /// The selected branch's comparable label, forwarded exactly like
+  /// [definitionRevision].
+  String? get evidenceSchema => adapter.evidenceSchema;
+
   ManagedSourceContext? get runtimeContext => adapter.runtimeContext;
 }
 

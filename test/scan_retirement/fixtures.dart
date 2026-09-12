@@ -129,14 +129,12 @@ class RetirementFakeSource {
     loadComic: null,
     loadNext: null,
     updateCheck: FavoriteUpdateCheckData(
-      markerScheme: 'retirement-only-test',
       scanInterval: const Duration(hours: 1),
       load: optimized,
     ),
   );
 
   FavoriteUpdateCheckData _updateCheck() => FavoriteUpdateCheckData(
-    markerScheme: 'retirement-only-test',
     scanInterval: const Duration(hours: 1),
     load: ([_]) async {
       counters.updateCheckCalls++;

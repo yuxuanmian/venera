@@ -113,6 +113,7 @@ class ScanExecutor {
               producer: ScanProducer.comic,
               definitionRevision: work.definitionRevision,
               observedAt: observedAt,
+              evidenceSchema: work.evidenceSchema,
               observation: envelope.value!,
             )
           : ScanItemResult.failed(
@@ -123,6 +124,7 @@ class ScanExecutor {
               producer: ScanProducer.comic,
               definitionRevision: work.definitionRevision,
               observedAt: observedAt,
+              evidenceSchema: work.evidenceSchema,
               failure: envelope.failure!,
             );
       await emit(ScanEmission(ScanItemEvent(item)), context);
@@ -282,6 +284,7 @@ class ScanExecutor {
             producer: ScanProducer.collection,
             definitionRevision: work.definitionRevision,
             observedAt: observedAt,
+            evidenceSchema: work.evidenceSchema,
             observation: pageItem.observation,
           );
           await emit(ScanEmission(ScanItemEvent(item)), context);

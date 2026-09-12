@@ -47,7 +47,7 @@ class _RecoveryTransaction implements TrackingApplyTransaction {
 }
 
 TrackingObservation _observation(String id) => TrackingObservation(
-  origin: TrackingObservationOrigin.localOptimized,
+  origin: TrackingObservationOrigin.localDetail,
   revision: 'local',
   artifact: const TrackingArtifactIdentity(
     sourceKey: 'source',

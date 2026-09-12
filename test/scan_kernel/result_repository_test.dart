@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sqlite3/sqlite3.dart';
 import 'package:venera/foundation/scan/models.dart';
 import 'package:venera/foundation/scan/scan_result_repository.dart';
 import 'package:venera/foundation/scan/sqlite_scan_result_repository.dart';
@@ -28,10 +29,11 @@ void main() {
     String comicId, {
     String? chapter,
     int? count,
+    String sourceKey = 'source',
   }) => ScanItemResult.observed(
-    attemptId: scanUuidV5(scope.scopeAttemptId, 'source\u0000$comicId'),
+    attemptId: scanUuidV5(scope.scopeAttemptId, '$sourceKey\u0000$comicId'),
     scopeAttemptId: scope.scopeAttemptId,
-    sourceKey: 'source',
+    sourceKey: sourceKey,
     comicId: comicId,
     producer: scope.producer,
     definitionRevision: scope.definitionRevision,
@@ -42,17 +44,20 @@ void main() {
     ),
   );
 
-  ScanItemResult failed(ScanScopeHandle scope, String comicId) =>
-      ScanItemResult.failed(
-        attemptId: scanUuidV5(scope.scopeAttemptId, 'source\u0000$comicId'),
-        scopeAttemptId: scope.scopeAttemptId,
-        sourceKey: 'source',
-        comicId: comicId,
-        producer: scope.producer,
-        definitionRevision: scope.definitionRevision,
-        observedAt: '2026-09-10T00:00:00.000Z',
-        failure: const ScanFailure(httpStatus: 403, message: 'forbidden'),
-      );
+  ScanItemResult failed(
+    ScanScopeHandle scope,
+    String comicId, {
+    String sourceKey = 'source',
+  }) => ScanItemResult.failed(
+    attemptId: scanUuidV5(scope.scopeAttemptId, '$sourceKey\u0000$comicId'),
+    scopeAttemptId: scope.scopeAttemptId,
+    sourceKey: sourceKey,
+    comicId: comicId,
+    producer: scope.producer,
+    definitionRevision: scope.definitionRevision,
+    observedAt: '2026-09-10T00:00:00.000Z',
+    failure: const ScanFailure(httpStatus: 403, message: 'forbidden'),
+  );
 
   test(
     'creates the three-table schema and commits item/count atomically',
@@ -253,5 +258,228 @@ void main() {
     // Keep the original scope variable used as an explicit test of the first
     // connection's lifecycle; no item was committed before the close.
     expect(scope.scopeKey, 'comic-1');
+  });
+
+  group('readAllItems', () {
+    test('an empty table returns an empty list', () async {
+      expect(await repository.readAllItems(), isEmpty);
+    });
+
+    test('enumerates every source and comic, including failures', () async {
+      final comicScope = await repository.beginScope(
+        sourceKey: 'source-a',
+        producer: ScanProducer.comic,
+        scopeKey: 'comic-1',
+        definitionRevision: 'rev-1',
+      );
+      final comicContext = ScanIngestionContext(scope: comicScope);
+      await repository.saveItem(
+        comicContext,
+        observed(
+          comicScope,
+          'comic-1',
+          chapter: 'chapter-1',
+          sourceKey: 'source-a',
+        ),
+      );
+
+      final collectionScope = await repository.beginScope(
+        sourceKey: 'source-a',
+        producer: ScanProducer.collection,
+        scopeKey: 'default',
+        definitionRevision: 'rev-1',
+      );
+      final collectionContext = ScanIngestionContext(scope: collectionScope);
+      await repository.saveItem(
+        collectionContext,
+        ScanItemResult.observed(
+          attemptId: scanUuidV5(
+            collectionScope.scopeAttemptId,
+            'source-a\u0000comic-2',
+          ),
+          scopeAttemptId: collectionScope.scopeAttemptId,
+          sourceKey: 'source-a',
+          comicId: 'comic-2',
+          producer: ScanProducer.collection,
+          definitionRevision: 'rev-1',
+          observedAt: '2026-09-10T00:00:00.000Z',
+          observation: ScanObservation(
+            update: UpdateDescriptor(latestChapterId: 'chapter-2'),
+          ),
+        ),
+      );
+      await repository.saveItem(
+        collectionContext,
+        ScanItemResult.failed(
+          attemptId: scanUuidV5(
+            collectionScope.scopeAttemptId,
+            'source-a\u0000comic-3',
+          ),
+          scopeAttemptId: collectionScope.scopeAttemptId,
+          sourceKey: 'source-a',
+          comicId: 'comic-3',
+          producer: ScanProducer.collection,
+          definitionRevision: 'rev-1',
+          observedAt: '2026-09-10T00:00:00.000Z',
+          failure: const ScanFailure(httpStatus: 403, message: 'forbidden'),
+        ),
+      );
+
+      final otherScope = await repository.beginScope(
+        sourceKey: 'source-b',
+        producer: ScanProducer.comic,
+        scopeKey: 'comic-1',
+        definitionRevision: 'rev-1',
+      );
+      await repository.saveItem(
+        ScanIngestionContext(scope: otherScope),
+        ScanItemResult.observed(
+          attemptId: scanUuidV5(
+            otherScope.scopeAttemptId,
+            'source-b\u0000comic-1',
+          ),
+          scopeAttemptId: otherScope.scopeAttemptId,
+          sourceKey: 'source-b',
+          comicId: 'comic-1',
+          producer: ScanProducer.comic,
+          definitionRevision: 'rev-1',
+          observedAt: '2026-09-10T00:00:00.000Z',
+          observation: ScanObservation(
+            update: UpdateDescriptor(latestChapterId: 'chapter-b1'),
+          ),
+        ),
+      );
+
+      final items = await repository.readAllItems();
+      expect(items, hasLength(4));
+      expect(
+        items.map((i) => '${i.result.sourceKey}/${i.result.comicId}').toSet(),
+        {
+          'source-a/comic-1',
+          'source-a/comic-2',
+          'source-a/comic-3',
+          'source-b/comic-1',
+        },
+      );
+      // A failure payload is enumerated too: the judgment service, not the
+      // store, decides to skip it.
+      final failedItem = items.firstWhere((i) => i.result.comicId == 'comic-3');
+      expect(failedItem.result.isSuccess, isFalse);
+      expect(failedItem.result.failure!.httpStatus, 403);
+    });
+
+    test('round-trips attemptId and evidenceSchema verbatim', () async {
+      final scope = await repository.beginScope(
+        sourceKey: 'source',
+        producer: ScanProducer.comic,
+        scopeKey: 'comic-1',
+        definitionRevision: 'rev-1',
+      );
+      const schema = '{"latestchapterid":"last_chapter.id"}';
+      final item = ScanItemResult.observed(
+        attemptId: 'fixed-attempt-id',
+        scopeAttemptId: scope.scopeAttemptId,
+        sourceKey: 'source',
+        comicId: 'comic-1',
+        producer: ScanProducer.comic,
+        definitionRevision: 'rev-1',
+        observedAt: '2026-09-10T00:00:00.000Z',
+        evidenceSchema: schema,
+        observation: ScanObservation(
+          update: UpdateDescriptor(latestChapterId: 'chapter-1'),
+        ),
+      );
+      await repository.saveItem(ScanIngestionContext(scope: scope), item);
+
+      final stored = (await repository.readAllItems()).single;
+      expect(stored.result.attemptId, 'fixed-attempt-id');
+      expect(stored.result.evidenceSchema, schema);
+      // The observable fields live on the result, not on the stored wrapper.
+      expect(stored.result.definitionRevision, 'rev-1');
+    });
+  });
+
+  group('evidence_schema migration (T042)', () {
+    test(
+      'adds the column to a pre-existing database and keeps old rows',
+      () async {
+        await repository.close();
+        final path =
+            '${tempDirectory.path}${Platform.pathSeparator}legacy_scan.db';
+        final legacy = sqlite3.open(path);
+        try {
+          // The pre-005 DDL: no evidence_schema column.
+          legacy.execute('''
+          CREATE TABLE scan_item_state (
+            source_key TEXT NOT NULL,
+            comic_id TEXT NOT NULL,
+            attempt_id TEXT NOT NULL UNIQUE,
+            scope_attempt_id TEXT NOT NULL,
+            attempt_ordinal INTEGER NOT NULL CHECK (attempt_ordinal > 0),
+            access_context_key TEXT,
+            producer TEXT NOT NULL CHECK (producer IN ('comic', 'collection')),
+            definition_revision TEXT NOT NULL,
+            observed_at_ms INTEGER NOT NULL,
+            committed_at_ms INTEGER NOT NULL,
+            observation_json TEXT,
+            failure_json TEXT,
+            PRIMARY KEY (source_key, comic_id),
+            CHECK ((observation_json IS NOT NULL AND failure_json IS NULL) OR
+                   (observation_json IS NULL AND failure_json IS NOT NULL))
+          )
+        ''');
+          legacy.execute(
+            '''INSERT INTO scan_item_state
+             (source_key, comic_id, attempt_id, scope_attempt_id, attempt_ordinal,
+              access_context_key, producer, definition_revision, observed_at_ms,
+              committed_at_ms, observation_json, failure_json)
+             VALUES ('source', 'comic-1', 'legacy-attempt', 'legacy-scope', 1,
+                     NULL, 'comic', 'rev-1', 1757000000000, 1757000000000,
+                     '{"update":{"latestChapterId":"chapter-legacy"}}', NULL)''',
+          );
+        } finally {
+          legacy.dispose();
+        }
+
+        final migrated = SqliteScanResultRepository(databasePath: path);
+        addTearDown(migrated.close);
+        await migrated.ensureOpen();
+
+        final columns = migrated.database
+            .select('PRAGMA table_info(scan_item_state)')
+            .map((row) => row['name'] as String)
+            .toSet();
+        expect(columns, contains('evidence_schema'));
+
+        final stored = await migrated.readLatestItem('source', 'comic-1');
+        expect(stored!.result.comicId, 'comic-1');
+        expect(
+          stored.result.observation!.update!.latestChapterId,
+          'chapter-legacy',
+        );
+        // Existing rows keep a null label, which judgment reads as "no recorded
+        // label" and therefore rebuilds the baseline without a false update.
+        expect(stored.result.evidenceSchema, isNull);
+        expect(
+          (await migrated.readAllItems()).single.result.evidenceSchema,
+          isNull,
+        );
+      },
+    );
+
+    test('is idempotent across repeated opens', () async {
+      await repository.close();
+      final path =
+          '${tempDirectory.path}${Platform.pathSeparator}repeat_open.db';
+      for (var index = 0; index < 3; index++) {
+        final opened = SqliteScanResultRepository(databasePath: path);
+        await opened.ensureOpen();
+        final columns = opened.database
+            .select('PRAGMA table_info(scan_item_state)')
+            .where((row) => row['name'] == 'evidence_schema');
+        expect(columns, hasLength(1));
+        await opened.close();
+      }
+    });
   });
 }

@@ -26,6 +26,9 @@ class JsScanSourceAdapter implements ScanSourceAdapter {
   final String definitionRevision;
 
   @override
+  String? get evidenceSchema => capabilities.selectedEvidenceSchema;
+
+  @override
   final ManagedSourceContext? runtimeContext;
 
   @override

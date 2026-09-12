@@ -328,9 +328,11 @@ void main() {
     await tester.pump(const Duration(seconds: 3));
   });
 
-  testWidgets('list timing fields are labeled as historical values', (
+  testWidgets('a retired list-update source shows the detail path', (
     tester,
   ) async {
+    // The list-level `favorites.updateCheck` channel is no longer parsed
+    // (FR-044), so a source that declares it takes the ordinary detail path.
     final source = RetirementFakeSource(sourceKey: retirementSourceA);
     registerSource(source, data: source.numberedData(withUpdateCheck: true));
 
@@ -339,22 +341,15 @@ void main() {
       const ComicDebugPage(sourceKey: retirementSourceA, comicId: 'retire-b'),
     );
 
-    expect(find.text('Historical List Scan Interval'.tl), findsOneWidget);
-    await tester.scrollUntilVisible(
-      find.text('Historical Next List Check'.tl),
-      400,
-      scrollable: find.byType(Scrollable).first,
-    );
-    expect(find.text('Historical Next List Check'.tl), findsOneWidget);
-    await tester.scrollUntilVisible(
-      find.text('Historical List Retry After'.tl),
-      400,
-      scrollable: find.byType(Scrollable).first,
-    );
-    expect(find.text('Historical List Retry After'.tl), findsOneWidget);
+    expect(find.text('Historical List Scan Interval'.tl), findsNothing);
+    expect(find.text('Historical Next List Check'.tl), findsNothing);
+    expect(find.text('Historical List Retry After'.tl), findsNothing);
     expect(find.text('Next Automatic List Scan'.tl), findsNothing);
     expect(find.text('Ready'.tl), findsNothing);
     expect(find.text('In Cooldown'.tl), findsNothing);
+    // The historical disclosure and the ordinary detail fields remain.
+    expect(find.text('Displayed scan state is historical'.tl), findsOneWidget);
+    expect(find.text('Follow-up State'.tl), findsOneWidget);
   });
 
   testWidgets('detail timing fields are labeled as historical values', (

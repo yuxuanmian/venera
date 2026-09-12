@@ -12,13 +12,13 @@ void main() {
     final bytes = fixtureFile.readAsBytesSync();
     final fixture = loadTrackingFixture();
 
-    expect(fixture['fixtureVersion'], 'tracking-v1-fixtures-1');
+    expect(fixture['fixtureVersion'], 'tracking-v1-fixtures-2');
     expect(fixture['contractVersion'], '1.0.0');
     expect(
       sha256.convert(bytes).toString(),
-      '4cd03455994582d6c400fc8b32e8c6721869680a50b66644a176919086fc4db8',
+      '95e75630d5d16f0e43f1d27496ea6b4924598b89a64b9f8c5eb867370757b8fd',
     );
-    expect(trackingFixtureCases(fixture, 'comparisonCases'), hasLength(20));
+    expect(trackingFixtureCases(fixture, 'comparisonCases'), hasLength(17));
     expect(trackingFixtureCases(fixture, 'presentationCases'), hasLength(24));
   });
 

@@ -11,6 +11,7 @@ import 'package:venera/foundation/follow_update_schedule.dart';
 import 'package:venera/foundation/follow_update_availability.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';
+import 'package:venera/foundation/tracking/judgment_service.dart';
 import 'package:venera/foundation/tracking/update_state.dart';
 import 'package:venera/utils/io.dart';
 
@@ -2705,6 +2706,26 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     if (source?.favoriteData?.updateCheck == null) return;
     _favoriteSessionEpochs[sourceKey] =
         captureFavoriteSessionEpoch(sourceKey) + 1;
+
+    // FR-027: `sourceUnread` is an account-level signal, so after an account
+    // change the old value belongs to the previous account and showing
+    // "someone else's unread" is worse than showing nothing.  Content evidence
+    // is account independent and is deliberately left untouched.
+    //
+    // Every account-change entry point in `comic_source_page.dart` (logout,
+    // password login, cookie validation, and both webview logins) funnels
+    // through this method, so this is the single wiring point.
+    //
+    // The call is deliberately fire-and-forget and swallow-all: it must never
+    // delay, fail, or throw into the favorites session invalidation that it
+    // accompanies.  A judgment store that cannot be opened simply leaves the
+    // flags for the next successful run.
+    unawaited(
+      judgmentService
+          .clearUnreadForSource(sourceKey)
+          .catchError((Object _) => 0),
+    );
+
     _db.execute('BEGIN');
     try {
       _db.execute(

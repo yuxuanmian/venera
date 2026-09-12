@@ -7,9 +7,11 @@ import 'package:flutter/material.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/follow_update_availability.dart';
+import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/scan/models.dart';
 import 'package:venera/foundation/scan/failure_sanitizer.dart';
 import 'package:venera/foundation/scan/scan_debug_service.dart';
+import 'package:venera/foundation/tracking/judgment_service.dart';
 import 'package:venera/utils/translations.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -230,6 +232,11 @@ Future<void> showDebugMenu(GlobalKey buttonKey) async {
         value: 'forceScanAll',
         child: Text('Force Scan All Comics'.tl),
       ),
+      PopupMenuItem(value: 'rerunJudgment', child: Text('Rerun Judgment'.tl)),
+      PopupMenuItem(
+        value: 'clearObservationFacts',
+        child: Text('Clear Observation Facts'.tl),
+      ),
       PopupMenuItem(
         value: 'refreshRandomComics',
         child: Text('Random Refresh Comics'.tl),
@@ -265,6 +272,16 @@ Future<void> showDebugMenuSheet() async {
             onTap: () => context.pop('forceScanAll'),
           ),
           ListTile(
+            leading: const Icon(Icons.rule),
+            title: Text('Rerun Judgment'.tl),
+            onTap: () => context.pop('rerunJudgment'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.layers_clear_outlined),
+            title: Text('Clear Observation Facts'.tl),
+            onTap: () => context.pop('clearObservationFacts'),
+          ),
+          ListTile(
             leading: const Icon(Icons.shuffle),
             title: Text('Random Refresh Comics'.tl),
             onTap: () => context.pop('refreshRandomComics'),
@@ -283,28 +300,42 @@ void handleDebugMenuSelected(String value) {
     case 'clearFavorites':
       scanDebugService.cancel(ScanControlReason.cacheInvalidated);
       App.favorites.clearAllCache();
-      App.rootContext.showMessage(message: 'Favorites cache cleared'.tl);
+      _debugResult('Favorites cache cleared'.tl);
       break;
     case 'clearBaselines':
-      App.rootContext.showMessage(
-        message: followUpdateScannerUnavailableMessage.tl,
-      );
+      _debugResult(followUpdateScannerUnavailableMessage.tl);
       break;
     case 'forceScanAll':
       unawaited(_runDebugFullScan());
       break;
+    case 'rerunJudgment':
+      unawaited(_rerunJudgment());
+      break;
+    case 'clearObservationFacts':
+      unawaited(_clearObservationFacts());
+      break;
     case 'refreshRandomComics':
-      App.rootContext.showMessage(
-        message: followUpdateScannerUnavailableMessage.tl,
-      );
+      _debugResult(followUpdateScannerUnavailableMessage.tl);
       break;
   }
+}
+
+/// Reports the result of one Debug entry point.
+///
+/// The transient bubble stays the primary feedback, but it is gone long before
+/// a multi-line scan or judgment summary can be read.  Mirroring the same text
+/// into the persistent log is what makes those summaries reviewable after the
+/// fact, so every Debug entry point reports through here rather than calling
+/// `showMessage` directly.
+void _debugResult(String message) {
+  App.rootContext.showMessage(message: message);
+  Log.info('Debug', message);
 }
 
 Future<void> _runDebugFullScan() async {
   final service = scanDebugService;
   if (service.isRunning) {
-    App.rootContext.showMessage(message: 'Scan already running'.tl);
+    _debugResult('Scan already running'.tl);
     return;
   }
 
@@ -325,15 +356,87 @@ Future<void> _runDebugFullScan() async {
   try {
     final summary = await scanFuture;
     controller.close();
-    App.rootContext.showMessage(message: _scanSummaryMessage(summary));
+    _debugResult(_scanSummaryMessage(summary));
+    await _runJudgmentAfterScan(summary);
   } catch (error) {
     controller.close();
-    App.rootContext.showMessage(
-      message: '${'Scan failed'.tl}: ${_safeScanError(error)}',
-    );
+    _debugResult('${'Scan failed'.tl}: ${_safeScanError(error)}');
+    // A scan failure is reported on its own; judgment is not run and its
+    // outcome must not be folded into the scan message.
   } finally {
     service.progress.removeListener(onProgress);
   }
+}
+
+/// Runs judgment once after a completed full scan.
+///
+/// This is the only trigger in the normal flow.  Judgment only reads persisted
+/// evidence, so without it the Debug page would stay empty until someone
+/// reran judgment by hand.
+Future<void> _runJudgmentAfterScan(FullScanSummary summary) async {
+  if (summary.disposition != FullScanDisposition.completed) return;
+  try {
+    final judgment = await judgmentService.run();
+    _debugResult(_judgmentSummaryMessage(judgment));
+  } catch (error) {
+    // Judgment failures never mask the scan result: the two are reported
+    // separately.
+    _debugResult('${'Judgment summary'.tl}: ${_safeScanError(error)}');
+  }
+}
+
+/// Contract U4.2: rerun judgment only.
+///
+/// One invocation always does exactly one thing — run judgment once.  It must
+/// never clear state, never issue a source request, and never implicitly chain
+/// a `clear()` in front of the run: FR-034 forbids that, and a button called
+/// "rerun" must not silently discard every comparison baseline.  "Complete
+/// rerun" is the user-driven two-step combination of
+/// [clearObservationFacts] followed by this entry.
+///
+/// A rule change does not need a special branch here: judgment stamps each row
+/// with the algorithm version that produced it and recomputes rows written by a
+/// different one, so this entry covers that case while still obeying the four
+/// rules above.
+Future<void> _rerunJudgment() async {
+  if (judgmentService.isRunning) {
+    _debugResult('Judgment already running'.tl);
+    return;
+  }
+  try {
+    final summary = await judgmentService.run();
+    _debugResult(_judgmentSummaryMessage(summary));
+  } catch (error) {
+    _debugResult('${'Judgment summary'.tl}: ${_safeScanError(error)}');
+  }
+}
+
+/// Contract U4.1: cancel an in-flight scan first, then clear judgment state.
+/// Scan evidence survives, which is what makes this a debugging entry point.
+Future<void> _clearObservationFacts() async {
+  try {
+    await judgmentService.clear();
+    _debugResult('Observation facts cleared'.tl);
+  } catch (error) {
+    _debugResult('${'Judgment State Unreadable'.tl}: ${_safeScanError(error)}');
+  }
+}
+
+String _judgmentSummaryMessage(JudgmentSummary summary) {
+  if (summary.rejectedAsRunning) return 'Judgment already running'.tl;
+  final details = [
+    'Judgment summary'.tl,
+    '${'Judgment processed'.tl}: ${summary.processed}',
+    '${'Judgment changed'.tl}: ${summary.changed}',
+    '${'Judgment failed items'.tl}: ${summary.failed}',
+    '${'Judgment written rows'.tl}: ${summary.writtenRows}',
+  ];
+  // "No pending observations" is reported honestly rather than as a silent
+  // success (Contract U4.2).
+  if (summary.writtenRows == 0) {
+    details.add('No pending observations, no rows written'.tl);
+  }
+  return details.join(' · ');
 }
 
 String _scanProgressMessage(ScanProgress progress) => [

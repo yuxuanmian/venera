@@ -193,6 +193,7 @@ class ScanItemResult {
     required this.definitionRevision,
     required this.observedAt,
     this.accessContextKey,
+    this.evidenceSchema,
     this.observation,
     this.failure,
   }) : assert((observation == null) != (failure == null));
@@ -206,6 +207,7 @@ class ScanItemResult {
     required String definitionRevision,
     required String observedAt,
     String? accessContextKey,
+    String? evidenceSchema,
     required ScanObservation observation,
   }) {
     if (observation.isEmpty) throw ArgumentError('observation is empty');
@@ -218,6 +220,7 @@ class ScanItemResult {
       definitionRevision: definitionRevision,
       observedAt: observedAt,
       accessContextKey: accessContextKey,
+      evidenceSchema: evidenceSchema,
       observation: observation,
     );
   }
@@ -231,6 +234,7 @@ class ScanItemResult {
     required String definitionRevision,
     required String observedAt,
     String? accessContextKey,
+    String? evidenceSchema,
     required ScanFailure failure,
   }) {
     return ScanItemResult._(
@@ -242,6 +246,7 @@ class ScanItemResult {
       definitionRevision: definitionRevision,
       observedAt: observedAt,
       accessContextKey: accessContextKey,
+      evidenceSchema: evidenceSchema,
       failure: failure,
     );
   }
@@ -254,6 +259,15 @@ class ScanItemResult {
   final ScanProducer producer;
   final String definitionRevision;
   final String observedAt;
+
+  /// The comparable label of the branch that produced this observation.
+  ///
+  /// The scan domain carries it verbatim and never interprets it — exactly the
+  /// way it carries [definitionRevision] (Contract C8).  It is deliberately
+  /// absent from the observation payload: a comparable label is not
+  /// observation content (Contract C5).
+  final String? evidenceSchema;
+
   final ScanObservation? observation;
   final ScanFailure? failure;
 
@@ -267,11 +281,21 @@ class ScanItemResult {
     if (accessContextKey != null) 'accessContextKey': accessContextKey,
     'producer': producer.value,
     'definitionRevision': definitionRevision,
+    if (evidenceSchema != null) 'evidenceSchema': evidenceSchema,
     'observedAt': observedAt,
     if (observation != null) 'observation': observation!.toJson(),
     if (failure != null) 'failure': failure!.toJson(),
   };
 
+  /// Rebuilds a result from its JSON form.
+  ///
+  /// **Retained deliberately** (T057): production code has zero call sites —
+  /// `scan_item_state` stores each field in its own column and
+  /// `_itemFromRow` rebuilds from the row instead.  It is kept because it is
+  /// the only statement of this type's complete wire shape, and
+  /// `observation_codec_test.dart` uses it to prove that both payload forms
+  /// (and a null `evidenceSchema`) round-trip exactly.  Deleting it would drop
+  /// the round-trip guarantee for `evidenceSchema` without replacing it.
   factory ScanItemResult.fromJson(Object? value) {
     if (value is! Map) throw const FormatException('invalid scan item result');
     final producer = ScanProducerValue.parse(value['producer']);
@@ -289,6 +313,9 @@ class ScanItemResult {
     if (hasObservation == hasFailure) {
       throw const FormatException('scan item payload must be xor');
     }
+    final evidenceSchema = value['evidenceSchema'] is String
+        ? value['evidenceSchema'] as String
+        : null;
     final common = {
       'attemptId': value['attemptId'] as String,
       'scopeAttemptId': value['scopeAttemptId'] as String,
@@ -300,6 +327,7 @@ class ScanItemResult {
       'accessContextKey': value['accessContextKey'] is String
           ? value['accessContextKey'] as String
           : null,
+      'evidenceSchema': evidenceSchema,
     };
     if (hasObservation) {
       final observation = _observationFromJson(value['observation']);
@@ -312,6 +340,7 @@ class ScanItemResult {
         definitionRevision: common['definitionRevision'] as String,
         observedAt: common['observedAt'] as String,
         accessContextKey: common['accessContextKey'] as String?,
+        evidenceSchema: common['evidenceSchema'] as String?,
         observation: observation,
       );
     }
@@ -324,6 +353,7 @@ class ScanItemResult {
       definitionRevision: common['definitionRevision'] as String,
       observedAt: common['observedAt'] as String,
       accessContextKey: common['accessContextKey'] as String?,
+      evidenceSchema: common['evidenceSchema'] as String?,
       failure: ScanFailure.fromJson(value['failure']),
     );
   }

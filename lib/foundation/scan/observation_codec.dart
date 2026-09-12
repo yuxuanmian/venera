@@ -302,7 +302,14 @@ class ObservationCodec {
   }
 
   bool _validScalar(String value, int maxScalars) =>
-      value.isNotEmpty && value.runes.length <= maxScalars;
+      value.isNotEmpty &&
+      value.runes.length <= maxScalars &&
+      // Observation identity is built by joining with U+0000
+      // (`"${sourceKey}\u0000$comicId"`), so an identifier that itself
+      // contains that character would be ambiguous.  This is the third
+      // additional restriction this feature adds to the 004 observation
+      // contract.
+      !value.contains('\u0000');
 
   bool _isValidUpdatedAt(String value) {
     final date = RegExp(r'^(\d{4})-(\d{2})-(\d{2})$').firstMatch(value);

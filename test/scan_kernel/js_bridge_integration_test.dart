@@ -63,6 +63,7 @@ class ScanBridgeIntegrationSource extends ComicSource {
   scan = {
     primary: "comic",
     comic: {
+      fieldSource: {latestChapterId: "comic.id"},
       load: async (id, request) => {
         const response = await request({
           method: "GET",
@@ -230,6 +231,7 @@ class CollectionFailureBridgeSource extends ComicSource {
   scan = {
     primary: "collection",
     collection: {
+      fieldSource: {latestChapterId: "book.last_chapter.id"},
       load: async (key, cursor, request) => {
         if (key === "failure") {
           return {failure: {httpStatus: 403, sourceCode: "ERR_REMOTE", message: "permission denied"}};
@@ -314,6 +316,7 @@ class ScanPrivacyParserBridge extends ComicSource {
   scan = {
     primary: "comic",
     comic: {
+      fieldSource: {latestChapterId: "comic.id"},
       load: async (id, request) => ({failure: {
         httpStatus: 403,
         sourceCode: "token:synthetic-secret",
