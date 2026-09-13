@@ -24,6 +24,7 @@ class ScanWorkSpec {
     required this.producer,
     required this.scopeKey,
     this.comicId,
+    this.logLabel,
     this.sourceSnapshot,
   });
 
@@ -31,6 +32,7 @@ class ScanWorkSpec {
     required ComicSource source,
     required ScanSourceAdapter adapter,
     required String comicId,
+    String? logLabel,
     ScanSourceSnapshot? sourceSnapshot,
   }) => ScanWorkSpec._(
     source: source,
@@ -38,6 +40,7 @@ class ScanWorkSpec {
     producer: ScanProducer.comic,
     scopeKey: comicId,
     comicId: comicId,
+    logLabel: logLabel,
     sourceSnapshot: sourceSnapshot,
   );
 
@@ -59,6 +62,15 @@ class ScanWorkSpec {
   final ScanProducer producer;
   final String scopeKey;
   final String? comicId;
+
+  /// This work's log identity (007 Contract L4), when the planner had one.
+  ///
+  /// Per-comic work carries it from planning time, where the favorite-cache
+  /// entry already held the display name.  Collection work leaves it null: a
+  /// collection call is per **page**, and the page ordinal is only known while
+  /// the pages are being walked, so the executor supplies it.
+  final String? logLabel;
+
   final ScanSourceSnapshot? sourceSnapshot;
 
   String get sourceKey => source.key;
@@ -78,6 +90,7 @@ class ScanWork {
   ScanProducer get producer => spec.producer;
   String get scopeKey => spec.scopeKey;
   String? get comicId => spec.comicId;
+  String? get logLabel => spec.logLabel;
   ScanSourceAdapter get adapter => spec.adapter;
   String get definitionRevision => adapter.definitionRevision;
 

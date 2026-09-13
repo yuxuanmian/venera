@@ -12,6 +12,7 @@ class ComicDebugPage extends StatefulWidget {
     this.details,
     this.scanRepository,
     this.judgmentRepository,
+    this.scheduleRepository,
     this.favoriteCache,
   });
 
@@ -31,6 +32,12 @@ class ComicDebugPage extends StatefulWidget {
   /// the app-owned judgment repository through [judgmentService].
   final JudgmentStateRepository? judgmentRepository;
 
+  /// Test injection point for the schedule store (007).
+  ///
+  /// Production callers use the app-owned schedule repository.  The Debug page
+  /// reads it, never writes it: this page answers "what is stored right now".
+  final ScheduleStateRepository? scheduleRepository;
+
   final NetworkFavoriteCacheManager? favoriteCache;
 
   @override
@@ -42,11 +49,16 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
   ScanStoredItem? _scanItem;
   ScanStoredScope? _scanScope;
   bool _scanLoaded = false;
+  String? _scanError;
   StreamSubscription<ScanRepositoryEvent>? _scanEvents;
 
   JudgmentState? _judgment;
   bool _judgmentLoaded = false;
   String? _judgmentError;
+
+  ScheduleState? _schedule;
+  bool _scheduleLoaded = false;
+  String? _scheduleError;
 
   @override
   void initState() {
@@ -54,6 +66,7 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
     _cache = widget.favoriteCache ?? NetworkFavoriteCacheManager();
     _reloadScanResult();
     _reloadJudgment();
+    _reloadSchedule();
     final repository = widget.scanRepository ?? scanResultRepository;
     _scanEvents = repository.events.listen((event) {
       final item = event.item?.result;
@@ -85,6 +98,7 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
     }
     _reloadScanResult();
     _reloadJudgment();
+    _reloadSchedule();
   }
 
   Future<void> _reloadScanResult() async {
@@ -105,11 +119,53 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
       setState(() {
         _scanItem = item;
         _scanScope = scope;
+        _scanError = null;
         _scanLoaded = true;
       });
-    } catch (_) {
+    } catch (error) {
       // A corrupt/unavailable scan database must not break the existing
-      // details debug page.
+      // details debug page, but it MUST be reported rather than rendered as
+      // "no record": Contract D4 keeps the two apart.
+      if (!mounted) return;
+      setState(() {
+        _scanItem = null;
+        _scanScope = null;
+        _scanError = error is ScanStorageException
+            ? error.message
+            : error.runtimeType.toString();
+        _scanLoaded = true;
+      });
+    }
+  }
+
+  /// Reads the schedule row for this identity (007 FR-014).
+  ///
+  /// One primary-key lookup, read-only.  Contract D4: a missing row, a missing
+  /// field and a storage failure are three different answers, so the three are
+  /// tracked separately here.
+  Future<void> _reloadSchedule() async {
+    try {
+      final repository = widget.scheduleRepository ?? scheduleStateRepository;
+      await repository.ensureOpen();
+      final state = await repository.readByIdentity(
+        widget.sourceKey,
+        widget.comicId,
+      );
+      if (!mounted) return;
+      setState(() {
+        _schedule = state;
+        _scheduleError = null;
+        _scheduleLoaded = true;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _schedule = null;
+        _scheduleError = error is ScheduleStorageException
+            ? error.message
+            : error.runtimeType.toString();
+        _scheduleLoaded = true;
+      });
     }
   }
 
@@ -147,34 +203,19 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
     return repository.readFor(widget.sourceKey, widget.comicId);
   }
 
-  /// Follow-up state of this comic, from whichever favorite folder row the
-  /// cache knows about (state is comic-level, shared across folders).
-  FavoriteItemWithUpdateInfo? _updateInfo() {
-    final folderIds = _cache.getKnownFolderIds(
-      widget.sourceKey,
-      widget.comicId,
-    );
-    for (final folderId in folderIds) {
-      final info = _cache.getComicUpdateInfo(
-        widget.sourceKey,
-        widget.comicId,
-        folderId,
-      );
-      if (info != null) return info;
-    }
-    return null;
-  }
-
-  DateTime? _nextCheckTime(FavoriteItemWithUpdateInfo info) {
-    final next = info.nextCheckAt;
-    final retry = info.retryAfter;
-    if (next == null) return retry;
-    if (retry == null || retry.isBefore(next)) return next;
-    return retry;
-  }
-
   String _fmt(DateTime? time) =>
       time == null ? '-' : time.toLocal().toString().substring(0, 19);
+
+  /// Like [_fmt], but the caller names what "absent" means.
+  ///
+  /// Contract D4 forbids `-`, `0` and the empty string as stand-ins for a real
+  /// value, so an absent field is spelled out instead of impersonating one.
+  String _fmtOr(DateTime? time, String whenNull) =>
+      time == null ? whenNull : _fmt(time);
+
+  DateTime? _msUtc(int? millis) => millis == null
+      ? null
+      : DateTime.fromMillisecondsSinceEpoch(millis, isUtc: true);
 
   String _yesNo(bool value) => value ? "Yes".tl : "No".tl;
 
@@ -186,19 +227,18 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
     ).convert(TrackingDiagnostics.redactForDisplay(details.toJson()));
   }
 
-  bool get _usesListUpdateStrategy =>
+  /// Whether the source declares the **retired** list-update channel.
+  ///
+  /// This is the last place in the app UI that reads `favorites.updateCheck`.
+  /// It exists only so the two diagnostic rows below can say which strategy the
+  /// retired scanner used; it drives no behaviour.
+  ///
+  /// **重访触发条件**：当源侧按 005 的 FR-045 删除该声明时，下面两行 MUST 改指
+  /// 004 的扫描能力（`source.scan`）或被删除 —— `test/scan_retirement/debug_test.dart`
+  /// 的用例钉住了这两行当前的读数，因此删除会让测试**明确失败**，而不是让标签
+  /// 静默变义。
+  bool get _usesRetiredUpdateCheckDeclaration =>
       ComicSource.find(widget.sourceKey)?.favoriteData?.updateCheck != null;
-
-  NetworkFavoriteFolderRef? _debugFolder() {
-    final known = _cache.getKnownFolderIds(widget.sourceKey, widget.comicId);
-    for (final folder in _cache.getAllCachedFolders()) {
-      if (folder.sourceKey == widget.sourceKey &&
-          (known.isEmpty || known.contains(folder.folderId))) {
-        return folder;
-      }
-    }
-    return null;
-  }
 
   void _recheck() =>
       context.showMessage(message: followUpdateScannerUnavailableMessage.tl);
@@ -230,7 +270,11 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
           const Divider(),
           ..._buildRawScanSection(),
           const Divider(),
-          ..._buildFollowUpSection(),
+          // The two in-place blocks (007 Contract D1): the same two positions,
+          // showing current values instead of the retired scheduler's state.
+          ..._buildScheduleSection(),
+          const Divider(),
+          ..._buildCollectionScopeSection(),
           const Divider(),
           ..._buildTrackingTraceSection(),
           const Divider(),
@@ -284,121 +328,186 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
     ];
   }
 
-  List<Widget> _buildFollowUpSection() {
-    if (_usesListUpdateStrategy) return _buildListFollowUpSection();
-    final info = _updateInfo();
+  // ---------------------------------------------------------------------------
+  // The two in-place blocks (007 Contract D)
+  //
+  // Both positions used to show the **retired** scheduler's state, and the two
+  // were mutually exclusive (one for per-comic sources, one for list-strategy
+  // sources).  Since 007 they show the **current** schedule and the **current**
+  // collection scope, and they are shown for every comic — the branch on
+  // "does this source use the list update strategy" is gone, because the answer
+  // no longer changes what is displayed.
+  //
+  // No new page section was added: these are the same two positions, with the
+  // fields replaced.  Contract D4 keeps three answers apart — a missing record,
+  // a missing field on an existing record, and a storage failure — so the
+  // defaults below never use `0`, an empty string or `-` to impersonate a real
+  // value, and the failure text is not the same as the "no record" text.
+  // ---------------------------------------------------------------------------
+
+  /// Block 1: the current schedule row for this identity (FR-014).
+  List<Widget> _buildScheduleSection() {
+    final header = [ListTile(title: Text('Schedule'.tl))];
+    if (!_scheduleLoaded) {
+      return [...header, _infoRow('Next Check Time', 'Loading'.tl)];
+    }
+    if (_scheduleError != null) {
+      return [
+        ...header,
+        _infoRow('Schedule State Unreadable'.tl, _scheduleError!),
+      ];
+    }
+    final state = _schedule;
+    if (state == null) {
+      // "No record at all" is distinct from "a record whose fields are empty".
+      return [
+        ...header,
+        _infoRow('Next Check Time', 'No check record'.tl),
+        _infoRow('Activity Anchor', 'No check record'.tl),
+        _infoRow('Auto Hot Window', 'No check record'.tl),
+        _infoRow('Auto Hot Until', 'No check record'.tl),
+        _infoRow('Schedule Jitter Applied', 'No check record'.tl),
+      ];
+    }
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final autoHotUntil = _msUtc(state.autoHotUntilMs);
+    final autoHotActive =
+        state.autoHotUntilMs != null && state.autoHotUntilMs! > nowMs;
     return [
-      ListTile(title: Text(followUpdateScannerUnavailableMessage.tl)),
-      ListTile(title: Text('Displayed scan state is historical'.tl)),
-      ListTile(title: Text("Follow-up State".tl)),
-      if (info == null)
-        ListTile(
-          title: Text("Not tracked by follow-up scans".tl, style: ts.s14),
-        )
-      else ...[
-        _infoRow("Last Check Time", _fmt(info.lastCheckTime)),
-        _infoRow("Historical Next Check Time", _historicalNextCheckText(info)),
-        _infoRow(
-          "Last Effective Activity Time",
-          _fmt(info.effectiveActivityAt),
-        ),
-        _infoRow("Baseline Time", _fmt(info.baselineAt)),
-        _infoRow("Source Activity Time", _fmt(info.sourceActivityAt)),
-        _infoRow(
-          "Hot Window Active",
-          _yesNo(info.isHotActiveAt(DateTime.now())),
-        ),
-        _infoRow("Hot Window Source", _hotSource(info)),
-        _infoRow("Hot Window Until", _fmt(info.hotUntilAt(DateTime.now()))),
-        _infoRow("Manual Hot Enabled", _yesNo(info.manualHotEnabled)),
-        _infoRow("Update Marker", info.updateMarker ?? '-'),
-        _infoRow("Last Update Time", info.updateTime ?? '-'),
-        _infoRow("Has New Update", _yesNo(info.hasNewUpdate)),
-        _infoRow("Check Failures", '${info.checkFailures}'),
-        _infoRow("Not Found Hits", '${info.checkNotFoundCount}'),
-      ],
+      ...header,
+      _infoRow(
+        'Next Check Time',
+        _fmtOr(_msUtc(state.nextAtMs), 'Not computed yet'.tl),
+      ),
+      _infoRow(
+        'Activity Anchor',
+        _fmtOr(_msUtc(state.activityAtMs), 'None'.tl),
+      ),
+      _infoRow('Auto Hot Window', autoHotActive ? 'Active'.tl : 'Inactive'.tl),
+      _infoRow('Auto Hot Until', _fmtOr(autoHotUntil, 'None'.tl)),
+      _infoRow(
+        'Schedule Jitter Applied',
+        _yesNo(state.oldScheduleJitterApplied),
+      ),
     ];
   }
 
-  List<Widget> _buildListFollowUpSection() {
-    final source = ComicSource.find(widget.sourceKey);
-    final updateCheck = source?.favoriteData?.updateCheck;
-    final folder = _debugFolder();
-    final scan = folder == null
-        ? null
-        : _cache.getFavoriteUpdateScanState(folder);
-    final info = _updateInfo();
-    final metadata = info?.sourceUpdateMetadata;
-    String sourceBool(String key) {
-      final value = metadata?[key];
-      return value is bool ? _yesNo(value) : '-';
+  /// Block 2: the current collection scope plus this source's declared scan
+  /// capability (FR-015).
+  List<Widget> _buildCollectionScopeSection() {
+    final header = [ListTile(title: Text('Collection Scope'.tl))];
+    final capabilityRows = _scanCapabilityRows();
+    if (!_scanLoaded) {
+      return [
+        ...header,
+        ...capabilityRows,
+        _infoRow('Scope Type', 'Loading'.tl),
+      ];
     }
-
+    if (_scanError != null) {
+      return [
+        ...header,
+        ...capabilityRows,
+        _infoRow('Scan State Unreadable'.tl, _scanError!),
+      ];
+    }
+    final item = _scanItem;
+    if (item == null) {
+      // No observation row for this identity ⇒ the scope attempt identifier it
+      // would have carried does not exist, so the whole block is a default.
+      return [
+        ...header,
+        ...capabilityRows,
+        _infoRow('Scope Type', 'No scan record'.tl),
+        _infoRow('Scope Key', 'No scan record'.tl),
+        _infoRow('Scope Status', 'No scan record'.tl),
+        _infoRow('Scope Started', 'No scan record'.tl),
+        _infoRow('Scope Finished', 'No scan record'.tl),
+        _infoRow('Scope Items', 'No scan record'.tl),
+        _infoRow('Scope Failure', 'No scan record'.tl),
+      ];
+    }
+    final scope = _scanScope;
+    if (scope == null) {
+      return [
+        ...header,
+        ...capabilityRows,
+        _infoRow('Scope Type', 'No scope record'.tl),
+        _infoRow('Scope Key', 'No scope record'.tl),
+        _infoRow('Scope Status', 'No scope record'.tl),
+        _infoRow('Scope Started', 'No scope record'.tl),
+        _infoRow('Scope Finished', 'No scope record'.tl),
+        _infoRow('Scope Items', 'No scope record'.tl),
+        _infoRow('Scope Failure', 'No scope record'.tl),
+      ];
+    }
     return [
-      ListTile(title: Text(followUpdateScannerUnavailableMessage.tl)),
-      ListTile(title: Text('Displayed scan state is historical'.tl)),
-      ListTile(title: Text("Follow-up State".tl)),
-      _infoRow("Update Check Strategy", "Favorite list snapshot".tl),
-      _infoRow("Source is_new", sourceBool('isNew')),
-      _infoRow("Source full_is_new", sourceBool('fullIsNew')),
-      _infoRow("Marker Value", info?.updateMarker ?? '-'),
+      ...header,
+      ...capabilityRows,
+      _infoRow('Scope Type', scope.producer.value),
+      _infoRow('Scope Key', scope.scopeKey),
+      _infoRow('Scope Status', scope.status.value),
+      _infoRow('Scope Started', _fmt(_msUtc(scope.startedAtMs))),
       _infoRow(
-        "Historical List Scan Interval",
-        updateCheck == null ? '-' : _formatInterval(updateCheck.scanInterval),
+        'Scope Finished',
+        _fmtOr(_msUtc(scope.finishedAtMs), 'Not finished'.tl),
       ),
-      _infoRow("Last List Scan Attempt", _fmt(scan?.lastAttemptAt)),
-      _infoRow("Last Successful List Scan", _fmt(scan?.lastSuccessAt)),
+      _infoRow('Scope Items', '${scope.itemCount}'),
       _infoRow(
-        "Historical Next List Check",
-        _historicalNextListCheckText(scan, updateCheck?.scanInterval),
+        'Scope Failure',
+        scope.failure == null ? 'None'.tl : _failureText(scope.failure!),
       ),
-      _infoRow("Historical List Retry After", _fmt(scan?.retryAfter)),
-      _infoRow("List Check Failures", '${scan?.checkFailures ?? 0}'),
-      _infoRow(
-        "Last Snapshot Pages / Comics",
-        '${scan?.lastPageCount ?? 0} / ${scan?.lastComicCount ?? 0}',
-      ),
-      _infoRow(
-        "Has New Update",
-        info == null ? '-' : _yesNo(info.hasNewUpdate),
-      ),
-      _infoRow("Last Update Time", info?.updateTime ?? '-'),
     ];
   }
 
-  String _formatInterval(Duration interval) {
-    final seconds = interval.inSeconds;
-    if (seconds % 3600 == 0) return '${seconds ~/ 3600}h';
-    if (seconds % 60 == 0) return '${seconds ~/ 60}m';
-    return '${seconds}s';
-  }
-
-  String _historicalNextListCheckText(
-    FavoriteUpdateScanState? scan,
-    Duration? interval,
-  ) {
-    if (scan?.lastSuccessAt == null || interval == null) return '-';
-    var next = scan!.lastSuccessAt!.add(interval);
-    if (scan.retryAfter != null && scan.retryAfter!.isAfter(next)) {
-      next = scan.retryAfter!;
+  /// The source's declared scan capability: unit, preferred branch, and whether
+  /// the declaration is unusable (Contract D3).
+  List<Widget> _scanCapabilityRows() {
+    final capabilities = ComicSource.find(widget.sourceKey)?.scan;
+    if (capabilities == null) {
+      return [
+        _infoRow('Scan Capability', 'No scan capability'.tl),
+        _infoRow('Scan Preferred Method', 'None'.tl),
+      ];
     }
-    return _fmt(next);
+    if (capabilities.state == ScanCapabilitiesState.invalid) {
+      return [
+        _infoRow('Scan Capability', 'Invalid scan capability'.tl),
+        _infoRow(
+          'Scan Capability Invalid',
+          capabilities.reason ?? 'No scan capability'.tl,
+        ),
+        _infoRow('Scan Preferred Method', 'None'.tl),
+      ];
+    }
+    if (!capabilities.isSupported) {
+      return [
+        _infoRow('Scan Capability', 'No scan capability'.tl),
+        _infoRow('Scan Preferred Method', 'None'.tl),
+      ];
+    }
+    final selected = capabilities.selected;
+    return [
+      _infoRow(
+        'Scan Capability',
+        selected == null ? 'No scan capability'.tl : selected.producer.value,
+      ),
+      _infoRow(
+        'Scan Preferred Method',
+        capabilities.primary?.value ?? 'None'.tl,
+      ),
+    ];
   }
 
-  String _historicalNextCheckText(FavoriteItemWithUpdateInfo info) {
-    final next = _nextCheckTime(info);
-    if (next == null) return "Not checked yet".tl;
-    return _fmt(next);
-  }
-
-  String _hotSource(FavoriteItemWithUpdateInfo info) {
-    final now = DateTime.now();
-    final automatic = info.isAutoHotActiveAt(now);
-    final manual = info.isManualHotActiveAt(now);
-    if (automatic && manual) return "Automatic + Manual".tl;
-    if (automatic) return "Automatic".tl;
-    if (manual) return "Manual".tl;
-    return "None".tl;
+  /// A failure fact, rendered from its already-sanitized fields.
+  String _failureText(ScanFailure failure) {
+    final parts = <String>[
+      if (failure.httpStatus != null) 'HTTP ${failure.httpStatus}',
+      if (failure.sourceCode != null) failure.sourceCode!,
+      if (failure.exceptionType != null) failure.exceptionType!,
+      if (failure.message != null) failure.message!,
+    ];
+    return parts.isEmpty ? 'None'.tl : parts.join(' · ');
   }
 
   List<Widget> _buildSourceSection() {
@@ -419,13 +528,17 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
       _infoRow("Source Key", widget.sourceKey),
       _infoRow("Source Name", source?.name ?? '-'),
       _infoRow("Logged In", _yesNo(source?.isLogged ?? false)),
+      // Diagnostic only, and the last reader of the retired declaration: these
+      // two rows describe the *old* strategy, which is a different fact from the
+      // 004 scan capability shown by the "Collection Scope" block.  See the
+      // getter above for the revisit trigger.
       _infoRow(
         "Supports Detail Check",
-        _usesListUpdateStrategy ? '-' : _yesNo(source?.loadComicInfo != null),
+        _usesRetiredUpdateCheckDeclaration ? '-' : _yesNo(source?.loadComicInfo != null),
       ),
       _infoRow(
         "Update Check Strategy",
-        _usesListUpdateStrategy
+        _usesRetiredUpdateCheckDeclaration
             ? "Favorite list snapshot".tl
             : "Comic details".tl,
       ),

@@ -7,6 +7,14 @@ import 'judgment.dart';
 /// cannot import the migration without a cycle.  This module is the neutral one
 /// both can reach.
 ///
+/// **Narrowed by 007 (FR-009)**: it used to carry the retired scheduler's
+/// columns (`nextCheckAtMs`, `autoHotUntilMs`, `manualHotEnabled`,
+/// `manualHotUntilMs`) because the migration copied the manual preference into
+/// the schedule store.  That half of the migration is gone — the manual hot
+/// window is retired, and copying schedule columns is what made a re-run able to
+/// blind-overwrite live schedule rows — so the projection is now exactly the
+/// user-visible flag the migration still has a reason to move.
+///
 /// Deliberately narrower than the table: the migration must not be able to start
 /// depending on a column that has no bearing on it.
 class LegacyFollowUpRow {
@@ -14,19 +22,11 @@ class LegacyFollowUpRow {
     required this.sourceKey,
     required this.comicId,
     required this.hasNewUpdate,
-    this.nextCheckAtMs,
-    this.autoHotUntilMs,
-    this.manualHotEnabled = false,
-    this.manualHotUntilMs,
   });
 
   final String sourceKey;
   final String comicId;
   final bool hasNewUpdate;
-  final int? nextCheckAtMs;
-  final int? autoHotUntilMs;
-  final bool manualHotEnabled;
-  final int? manualHotUntilMs;
 }
 
 /// One judged identity, as published to incremental consumers.

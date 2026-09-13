@@ -17,16 +17,22 @@ import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/consts.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_updates.dart';
+import 'package:venera/foundation/follow_updates_service.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/image_provider/cached_image.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';
+import 'package:venera/foundation/schedule/schedule_repository.dart';
+import 'package:venera/foundation/schedule/schedule_state.dart';
+import 'package:venera/foundation/schedule/sqlite_schedule_repository.dart';
 import 'package:venera/foundation/scan/models.dart';
 import 'package:venera/foundation/scan/scan_result_repository.dart';
 import 'package:venera/foundation/scan/sqlite_scan_result_repository.dart';
+import 'package:venera/foundation/scan/source_adapter.dart';
 import 'package:venera/foundation/tracking/diagnostics.dart';
 import 'package:venera/foundation/tracking/judgment.dart';
+import 'package:venera/foundation/tracking/judgment_event.dart';
 import 'package:venera/foundation/tracking/judgment_repository.dart';
 import 'package:venera/foundation/tracking/judgment_service.dart';
 import 'package:venera/foundation/tracking/judgment_state.dart';
@@ -56,16 +62,11 @@ part 'cover_viewer.dart';
 part 'debug.dart';
 
 @visibleForTesting
-bool shouldShowFavoriteHotWindowAction({
+bool shouldShowFavoriteHotWindowIndicator({
   required bool followUpdatesEnabled,
   required bool isFavorite,
-  required bool hasTrackedInfo,
-  required bool usesListUpdateStrategy,
-}) =>
-    followUpdatesEnabled &&
-    isFavorite &&
-    hasTrackedInfo &&
-    !usesListUpdateStrategy;
+  required bool hasCheckRecord,
+}) => followUpdatesEnabled && isFavorite && hasCheckRecord;
 
 bool _isAuthorNamespace(String namespace) {
   switch (namespace.trim().toLowerCase()) {
@@ -115,6 +116,8 @@ class ComicPage extends StatefulWidget {
     this.cover,
     this.title,
     this.heroID,
+    this.scheduleReader,
+    this.judgmentEvents,
   });
 
   final String id;
@@ -126,6 +129,23 @@ class ComicPage extends StatefulWidget {
   final String? title;
 
   final int? heroID;
+
+  /// Test injection point for the schedule point-read (007 FR-004).
+  ///
+  /// Production callers leave this null and read through the app-owned
+  /// schedule service (`followUpdateScheduleService`); a test uses it to
+  /// control the answer and count the reads without standing up the whole
+  /// composition layer.
+  final Future<ScheduleState?> Function(String sourceKey, String comicId)?
+  scheduleReader;
+
+  /// Test injection point for the judgment batch stream (007 FR-006).
+  ///
+  /// Production callers leave this null: the page subscribes to the app-owned
+  /// judgment service's **existing** event stream.  This is an injection point,
+  /// not a second event channel — the type is the same one the service
+  /// publishes, and nothing in production constructs one here.
+  final Stream<JudgmentBatchEvent>? judgmentEvents;
 
   @override
   State<ComicPage> createState() => _ComicPageState();
@@ -148,24 +168,94 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
 
   bool showFAB = false;
 
+  /// The schedule record of this comic, when it has one.
+  ///
+  /// Null means "no check record yet" — which is also what a read failure and a
+  /// not-yet-finished read look like (Contract W8).  The page therefore shows
+  /// nothing rather than guessing a state, and it MUST NOT write a record to
+  /// fill the gap: "no schedule record" is a due condition (Contract S4), so
+  /// writing one would change when this comic is checked next.
+  ScheduleState? _scheduleState;
+
+  StreamSubscription<JudgmentBatchEvent>? _judgmentSubscription;
+
+  /// Whether the details page is showing the "recently updated" indicator.
+  ///
+  /// Visible ⇔ 追更总开关开启 ∧ 该本已有检查记录 (Contract W2).  The criterion is
+  /// deliberately **not** "does this source currently have a scan capability":
+  /// sources gain capabilities over time, and keying on the record means the
+  /// indicator follows along without a judgement edit per source.
+  bool get _showFollowUpIndicator => shouldShowFavoriteHotWindowIndicator(
+    followUpdatesEnabled: followUpdatesEnabled,
+    isFavorite: isFavorite,
+    hasCheckRecord: _scheduleState != null,
+  );
+
+  FavoriteHotWindowIndicator? get _hotWindowIndicator {
+    final state = _scheduleState;
+    if (state == null) return null;
+    return FavoriteHotWindowIndicator(
+      autoHotUntil: state.autoHotUntilMs == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(
+              state.autoHotUntilMs!,
+              isUtc: true,
+            ),
+    );
+  }
+
   void _onFollowUpdateCacheChanged() {
     if (mounted) setState(() {});
   }
 
-  FavoriteItemWithUpdateInfo? _followUpdateInfo() {
-    if (!followUpdatesEnabled || !isFavorite) return null;
-    for (final folderId in _followUpdateCache.getKnownFolderIds(
-      widget.sourceKey,
-      widget.id,
-    )) {
-      final info = _followUpdateCache.getComicUpdateInfo(
-        widget.sourceKey,
-        widget.id,
-        folderId,
-      );
-      if (info != null) return info;
+  /// Point-reads this identity's schedule for display (FR-004 / W3 / W8).
+  ///
+  /// One primary-key lookup, never the whole table: opening a details page must
+  /// not cost a row per stored schedule.  The stored value is used as-is — the
+  /// page MUST NOT re-derive bands or window lengths (Contract W3).
+  ///
+  /// The read is **not** gated on the favorite or follow-up switches: those
+  /// decide *visibility* (Contract W2), not whether there is a record to show,
+  /// and a single indexed row is the whole cost.
+  Future<void> _loadScheduleIndicator() async {
+    final reader = widget.scheduleReader;
+    ScheduleState? state;
+    try {
+      if (reader != null) {
+        state = await reader(widget.sourceKey, widget.id);
+      } else {
+        final schedule = followUpdateScheduleService;
+        // Null before startup has attached the service.  Rendered exactly like
+        // "no record"; the page MUST NOT create a second service of its own.
+        state = schedule == null
+            ? null
+            : await schedule.readIdentity(widget.sourceKey, widget.id);
+      }
+    } catch (_) {
+      // A read failure is rendered as "no record" and MUST NOT break the rest
+      // of the page (W8).
+      state = null;
     }
-    return null;
+    if (!mounted) return;
+    setState(() => _scheduleState = state);
+  }
+
+  /// Re-reads the schedule when this identity itself appears in a batch (W4).
+  ///
+  /// Batches carrying only other identities are **not** re-read: that would be
+  /// pointless I/O.  The listener holds no correctness role — it decides when
+  /// to redraw, never what the schedule is.
+  void _onJudgmentBatch(JudgmentBatchEvent event) {
+    final identity = '${widget.sourceKey}\u0000${widget.id}';
+    var relevant = false;
+    for (final row in event.rows) {
+      if (row.identity == identity) {
+        relevant = true;
+        break;
+      }
+    }
+    if (!relevant) return;
+    unawaited(_loadScheduleIndicator());
   }
 
   @override
@@ -247,6 +337,12 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   void initState() {
     scrollController.addListener(onScroll);
     _followUpdateCache.addListener(_onFollowUpdateCacheChanged);
+    // One read on open, then one more per judgment batch that contains this
+    // identity.  Subscribing in the page's own lifecycle is what keeps the
+    // listener from outliving the page (Contract W4).
+    unawaited(_loadScheduleIndicator());
+    _judgmentSubscription = (widget.judgmentEvents ?? judgmentService.events)
+        .listen(_onJudgmentBatch);
     super.initState();
   }
 
@@ -254,6 +350,8 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   void dispose() {
     scrollController.removeListener(onScroll);
     _followUpdateCache.removeListener(_onFollowUpdateCacheChanged);
+    unawaited(_judgmentSubscription?.cancel());
+    _judgmentSubscription = null;
     super.dispose();
   }
 
@@ -261,6 +359,9 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   void update() {
     setState(() {});
   }
+
+  @override
+  void reloadScheduleIndicator() => unawaited(_loadScheduleIndicator());
 
   @override
   ComicDetails get comic => data!;
@@ -593,7 +694,8 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   Widget buildActions() {
     bool isMobile = context.width < changePoint;
     bool hasHistory = history != null && (history!.ep > 1 || history!.page > 1);
-    final followInfo = _followUpdateInfo();
+    final indicator = _hotWindowIndicator;
+    final showIndicator = _showFollowUpIndicator && indicator != null;
     return SliverLazyToBoxAdapter(
       child: Column(
         children: [
@@ -637,27 +739,15 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
                   iconColor: context.useTextColor(Colors.red),
                 ),
               if (comicSource.favoriteData != null)
-                if (shouldShowFavoriteHotWindowAction(
-                  followUpdatesEnabled: followUpdatesEnabled,
-                  isFavorite: isFavorite,
-                  hasTrackedInfo: followInfo != null,
-                  usesListUpdateStrategy:
-                      comicSource.favoriteData?.updateCheck != null,
-                ))
+                if (showIndicator)
                   FavoriteHotWindowActionButton(
                     isLoading: isFavoriting,
                     onFavorite: toggleFavorite,
                     onFavoriteLongPress: openFavPanel,
-                    info: followInfo!,
-                    onToggleHotWindow: () {
-                      _followUpdateCache.toggleManualHotWindow(
-                        widget.sourceKey,
-                        widget.id,
-                        enabled: !followInfo.isManualHotActiveAt(
-                          DateTime.now(),
-                        ),
-                      );
-                    },
+                    indicator: indicator,
+                    // 007 retired the manual hot window: the right segment is a
+                    // read-only indicator, so no action is wired here.  There is
+                    // deliberately no call site that passes a callback.
                   )
                 else
                   _ActionButton(

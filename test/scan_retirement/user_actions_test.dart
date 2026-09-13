@@ -271,9 +271,15 @@ void main() {
     expect(snapshotRetirementCacheState(fixture.databasePath), beforeCache);
   });
 
-  testWidgets('the real detail hot action preserves every non-hot field', (
+  testWidgets('the detail hot segment is read-only and writes nothing', (
     tester,
   ) async {
+    // 007 FR-001 / FR-011.  This test used to tap the segment twice and assert
+    // that `manual_hot_enabled` went to 1 and back to 0 — i.e. it asserted the
+    // retired write path from the user's side.  The manual hot window is gone,
+    // so the assertion inverts: the segment may be absent (no check record:
+    // this fixture has no schedule store attached) or a read-only status, and in
+    // **neither** shape can a tap or a long-press write anything at all.
     final previousEnabled = appdata.settings['followUpdatesEnabled'];
     appdata.settings['followUpdatesEnabled'] = true;
     addTearDown(
@@ -297,66 +303,28 @@ void main() {
       const ComicPage(id: 'retire-a', sourceKey: retirementSourceA),
     );
     await tester.pumpAndSettle();
+
     final hotButton = find.byKey(
       const ValueKey('favorite-hot-window-hot-segment'),
     );
-    expect(hotButton, findsOneWidget);
+    // Deterministic here: this fixture has no schedule store attached, so the
+    // comic has no check record and the indicator is not rendered at all
+    // (Contract W2 / FR-008).  The shape of the segment **when a record
+    // exists** is asserted in follow_update_hot_window_widget_test.dart and
+    // follow_updates/details_indicator_test.dart.
+    expect(
+      hotButton,
+      findsNothing,
+      reason: 'no check record ⇒ no indicator, and therefore no control',
+    );
 
-    await tester.tap(hotButton);
-    await tester.pump();
-    final afterEnable = snapshotRetirementState(fixture.databasePath);
-    final enableChanged = changedFields(beforeScan, afterEnable);
-    final aKey = jsonEncode([retirementSourceA, 'retire-a']);
-    final allowedHot = {
-      'manual_hot_enabled',
-      'manual_hot_until',
-      'next_check_at',
-      'old_schedule_jitter_applied',
-    };
-    expect(enableChanged, isNotEmpty);
-    expect(
-      enableChanged.every(
-        (field) =>
-            field.startsWith('comic_check_state:$aKey:') &&
-            allowedHot.contains(field.split(':').last),
-      ),
-      isTrue,
-    );
-    expect(
-      afterEnable['comic_check_state']!.firstWhere(
-        (row) => row['comic_id'] == 'retire-a',
-      )['manual_hot_enabled'],
-      1,
-    );
+    // Whatever is on the page, the retired write path cannot be reached: the
+    // legacy store's `manual_hot_*` / `next_check_at` columns are untouched.
+    expect(snapshotRetirementState(fixture.databasePath), beforeScan);
     expect(snapshotRetirementCacheState(fixture.databasePath), beforeCache);
 
-    await tester.pumpAndSettle();
-    await tester.tap(
-      find.byKey(const ValueKey('favorite-hot-window-hot-segment')),
-    );
-    await tester.pump();
-    final disableChanged = changedFields(
-      afterEnable,
-      snapshotRetirementState(fixture.databasePath),
-    );
-    expect(disableChanged, isNotEmpty);
-    expect(
-      disableChanged.every(
-        (field) =>
-            field.startsWith('comic_check_state:$aKey:') &&
-            allowedHot.contains(field.split(':').last),
-      ),
-      isTrue,
-    );
-    expect(
-      fixture.cache
-          .getComicUpdateInfo(
-            retirementSourceA,
-            'retire-a',
-            retirementFolderOne,
-          )
-          ?.manualHotEnabled,
-      isFalse,
-    );
+    // And the action wording is not rendered anywhere on the page.
+    expect(find.text('Enable 14-day hot window'.tl), findsNothing);
+    expect(find.text('Disable 14-day hot window'.tl), findsNothing);
   });
 }

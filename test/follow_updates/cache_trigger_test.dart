@@ -69,14 +69,16 @@ void main() {
 
   FollowUpdateCoordinator buildCoordinator({
     Duration debounce = const Duration(milliseconds: 20),
+    Set<String> sources = const {'src'},
   }) => FollowUpdateCoordinator(
+    followUpdatesEnabledReader: () => true,
     judgmentService: judgment,
     scanService: scan,
     scheduleService: schedule,
     scanRepository: scanItems,
     favoriteCache: cache,
-    criterionSourceKeys: () => const {'src'},
-    completeSourceKeys: () => const {'src'},
+    criterionSourceKeys: () => sources,
+    completeSourceKeys: () => sources,
     clock: () => DateTime.utc(2026, 9, 10, 12),
     cacheChangeDebounce: debounce,
   );
@@ -240,6 +242,193 @@ void main() {
       },
     );
   });
+
+  group('the round is scoped to the source that changed (F1.4)', () {
+    test('a marked change puts only that source in scope', () async {
+      final coordinator = buildCoordinator(sources: const {'src', 'other'});
+      coordinator.attachObservationConsumer();
+
+      // A real cache write, attributed to its own source.
+      cache.replaceComicMembership('other', 'c1', const ['f']);
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+
+      expect(scan.calls, hasLength(1));
+      expect(
+        scan.scopes.single,
+        {'other'},
+        reason:
+            'one source writing its cache must not put another source in '
+            'scope: a collection-type work item carries no comic id, so the '
+            'due rule can never drop it',
+      );
+      expect(scan.labels.single, FollowUpdateTrigger.cacheChanged.name);
+    });
+
+    test(
+      'an unattributed notification keeps the conservative answer',
+      () async {
+        final coordinator = buildCoordinator(sources: const {'src', 'other'});
+        coordinator.attachObservationConsumer();
+
+        cache.notifyListeners();
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+
+        expect(scan.calls, hasLength(1));
+        expect(
+          scan.scopes.single,
+          isNull,
+          reason:
+              'a change nobody attributed could have been any source, and the '
+              'safe direction is to check rather than to skip',
+        );
+      },
+    );
+
+    test(
+      'a changed source outside the criterion set starts no round',
+      () async {
+        final coordinator = buildCoordinator(sources: const {'src'});
+        coordinator.attachObservationConsumer();
+
+        cache.replaceComicMembership('switched-off', 'c1', const ['f']);
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+
+        expect(
+          scan.calls,
+          isEmpty,
+          reason: 'a source that is not tracked cannot be scanned by a change',
+        );
+        expect(
+          cache.hasChangedSourceKeys,
+          isFalse,
+          reason:
+              'the mark is consumed, not left behind to be owed by every later '
+              'round',
+        );
+      },
+    );
+
+    test('marks consumed by another reader start no round', () async {
+      final coordinator = buildCoordinator();
+      coordinator.attachObservationConsumer();
+
+      cache.replaceComicMembership('src', 'c1', const ['f']);
+      cache.takeChangedSourceKeys();
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+
+      expect(
+        scan.calls,
+        isEmpty,
+        reason: 'the marks are the evidence a round is owed, and they are gone',
+      );
+    });
+  });
+
+  group('a source the running round does not cover is picked up afterwards '
+      '(F1.2)', () {
+    test('one coalesced follow-up round covers it', () async {
+      final coordinator = buildCoordinator(
+        sources: const {'src', 'other'},
+        debounce: const Duration(milliseconds: 20),
+      );
+      coordinator.attachObservationConsumer();
+      scan.hold = true;
+
+      cache.replaceComicMembership('src', 'c1', const ['f']);
+      await scan.gate.started.future;
+      expect(scan.scopes, [
+        {'src'},
+      ]);
+
+      // A second source changes while the first source's round is in flight.
+      // Its own debounced trigger is absorbed (F1.2) — but the mark survives,
+      // so the work is not lost the way a dropped request would lose it.
+      cache.replaceComicMembership('other', 'c2', const ['f']);
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      expect(
+        scan.scopes,
+        hasLength(1),
+        reason: 'the in-flight round still absorbs the second trigger',
+      );
+
+      scan.hold = false;
+      scan.gate.release.complete();
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+
+      expect(
+        scan.scopes,
+        [
+          {'src'},
+          {'other'},
+        ],
+        reason:
+            'exactly one coalesced follow-up round, carrying only the source '
+            'the first round could not cover',
+      );
+    });
+
+    test('a change the running round already covers owes nothing', () async {
+      final coordinator = buildCoordinator(sources: const {'src', 'other'});
+      coordinator.attachObservationConsumer();
+      scan.hold = true;
+
+      // A round covering every source, as startup and manual do.
+      final round = coordinator.runRound(FollowUpdateTrigger.startup);
+      await scan.gate.started.future;
+
+      cache.replaceComicMembership('other', 'c2', const ['f']);
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+
+      scan.hold = false;
+      scan.gate.release.complete();
+      await round;
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+
+      expect(
+        scan.scopes,
+        [isNull],
+        reason:
+            'an unrestricted round covers every source, so a change during it '
+            'is not a second round — the startup and manual paths stay at one '
+            'round per request',
+      );
+    });
+
+    test('cancel stops the whole request, not only the round in flight '
+        '(F1.3)', () async {
+      final coordinator = buildCoordinator(sources: const {'src', 'other'});
+      coordinator.attachObservationConsumer();
+      scan.hold = true;
+
+      final round = coordinator.runRound(
+        FollowUpdateTrigger.manual,
+        scopeSourceKeys: const {'src'},
+      );
+      await scan.gate.started.future;
+
+      // A second source changes, then the user cancels: the owed follow-up
+      // round MUST NOT start after the cancel.
+      cache.replaceComicMembership('other', 'c2', const ['f']);
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      coordinator.cancel();
+
+      scan.hold = false;
+      scan.gate.release.complete();
+      await round;
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+
+      expect(
+        scan.scopes,
+        [
+          {'src'},
+        ],
+        reason:
+            'cancel means stop: a coalesced follow-up that starts right after '
+            'the user asked to stop is the one outcome a cancel must not have',
+      );
+      expect(scan.cancelCalls, 1);
+    });
+  });
 }
 
 /// Acquisition that records the due set instead of acquiring.
@@ -253,14 +442,30 @@ class _CountingScanService extends ScanDebugService {
   /// filter" and an empty map as "nothing is due", so a stub that merges the
   /// two cannot tell a working round from one that scans nothing.
   final List<Map<String, Set<String>>?> calls = [];
+
+  /// One entry per `startFullScan` call: the sources the round was allowed to
+  /// visit (`null` = every source), recorded so a test can prove one source's
+  /// cache write does not put another source in scope (Contract F1.4).
+  final List<Set<String>?> scopes = [];
+
+  /// One entry per `startFullScan` call: the trigger name the round carried.
+  final List<String?> labels = [];
+
+  /// How many times the coordinator asked acquisition to stop (F1.3).
+  int cancelCalls = 0;
+
   bool hold = false;
   final gate = _Gate();
 
   @override
   Future<FullScanSummary> startFullScan({
     Map<String, Set<String>>? dueComicIdsBySource,
+    Set<String>? scopeSourceKeys,
+    String? roundLabel,
   }) async {
     calls.add(dueComicIdsBySource);
+    scopes.add(scopeSourceKeys);
+    labels.add(roundLabel);
     if (hold) {
       if (!gate.started.isCompleted) gate.started.complete();
       await gate.release.future;
@@ -269,6 +474,11 @@ class _CountingScanService extends ScanDebugService {
       disposition: FullScanDisposition.completed,
       progress: ScanProgress(phase: ScanProgressPhase.finished),
     );
+  }
+
+  @override
+  void cancel([ScanControlReason reason = ScanControlReason.userCanceled]) {
+    cancelCalls++;
   }
 }
 

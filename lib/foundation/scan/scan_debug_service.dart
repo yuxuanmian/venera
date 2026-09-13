@@ -62,8 +62,20 @@ class ScanDebugService {
   /// caller found due (Contract S4).  It is passed straight to the target
   /// provider, which keeps this service unaware of both the schedule store and
   /// the observation store.
+  ///
+  /// [scopeSourceKeys] restricts the round to those sources (`null` = every
+  /// source in scope by configuration).  It exists because the due rule cannot
+  /// express it: a collection-type work item carries no comic id, so
+  /// `filterTargetsByDue` can never drop one, and "which sources is this round
+  /// about?" therefore has to be answered before the work list is built
+  /// (Contract F1.4).
+  ///
+  /// [roundLabel] names the trigger for the plan overview line; it is
+  /// presentation only and never changes what is scanned.
   Future<FullScanSummary> startFullScan({
     Map<String, Set<String>>? dueComicIdsBySource,
+    Set<String>? scopeSourceKeys,
+    String? roundLabel,
   }) {
     if (_running) {
       return Future<FullScanSummary>.value(
@@ -76,7 +88,11 @@ class ScanDebugService {
     _running = true;
     _cancelReason = null;
     _storageError = null;
-    return _runFullScan(dueComicIdsBySource: dueComicIdsBySource);
+    return _runFullScan(
+      dueComicIdsBySource: dueComicIdsBySource,
+      scopeSourceKeys: scopeSourceKeys,
+      roundLabel: roundLabel,
+    );
   }
 
   /// Synchronously invalidates all current Work guards and call leases.
@@ -101,6 +117,8 @@ class ScanDebugService {
 
   Future<FullScanSummary> _runFullScan({
     Map<String, Set<String>>? dueComicIdsBySource,
+    Set<String>? scopeSourceKeys,
+    String? roundLabel,
   }) async {
     ScanProgress current = ScanProgress(phase: ScanProgressPhase.discovering);
     _setProgress(current);
@@ -114,6 +132,8 @@ class ScanDebugService {
       }
       final snapshot = await targetProvider.snapshot(
         dueComicIdsBySource: dueComicIdsBySource,
+        scopeSourceKeys: scopeSourceKeys,
+        roundLabel: roundLabel,
       );
       final snapshotCacheGeneration = snapshot.cacheGeneration;
       if (_cancelReason != null) {

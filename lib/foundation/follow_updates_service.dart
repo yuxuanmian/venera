@@ -11,6 +11,7 @@ import 'schedule/sqlite_schedule_repository.dart';
 import 'scan/due_filter.dart';
 import 'scan/models.dart';
 import 'scan/scan_debug_service.dart';
+import 'scan/scan_log.dart';
 import 'scan/scan_result_repository.dart';
 import 'scan/sqlite_scan_result_repository.dart';
 import 'tracking/judgment_event.dart';
@@ -202,9 +203,21 @@ NetworkFavoriteCacheManager Function() _favoriteCacheReaderFor(
 /// "check everything now" path, because a manual button that ignored the
 /// schedule would cost ~5 minutes of requests for a 700-comic library and
 /// cancel out the reason the schedule exists.
+///
+/// Two things narrow that further (Contract F1.4):
+///
+///  * **The master switch.**  While follow-up is off, no trigger fires at all —
+///    [runRound] is the single gate, so a fourth trigger cannot be added
+///    without passing through it.
+///  * **Round scope.**  A cache-change round is restricted to the sources whose
+///    cache actually changed.  The range rule cannot do this on its own: a
+///    collection-type work item carries no comic id, so no schedule rule can
+///    ever drop it (`filterTargetsByDue`), which is how browsing one source's
+///    favorites used to re-walk another source's whole collection.
 class FollowUpdateCoordinator {
   FollowUpdateCoordinator({
     required tracking.JudgmentService judgmentService,
+    required bool Function() followUpdatesEnabledReader,
     ScanDebugService? scanService,
     ScheduleService? scheduleService,
     ScanResultRepository? scanRepository,
@@ -219,6 +232,10 @@ class FollowUpdateCoordinator {
        _scanRepository = scanRepository ?? scanResultRepository,
        _favoriteCacheReader = _favoriteCacheReaderFor(favoriteCache),
        _judgmentService = judgmentService,
+       // Required rather than defaulted to the product setting: a coordinator
+       // that silently read configuration would make "off means silent"
+       // untestable without a global store.
+       _followUpdatesEnabledReader = followUpdatesEnabledReader,
        // The criterion set comes from configuration and is derived fresh each
        // time: the user can enable, disable or log out of a source while the
        // app runs, and a cached answer would keep the old gate.
@@ -253,6 +270,12 @@ class FollowUpdateCoordinator {
   final DateTime Function() _clock;
   final Set<String> Function() _completeSourceKeys;
 
+  /// The follow-up master switch (Contract F1.4).
+  ///
+  /// Read at [runRound], which every trigger goes through, so "off" means no
+  /// round at all rather than a round that scans nothing.
+  final bool Function() _followUpdatesEnabledReader;
+
   /// How many newly persisted observations trigger a judgment pass.
   ///
   /// An implementation parameter, never semantics: changing it MUST NOT change
@@ -274,6 +297,12 @@ class FollowUpdateCoordinator {
 
   bool _roundRunning = false;
   bool _cacheRunning = false;
+
+  /// Whether this request chain has been cancelled (Contract F1.3).
+  ///
+  /// Chain-scoped rather than round-scoped: it exists to stop the coalesced
+  /// follow-up round from starting after the user cancelled.
+  bool _cancelRequested = false;
   bool _fullCacheCanceled = false;
   bool _favoritesJustCached = false;
   bool _startupTriggered = false;
@@ -288,6 +317,14 @@ class FollowUpdateCoordinator {
 
   /// Progress for the current (or last) round.
   ValueListenable<FollowUpdateProgress> get progress => _progressNotifier;
+
+  /// The attached schedule service, or null before [attachScheduleService].
+  ///
+  /// Published for **read-only presentation consumers** — 007's details-page
+  /// "recently updated" indicator reads one identity through it.  It hands out
+  /// the same instance this coordinator drives, so a consumer MUST only read
+  /// from it; writing here would fight the coordinator's own recompute path.
+  ScheduleService? get scheduleService => _scheduleService;
 
   /// Whether a round is in flight.  Drives the "already running" presentation
   /// instead of silently dropping a trigger (Contract F1.2).
@@ -428,6 +465,11 @@ class FollowUpdateCoordinator {
   /// lifecycle callback: only a fresh process triggers.
   Future<void> onProcessStart() async {
     if (_startupTriggered || _disposed) return;
+    // The switch is checked **before** the boundary is consumed: with follow-up
+    // off this process never started a round, so switching the feature on later
+    // in the same session still gets its first round instead of being told the
+    // session already had one (Contract F1.1 / F1.4).
+    if (!_followUpdatesEnabledReader()) return;
     _startupTriggered = true;
     await runRound(FollowUpdateTrigger.startup);
   }
@@ -444,14 +486,48 @@ class FollowUpdateCoordinator {
   /// absorbed.  An in-flight round absorbs the new request by **presenting the
   /// current round's state** — not by dropping it silently and not by queueing a
   /// second one (Contract F1.2).
-  Future<bool> runRound(FollowUpdateTrigger trigger) async {
+  ///
+  /// [scopeSourceKeys] restricts the round to those sources; `null` means every
+  /// criterion source.  The `cacheChanged` trigger derives its scope from the
+  /// favorite cache's own changed-source marks when no scope is passed, which is
+  /// what keeps one source's cache write from re-walking another source's
+  /// collection (Contract F1.4).
+  ///
+  /// Returns false — without starting anything — while follow-up is off, when
+  /// nothing changed, and when the scope and the criterion set do not intersect.
+  Future<bool> runRound(
+    FollowUpdateTrigger trigger, {
+    Set<String>? scopeSourceKeys,
+  }) async {
     if (_disposed) return false;
+    if (!_followUpdatesEnabledReader()) return false;
     if (_roundRunning) {
       _activeTrigger = trigger;
       return false;
     }
+
+    var scope = scopeSourceKeys;
+    if (scope == null && trigger == FollowUpdateTrigger.cacheChanged) {
+      // `null` here means "every source, because the change could not be
+      // attributed"; an empty set means nothing changed, which is not a round.
+      scope = _cache.takeChangedSourceKeys();
+      if (scope != null && scope.isEmpty) return false;
+    }
+    if (scope != null) {
+      // A source outside the criterion set (switched off, logged out, no scan
+      // capability) must not be scanned even when its cache changed.  The
+      // intersection is here rather than in the due map because a
+      // collection-type work item can never be dropped by that map.
+      scope = scope.intersection(_criterionSourceKeys());
+      if (scope.isEmpty) return false;
+    }
+
     _roundRunning = true;
     _activeTrigger = trigger;
+    // A new request chain starts uncancelled.  Clearing it here rather than in
+    // `cancel()`'s counterpart is what makes a stale cancel harmless: a cancel
+    // that arrived while nothing was running must not suppress the next round.
+    _cancelRequested = false;
     _publish(
       FollowUpdateProgress(
         discovered: 0,
@@ -460,7 +536,31 @@ class FollowUpdateCoordinator {
       ),
     );
     try {
-      await _runRoundOnce();
+      var roundScope = scope;
+      var roundTrigger = trigger;
+      // At most two rounds per request: the triggered one, plus one coalesced
+      // follow-up for work the first round could not cover (F1.2, revised).
+      for (var index = 0; ; index++) {
+        await _runRoundOnce(scope: roundScope, trigger: roundTrigger);
+        if (index >= 1) break;
+        // F1.3: cancel stops the **request**, not just the round that happened
+        // to be in flight when it arrived.  Without this the coalesced
+        // follow-up would start right after the user asked for everything to
+        // stop — the one outcome a cancel must never produce.
+        if (_cancelRequested) break;
+        final owed = _takeOwedScope(roundScope);
+        if (owed == null) break;
+        roundScope = owed.everySource ? null : owed.sourceKeys;
+        roundTrigger = FollowUpdateTrigger.cacheChanged;
+        _activeTrigger = roundTrigger;
+        _publish(
+          FollowUpdateProgress(
+            discovered: 0,
+            finished: 0,
+            phase: ScanProgressPhase.discovering,
+          ),
+        );
+      }
       return true;
     } finally {
       _roundRunning = false;
@@ -468,9 +568,36 @@ class FollowUpdateCoordinator {
     }
   }
 
-  Future<void> _runRoundOnce() async {
+  /// The scope a coalesced follow-up round still owes, or null when none is.
+  ///
+  /// F1.2 revised: a trigger arriving mid-round is still **absorbed**, but the
+  /// work it implies is not thrown away.  A source whose cache changed while a
+  /// round was running had its own debounced trigger absorbed, and the marks it
+  /// left are still there because the absorbed path deliberately does not drain
+  /// them.
+  ///
+  /// A round that covered every source (`justRan` null) covers those marks by
+  /// definition, so nothing is owed — that is what keeps the startup and manual
+  /// paths at exactly one round per request.
+  _OwedScope? _takeOwedScope(Set<String>? justRan) {
+    final marks = _cache.takeChangedSourceKeys();
+    if (justRan == null) return null;
+    if (marks == null) return const _OwedScope.everySource();
+    final owed = marks.intersection(_criterionSourceKeys()).difference(justRan);
+    if (owed.isEmpty) return null;
+    return _OwedScope.sources(owed);
+  }
+
+  Future<void> _runRoundOnce({
+    required Set<String>? scope,
+    required FollowUpdateTrigger trigger,
+  }) async {
     final nowMs = _clock().millisecondsSinceEpoch;
     await _scanRepository.ensureOpen();
+    // 007 Contract L2: the settlement's elapsed time is the whole round's
+    // **wall clock**, from this point to the close — not the sum of the
+    // individual request times, which would hide queueing and judgment time.
+    final roundWatch = Stopwatch()..start();
 
     // ---- Due filtering (Contract S4) -------------------------------------
     //
@@ -478,10 +605,12 @@ class FollowUpdateCoordinator {
     // computed here and the target snapshot is narrowed before the scan starts.
     // With nothing due this yields an empty work list and the round issues no
     // source request at all.
-    final dueBySource = await _dueComicIdsBySource(nowMs);
+    final dueBySource = await _dueComicIdsBySource(nowMs, scope);
 
     final summary = await _scanService.startFullScan(
       dueComicIdsBySource: dueBySource,
+      scopeSourceKeys: scope,
+      roundLabel: trigger.name,
     );
 
     // ---- Settlement ------------------------------------------------------
@@ -496,6 +625,9 @@ class FollowUpdateCoordinator {
       _observationsSinceJudgment = 0;
     }
 
+    roundWatch.stop();
+    _logSettlementOverview(summary, roundWatch.elapsedMilliseconds);
+
     _publish(
       FollowUpdateProgress(
         discovered: summary.progress.discoveredWorks,
@@ -505,7 +637,25 @@ class FollowUpdateCoordinator {
     );
   }
 
-  /// The complete due set per source (Contract S4).
+  /// One **settlement overview** line per round (007 Contract L2/L6/L8).
+  ///
+  /// Unconditional and at `info` level, like the existing scan transport lines,
+  /// so a release build's log answers "what did this round actually do?" without
+  /// anyone having enabled developer mode first.  It reuses the acquisition
+  /// summary that close-out already holds — no new counter is introduced, and no
+  /// per-item line is added (L8).
+  void _logSettlementOverview(FullScanSummary summary, int elapsedMs) {
+    final lines = formatSettlementOverview(
+      progress: summary.progress,
+      elapsedMs: elapsedMs,
+      disposition: summary.disposition.value,
+    );
+    for (final line in lines) {
+      Log.info('Scan', line);
+    }
+  }
+
+  /// The complete due set per source (Contract S4), for [scope] only.
   ///
   /// Returns **null** to mean "do not filter at all" — the caller passes it
   /// straight to the acquisition side, where null selects the unfiltered
@@ -513,7 +663,15 @@ class FollowUpdateCoordinator {
   /// same answer.  `filterTargetsByDue` treats a source missing from the map as
   /// "no identity of it is due", so an empty map drops every per-comic work and
   /// the round scans nothing while still reporting success.
-  Future<Map<String, Set<String>>?> _dueComicIdsBySource(int nowMs) async {
+  ///
+  /// A non-null [scope] narrows which sources are asked at all.  It is not an
+  /// optimisation with a behavioural tail: the answer is only ever consumed for
+  /// the sources the acquisition side will actually visit, so restricting the
+  /// loop to the scope cannot change any identity's due verdict.
+  Future<Map<String, Set<String>>?> _dueComicIdsBySource(
+    int nowMs,
+    Set<String>? scope,
+  ) async {
     final schedule = _scheduleService;
     if (schedule == null) {
       // No schedule attached: every identity is due, because "no schedule
@@ -524,7 +682,9 @@ class FollowUpdateCoordinator {
       // no diagnostic pointing at the cause.
       return null;
     }
-    final sources = _criterionSourceKeys();
+    final sources = scope == null
+        ? _criterionSourceKeys()
+        : _criterionSourceKeys().intersection(scope);
     // An empty criterion set is a genuine "nothing is due": there is no source
     // we are tracking, so an empty map is the correct answer here (as opposed to
     // the null case above, where the domain is unknown rather than empty).
@@ -621,7 +781,14 @@ class FollowUpdateCoordinator {
 
   /// Requests cancellation of the in-flight round.  Results already stored are
   /// kept (Contract F1.3).
-  void cancel() => _scanService.cancel();
+  ///
+  /// Cancels the whole **request chain**, not only the round that happens to be
+  /// in flight: a coalesced follow-up round owed by this request MUST NOT run
+  /// after the user has asked for the check to stop.
+  void cancel() {
+    _cancelRequested = true;
+    _scanService.cancel();
+  }
 
   /// Cancels an in-flight full-cache run.
   void cancelFullCache() => _fullCacheCanceled = true;
@@ -741,9 +908,43 @@ class FollowUpdateCoordinator {
 /// notifier, and the scan repository it defaults to resolves `App.dataPath`
 /// lazily (the same reason `SqliteScanResultRepository` is a top-level `final`
 /// in its own file).
+///
+/// The master switch is wired to the product setting here, at the one place
+/// where the product's configuration is allowed to be read (Contract F1.4).
 final followUpdateCoordinator = FollowUpdateCoordinator(
   judgmentService: tracking.judgmentService,
+  followUpdatesEnabledReader: () => followUpdatesEnabled,
 );
+
+/// The scope a coalesced follow-up round still owes (Contract F1.2, revised).
+///
+/// A record would do, but the two shapes are not interchangeable — "every
+/// source" and "these sources" are different answers — and a named type makes
+/// that impossible to confuse at the call site.
+class _OwedScope {
+  const _OwedScope.everySource()
+    : everySource = true,
+      sourceKeys = const <String>{};
+
+  _OwedScope.sources(this.sourceKeys) : everySource = false;
+
+  final bool everySource;
+  final Set<String> sourceKeys;
+}
+
+/// The app-owned schedule service, or null before startup attached one.
+///
+/// 007's details-page indicator needs to point-read one identity's schedule.
+/// That read is a **presentation** dependency, so it does not justify a second
+/// long-lived singleton: the service is created exactly once by
+/// [FollowUpdatesService.initChecker] and published here for readers.
+///
+/// A null answer means startup has not reached [FollowUpdatesService.initChecker]
+/// yet.  Callers MUST treat that the same way they treat "no check record" —
+/// show nothing — rather than creating a service of their own, which would give
+/// the two callers different stores.
+ScheduleService? get followUpdateScheduleService =>
+    followUpdateCoordinator.scheduleService;
 
 /// App-lifecycle facade over [followUpdateCoordinator].
 ///
@@ -805,13 +1006,16 @@ abstract class FollowUpdatesService {
     followUpdateCoordinator.attachObservationConsumer();
     // The upgrade path runs before the first round, so a round never judges
     // evidence while the user's existing flags are still in the old store
-    // (FR-035/FR-036).  A failure is logged and retried on the next startup:
-    // the marker is written inside the migrating transaction, so a partial run
-    // cannot leave the migration half-applied.
+    // (FR-035).  A failure is logged and retried on the next startup: the marker
+    // is written inside the migrating transaction, so a partial run cannot leave
+    // the migration half-applied.
+    //
+    // 007 (FR-009 / FR-010): the migration no longer receives the schedule
+    // repository.  It moves the user-visible flag and nothing else — it MUST NOT
+    // touch schedule storage, so it is not given the ability to.
     unawaited(
       FollowUpMigration(
         judgmentRepository: tracking.judgmentService.repository,
-        scheduleRepository: scheduleStateRepository,
         source: () async =>
             NetworkFavoriteCacheManager().readLegacyFollowUpRows(),
       ).run().catchError((Object error) {

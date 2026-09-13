@@ -14,6 +14,7 @@ import 'package:venera/foundation/scan/models.dart';
 import 'package:venera/foundation/scan/scan_debug_service.dart';
 import 'package:venera/foundation/scan/scan_result_repository.dart';
 import 'package:venera/foundation/scan/target_provider.dart';
+import 'package:venera/foundation/schedule/sqlite_schedule_repository.dart';
 import 'package:venera/foundation/tracking/diagnostics.dart';
 import 'package:venera/pages/comic_details_page/comic_page.dart';
 import 'package:venera/utils/translations.dart';
@@ -85,9 +86,28 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
   }
 
-  Future<void> scrollToEnd(WidgetTester tester) async {
-    await tester.drag(find.byType(ListView), const Offset(0, -1000));
-    await tester.pump();
+  /// A viewport tall enough to lay out the whole Debug list.
+  ///
+  /// `ListView(children: …)` only builds the children inside its viewport, so a
+  /// "this label is absent" assertion made on a short viewport can pass simply
+  /// because the row was never built.  The two block-related tests therefore
+  /// render the full page.
+  void useTallViewport(WidgetTester tester) {
+    addTearDown(tester.view.reset);
+    tester.view.physicalSize = const Size(900, 4000);
+    tester.view.devicePixelRatio = 1;
+  }
+
+  /// A read-only, empty schedule store.
+  ///
+  /// The page's default is the app-owned singleton, which resolves
+  /// `App.dataPath` — a path this fixture does not establish.  Injecting an
+  /// in-memory store keeps these tests about the page rather than about startup
+  /// wiring, and an empty store is exactly the "no check record" shape (D4).
+  SqliteScheduleRepository emptyScheduleStore() {
+    final repository = SqliteScheduleRepository(databasePath: ':memory:');
+    addTearDown(repository.close);
+    return repository;
   }
 
   testWidgets('Debug Recheck reports unavailable without a loading state', (
@@ -106,10 +126,20 @@ void main() {
       );
     }
 
-    expect(find.text(followUpdateScannerUnavailableMessage.tl), findsWidgets);
+    // D6: the entry keeps producing its "unavailable" feedback on every use.
+    // The message is feedback rather than chrome, so it is not required to
+    // still be on screen once the action is no longer being used — which is why
+    // the loop above asserts a *fresh* appearance per tap rather than mere
+    // presence here.
+    expect(find.text('Recheck Now'.tl), findsWidgets);
+    expect(FollowUpdatesService.taskRunning, isFalse);
     expect(find.byType(CircularProgressIndicator), findsNothing);
     expect(snapshotRetirementState(fixture.databasePath), beforeState);
-    await scrollToEnd(tester);
+    await tester.scrollUntilVisible(
+      find.text('No trace in this session'.tl),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
     expect(find.text('No trace in this session'.tl), findsOneWidget);
   });
 
@@ -369,43 +399,167 @@ void main() {
     await tester.pump(const Duration(seconds: 3));
   });
 
-  testWidgets('a retired list-update source shows the detail path', (
+  /// Every label the two retired Debug blocks used to render.
+  ///
+  /// Two labels the old blocks also carried are deliberately **not** here
+  /// because an existing block still owns them and Contract D1 forbids changing
+  /// those blocks: `Has New Update` belongs to the Judgment block, and
+  /// `Update Check Strategy` belongs to Source Info (where it describes the old
+  /// source declaration, a different fact from the 004 scan capability).
+  const retiredBlockLabels = <String>[
+    'Last Check Time',
+    'Historical Next Check Time',
+    'Last Effective Activity Time',
+    'Baseline Time',
+    'Source Activity Time',
+    'Hot Window Active',
+    'Hot Window Source',
+    'Hot Window Until',
+    'Manual Hot Enabled',
+    'Update Marker',
+    'Last Update Time',
+    'Check Failures',
+    'Not Found Hits',
+    'Source is_new',
+    'Source full_is_new',
+    'Marker Value',
+    'Historical List Scan Interval',
+    'Last List Scan Attempt',
+    'Last Successful List Scan',
+    'Historical Next List Check',
+    'Historical List Retry After',
+    'List Check Failures',
+    'Last Snapshot Pages / Comics',
+    'Next Automatic List Scan',
+  ];
+
+  /// The two block titles and the historical disclaimer (Contract D5).
+  const retiredBlockChrome = <String>[
+    'Displayed scan state is historical',
+    'Follow-up State',
+    'Not tracked by follow-up scans',
+  ];
+
+  testWidgets('the retired historical blocks are gone for every source kind', (
     tester,
   ) async {
-    // The list-level `favorites.updateCheck` channel is no longer parsed
-    // (FR-044), so a source that declares it takes the ordinary detail path.
-    final source = RetirementFakeSource(sourceKey: retirementSourceA);
-    registerSource(source, data: source.numberedData(withUpdateCheck: true));
+    // FR-013 / D7.  Run for both source shapes, because the old code chose
+    // between the two blocks on `favoriteData.updateCheck`; that branch is gone,
+    // so neither shape may show either block any more.
+    useTallViewport(tester);
+    for (final withUpdateCheck in <bool>[false, true]) {
+      final source = RetirementFakeSource(sourceKey: retirementSourceA);
+      registerSource(
+        source,
+        data: withUpdateCheck
+            ? source.numberedData(withUpdateCheck: true)
+            : null,
+      );
 
-    await pumpDebug(
-      tester,
-      const ComicDebugPage(sourceKey: retirementSourceA, comicId: 'retire-b'),
-    );
+      await pumpDebug(
+        tester,
+        ComicDebugPage(
+          key: ValueKey('retired-$withUpdateCheck'),
+          sourceKey: retirementSourceA,
+          comicId: 'retire-a',
+          scheduleRepository: emptyScheduleStore(),
+        ),
+      );
+      await tester.pumpAndSettle();
 
-    expect(find.text('Historical List Scan Interval'.tl), findsNothing);
-    expect(find.text('Historical Next List Check'.tl), findsNothing);
-    expect(find.text('Historical List Retry After'.tl), findsNothing);
-    expect(find.text('Next Automatic List Scan'.tl), findsNothing);
-    expect(find.text('Ready'.tl), findsNothing);
-    expect(find.text('In Cooldown'.tl), findsNothing);
-    // The historical disclosure and the ordinary detail fields remain.
-    expect(find.text('Displayed scan state is historical'.tl), findsOneWidget);
-    expect(find.text('Follow-up State'.tl), findsOneWidget);
+      for (final label in retiredBlockLabels) {
+        expect(
+          find.text(label.tl),
+          findsNothing,
+          reason: 'retired label "$label" (updateCheck=$withUpdateCheck)',
+        );
+      }
+      for (final label in retiredBlockChrome) {
+        expect(
+          find.text(label.tl),
+          findsNothing,
+          reason:
+              'retired block chrome "$label" (updateCheck=$withUpdateCheck)',
+        );
+      }
+      // Both new blocks are present for this comic, which has no stored record
+      // in the injected test setup, so they render their explicit defaults.
+      expect(find.text('Schedule'.tl), findsOneWidget);
+      expect(find.text('Collection Scope'.tl), findsOneWidget);
+
+      // T077: the two Source Info rows are the **last** reader of the retired
+      // `favoriteData.updateCheck` declaration, so both branches are pinned
+      // here.  Removing that declaration from the sources (005 FR-045) must fail
+      // this expectation loudly instead of silently flipping the labels.
+      expect(
+        find.text('Update Check Strategy'.tl),
+        findsOneWidget,
+        reason:
+            'Source Info keeps the retired-strategy row '
+            '(updateCheck=$withUpdateCheck)',
+      );
+      expect(
+        find.text(
+          (withUpdateCheck ? 'Favorite list snapshot' : 'Comic details').tl,
+        ),
+        findsOneWidget,
+        reason:
+            'the row states what the retired declaration implies '
+            '(updateCheck=$withUpdateCheck)',
+      );
+    }
   });
 
-  testWidgets('detail timing fields are labeled as historical values', (
+  testWidgets('the unavailable message is action feedback, not a block title', (
     tester,
   ) async {
+    // D5 keeps the "scanner unavailable" text on the action entry only, and D6
+    // keeps that entry's feedback.  Before any tap the text must not be on the
+    // page, which is what makes it feedback rather than chrome.
+    final source = RetirementFakeSource(sourceKey: retirementSourceA);
+    registerSource(source);
+    await pumpDebug(
+      tester,
+      const ComicDebugPage(sourceKey: retirementSourceA, comicId: 'retire-a'),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text(followUpdateScannerUnavailableMessage.tl),
+      findsNothing,
+      reason: 'the message must not be a block title any more',
+    );
+
+    await expectFreshFeedback(
+      tester,
+      () => tester.tap(find.text('Recheck Now'.tl)),
+    );
+    expect(FollowUpdatesService.taskRunning, isFalse);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+  });
+
+  testWidgets('detail timing fields are no longer labeled as historical', (
+    tester,
+  ) async {
+    useTallViewport(tester);
     final source = RetirementFakeSource(sourceKey: retirementSourceA);
     registerSource(source);
 
     await pumpDebug(
       tester,
-      const ComicDebugPage(sourceKey: retirementSourceA, comicId: 'retire-a'),
+      ComicDebugPage(
+        sourceKey: retirementSourceA,
+        comicId: 'retire-a',
+        scheduleRepository: emptyScheduleStore(),
+      ),
     );
+    await tester.pumpAndSettle();
 
-    expect(find.text('Historical Next Check Time'.tl), findsOneWidget);
-    expect(find.text('Next Check Time'.tl), findsNothing);
+    expect(find.text('Historical Next Check Time'.tl), findsNothing);
+    // The label is the current-value one; its value is an explicit default
+    // because this fixture stores no schedule row (Contract D4).
+    expect(find.text('Next Check Time'.tl), findsOneWidget);
+    expect(find.text('No check record'.tl), findsWidgets);
     expect(find.text('Ready'.tl), findsNothing);
     expect(find.text('In Cooldown'.tl), findsNothing);
   });
@@ -422,6 +576,8 @@ class _CacheBlockingTargetProvider extends ScanTargetProvider {
   @override
   Future<ScanTargetSnapshot> snapshot({
     Map<String, Set<String>>? dueComicIdsBySource,
+    Set<String>? scopeSourceKeys,
+    String? roundLabel,
   }) async {
     if (!started.isCompleted) started.complete();
     await release.future;

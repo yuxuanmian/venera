@@ -131,6 +131,7 @@ class SqliteScheduleRepository implements ScheduleStateRepository {
   @override
   Future<Map<String, ScheduleState>> readAll() async {
     await ensureOpen();
+    _operationHook?.call('readAll');
     try {
       return _snapshotOf(database.select('SELECT * FROM schedule_state'));
     } catch (error) {
@@ -138,9 +139,43 @@ class SqliteScheduleRepository implements ScheduleStateRepository {
     }
   }
 
+  /// Single-row lookup by primary key (007 FR-004).
+  ///
+  /// Deliberately a `WHERE source_key = ? AND comic_id = ?` select and **not**
+  /// `readAll()` plus a map lookup: the details page asks about one comic on
+  /// every open, so the whole-table form would make that cost grow with the
+  /// number of stored schedules.  The `readAll` hook call is therefore a real
+  /// assertion surface — a test can prove the point read never takes the
+  /// whole-table path.
+  ///
+  /// A missing row returns `null` ("no check record yet"), which is a normal
+  /// state rather than an error; see the interface doc.
+  @override
+  Future<ScheduleState?> readByIdentity(
+    String sourceKey,
+    String comicId,
+  ) async {
+    await ensureOpen();
+    _operationHook?.call('readByIdentity');
+    try {
+      final rows = database.select(
+        'SELECT * FROM schedule_state WHERE source_key = ? AND comic_id = ?',
+        [sourceKey, comicId],
+      );
+      if (rows.isEmpty) return null;
+      return _stateFromRow(rows.first);
+    } catch (error) {
+      throw ScheduleStorageException(
+        'Unable to read one schedule state',
+        error,
+      );
+    }
+  }
+
   @override
   Future<Map<String, ScheduleState>> readExpired(int nowMs) async {
     await ensureOpen();
+    _operationHook?.call('readExpired');
     try {
       // Only the two conditions this store can answer alone.  See the
       // interface doc: "no observation" and "no schedule record" are merged by

@@ -47,6 +47,7 @@ void main() {
 
   FollowUpdateCoordinator buildCoordinator({int batchThreshold = 50}) =>
       FollowUpdateCoordinator(
+        followUpdatesEnabledReader: () => true,
         judgmentService: judgment,
         scanService: scan,
         scheduleService: schedule,
@@ -187,6 +188,7 @@ void main() {
           items.replace(item);
           final localScan = _CountingScanService();
           final coordinator = FollowUpdateCoordinator(
+            followUpdatesEnabledReader: () => true,
             judgmentService: service,
             scanService: localScan,
             scheduleService: schedule,
@@ -262,6 +264,8 @@ class _CountingScanService extends ScanDebugService {
   @override
   Future<FullScanSummary> startFullScan({
     Map<String, Set<String>>? dueComicIdsBySource,
+    Set<String>? scopeSourceKeys,
+    String? roundLabel,
   }) async => FullScanSummary(
     disposition: FullScanDisposition.completed,
     progress: ScanProgress(phase: ScanProgressPhase.finished),

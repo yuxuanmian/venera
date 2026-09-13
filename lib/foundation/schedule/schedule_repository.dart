@@ -18,6 +18,21 @@ abstract class ScheduleStateRepository {
   /// Reads every stored schedule, keyed by `(sourceKey, comicId)`.
   Future<Map<String, ScheduleState>> readAll();
 
+  /// Reads **one** identity's schedule by primary key.
+  ///
+  /// Added by 007 for a single purpose: the details page needs to answer "does
+  /// this comic have a check record, and is its automatic hot window still
+  /// open?" once per page open.  Reading the whole table to answer a question
+  /// about one row would make the cost of opening a page grow with the number
+  /// of favorites, so this MUST be a single-row lookup.
+  ///
+  /// A missing row returns `null`, which means **"no check record yet"** — it is
+  /// a normal state (a favorite that has never been checked), *not* an error and
+  /// *not* an empty [ScheduleState].  Callers MUST NOT create a row to fill the
+  /// gap: "no schedule record" is itself a due condition (Contract S4), so
+  /// writing one would change when the comic is next checked.
+  Future<ScheduleState?> readByIdentity(String sourceKey, String comicId);
+
   /// Reads the schedules whose `next_at` is null or already reached.
   ///
   /// Deliberately **not** named `readDue`: this answers only the two conditions

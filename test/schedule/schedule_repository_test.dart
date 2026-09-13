@@ -3,8 +3,10 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:venera/foundation/schedule/schedule_repository.dart';
+import 'package:venera/foundation/schedule/schedule_service.dart';
 import 'package:venera/foundation/schedule/schedule_state.dart';
 import 'package:venera/foundation/schedule/sqlite_schedule_repository.dart';
+import 'package:venera/foundation/tracking/judgment_event.dart';
 
 /// Parses the `CREATE TABLE schedule_state (...)` block out of the design
 /// attachment and returns its column names in declaration order.
@@ -275,6 +277,174 @@ void main() {
       expect(await repository.readExpired(999), isEmpty);
       expect(await repository.readExpired(1000), hasLength(1));
     });
+  });
+
+  group('readByIdentity (007 FR-004: one row, by primary key)', () {
+    test('agrees field for field with the same row in readAll()', () async {
+      await repository.ensureOpen();
+      await repository.applyBatch([
+        const ScheduleState(
+          sourceKey: 'a',
+          comicId: '1',
+          nextAtMs: 1000,
+          activityAtMs: 500,
+          autoHotUntilMs: 2000,
+          manualHotEnabled: true,
+          manualHotUntilMs: 3000,
+          oldScheduleJitterApplied: true,
+        ),
+        const ScheduleState(
+          sourceKey: 'a',
+          comicId: '2',
+          nextAtMs: 4000,
+          activityAtMs: 600,
+        ),
+        const ScheduleState(sourceKey: 'b', comicId: '1', nextAtMs: 5000),
+      ]);
+
+      final all = await repository.readAll();
+      final point = await repository.readByIdentity('a', '1');
+
+      expect(point, isNotNull);
+      final expected = all['a\u00001']!;
+      expect(point!.sourceKey, expected.sourceKey);
+      expect(point.comicId, expected.comicId);
+      expect(point.nextAtMs, expected.nextAtMs);
+      expect(point.activityAtMs, expected.activityAtMs);
+      expect(point.autoHotUntilMs, expected.autoHotUntilMs);
+      expect(point.manualHotEnabled, expected.manualHotEnabled);
+      expect(point.manualHotUntilMs, expected.manualHotUntilMs);
+      expect(point.oldScheduleJitterApplied, expected.oldScheduleJitterApplied);
+      expect(point.identity, expected.identity);
+    });
+
+    test('the identity is the pair, not either half alone', () async {
+      await repository.ensureOpen();
+      await repository.applyBatch([
+        const ScheduleState(sourceKey: 'a', comicId: 'x', nextAtMs: 11),
+        const ScheduleState(sourceKey: 'b', comicId: 'y', nextAtMs: 22),
+      ]);
+
+      expect((await repository.readByIdentity('a', 'x'))!.nextAtMs, 11);
+      expect((await repository.readByIdentity('b', 'y'))!.nextAtMs, 22);
+      // The two cross combinations exist in neither direction.
+      expect(await repository.readByIdentity('a', 'y'), isNull);
+      expect(await repository.readByIdentity('b', 'x'), isNull);
+    });
+
+    test('a missing identity returns null and is not an error', () async {
+      await repository.ensureOpen();
+      await repository.applyBatch([
+        const ScheduleState(sourceKey: 'a', comicId: '1', nextAtMs: 1000),
+      ]);
+
+      expect(await repository.readByIdentity('a', 'absent'), isNull);
+      expect(await repository.readByIdentity('absent', '1'), isNull);
+      expect(await repository.readByIdentity('absent', 'absent'), isNull);
+      // A read must not create the row it failed to find: "no schedule record"
+      // is a due condition (S4), so writing one would change when the comic is
+      // checked next.
+      expect(await repository.readAll(), hasLength(1));
+    });
+
+    test('does not take the whole-table path', () async {
+      final operations = <String>[];
+      final hooked = SqliteScheduleRepository(
+        databasePath: '${tempDir.path}/hooked.db',
+        operationHook: operations.add,
+      );
+      addTearDown(hooked.close);
+      await hooked.ensureOpen();
+      await hooked.applyBatch([
+        const ScheduleState(sourceKey: 'a', comicId: '1', nextAtMs: 1000),
+      ]);
+
+      operations.clear();
+      await hooked.readByIdentity('a', '1');
+
+      expect(
+        operations,
+        ['readByIdentity'],
+        reason:
+            'the point read must be a single-row primary-key lookup. If this '
+            'fails with readAll in the list, the implementation read the whole '
+            'table to answer a question about one comic.',
+      );
+    });
+
+    test('reads one row even when the store holds many', () async {
+      final operations = <String>[];
+      final hooked = SqliteScheduleRepository(
+        databasePath: '${tempDir.path}/many.db',
+        operationHook: operations.add,
+      );
+      addTearDown(hooked.close);
+      await hooked.ensureOpen();
+      await hooked.applyBatch([
+        for (var i = 0; i < 500; i++)
+          ScheduleState(sourceKey: 'a', comicId: '$i', nextAtMs: 1000 + i),
+      ]);
+
+      operations.clear();
+      final state = await hooked.readByIdentity('a', '499');
+
+      expect(state!.nextAtMs, 1499);
+      expect(operations, ['readByIdentity']);
+    });
+  });
+
+  group('ScheduleService.readIdentity is a presentation-only passthrough', () {
+    late List<String> operations;
+    late SqliteScheduleRepository repo;
+    late ScheduleService service;
+
+    setUp(() {
+      operations = <String>[];
+      repo = SqliteScheduleRepository(
+        databasePath: '${tempDir.path}/service.db',
+        operationHook: operations.add,
+      );
+      service = ScheduleService(
+        repository: repo,
+        events: const Stream<JudgmentBatchEvent>.empty(),
+        clock: () => DateTime.utc(2026, 9, 13),
+      );
+    });
+
+    tearDown(() async {
+      await service.close();
+    });
+
+    test('returns the stored row without writing anything', () async {
+      await repo.ensureOpen();
+      await repo.applyBatch([
+        const ScheduleState(
+          sourceKey: 'a',
+          comicId: '1',
+          nextAtMs: 5000,
+          autoHotUntilMs: 9000,
+        ),
+      ]);
+
+      operations.clear();
+      final state = await service.readIdentity('a', '1');
+
+      expect(state!.nextAtMs, 5000);
+      expect(state.autoHotUntilMs, 9000);
+      expect(
+        operations.where((op) => !op.startsWith('read')),
+        isEmpty,
+        reason: 'the wrapper must not trigger a write, a recompute or a clear',
+      );
+    });
+
+    test(
+      'a missing identity is null, not an error and not a new row',
+      () async {
+        expect(await service.readIdentity('a', 'absent'), isNull);
+        expect(await repo.readAll(), isEmpty);
+      },
+    );
   });
 
   group('clear', () {

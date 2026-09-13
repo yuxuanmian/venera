@@ -65,8 +65,20 @@ void main() {
     expect(find.text('chapter-9'), findsOneWidget);
     expect(find.text('Definition Revision'), findsOneWidget);
     expect(find.text('rev-4'), findsOneWidget);
-    expect(find.text('completed'), findsOneWidget);
-    expect(find.text('Follow-up State'), findsOneWidget);
+    expect(
+      find.text('completed'),
+      findsNWidgets(2),
+      reason:
+          'exactly two blocks present the stored scope status: the pre-007 '
+          '"Raw Scan Result" raw dump and the 007 "Collection Scope" block, '
+          'which Contract D3 renders as a set of fields.  Pinned to a count so '
+          'that a third copy cannot appear unnoticed (Contract D1).',
+    );
+    // 007 replaced the historical follow-up block with the two current-value
+    // blocks (Contract D); this page is checked in detail in
+    // test/scan_retirement/debug_schedule_fields_test.dart.
+    expect(find.text('Schedule'), findsOneWidget);
+    expect(find.text('Collection Scope'), findsOneWidget);
   });
 
   testWidgets('details Debug exposes latest failure without the old success', (

@@ -319,6 +319,8 @@ class FakeTargetProvider extends ScanTargetProvider {
   @override
   Future<ScanTargetSnapshot> snapshot({
     Map<String, Set<String>>? dueComicIdsBySource,
+    Set<String>? scopeSourceKeys,
+    String? roundLabel,
   }) async => value;
 }
 

@@ -7,6 +7,7 @@ import 'observation_codec.dart';
 import 'scan_call_lease.dart';
 import 'scan_emission.dart';
 import 'scan_limits.dart';
+import 'scan_log.dart';
 import 'scan_result_repository.dart';
 import 'full_scan_planner.dart';
 
@@ -185,7 +186,7 @@ class ScanExecutor {
           );
         }
         pageCount++;
-        final raw = await _loadCollection(work, cursor);
+        final raw = await _loadCollection(work, cursor, pageOrdinal: pageCount);
         work.guard.check();
         try {
           final sourceFailure = codec.decodeCollectionFailure(raw);
@@ -323,7 +324,13 @@ class ScanExecutor {
   }
 
   Future<Object?> _loadComic(ScanWork work) async {
-    final lease = _newLease(work.guard);
+    // Per-comic labels come from planning time, where the favorite-cache entry
+    // already carried the display name.  A spec built without one (a test, or a
+    // future caller that has no cache entry) still gets a usable label from the
+    // identity rather than an anonymous line (007 Contract L4).
+    final label =
+        work.logLabel ?? comicLabel(work.sourceKey, null, work.comicId ?? '');
+    final lease = _newLease(work.guard, label);
     var enteredAdapter = false;
     try {
       work.guard.check();
@@ -339,8 +346,18 @@ class ScanExecutor {
     }
   }
 
-  Future<Object?> _loadCollection(ScanWork work, Object? cursor) async {
-    final lease = _newLease(work.guard);
+  /// Loads one collection page.
+  ///
+  /// [pageOrdinal] is the page's 1-based position in this walk, and it is what
+  /// makes a collection round's request lines answerable: a collection work item
+  /// covers many comics, so the page — not a comic — is the identity a log line
+  /// can name (007 Contract L4).
+  Future<Object?> _loadCollection(
+    ScanWork work,
+    Object? cursor, {
+    required int pageOrdinal,
+  }) async {
+    final lease = _newLease(work.guard, pageLabel(work.sourceKey, pageOrdinal));
     var enteredAdapter = false;
     try {
       work.guard.check();
@@ -357,8 +374,12 @@ class ScanExecutor {
     }
   }
 
-  ScanCallLease _newLease(ScanExecutionGuard guard) {
-    final lease = ScanCallLease(guard: guard, timeout: limits.jsCallTimeout);
+  ScanCallLease _newLease(ScanExecutionGuard guard, String? logLabel) {
+    final lease = ScanCallLease(
+      guard: guard,
+      logLabel: logLabel,
+      timeout: limits.jsCallTimeout,
+    );
     _onLeaseCreated?.call(lease);
     return lease;
   }

@@ -96,7 +96,7 @@ void main() {
   });
 
   test(
-    'manual hot and mark-read operations stay scoped to allowed fields',
+    'mark-read stays scoped and never wakes the retired hot window (007 FR-011)',
     () async {
       final data = _numberedData(
         (page, [_]) async => Res([_comic('one')], subData: 1),
@@ -105,30 +105,52 @@ void main() {
       await cache.refreshPage(data, folder, 1);
 
       final before = cache.getComicsWithUpdatesInfo(folder).single;
-      final enabled = cache.toggleManualHotWindow(
-        _sourceKey,
-        'one',
-        enabled: true,
-        now: DateTime.utc(2026, 9, 9),
-      );
-      expect(enabled?.manualHotEnabled, isTrue);
-      expect(enabled?.manualHotUntil, isNotNull);
+      // No entry can have set these, because the only writer is gone (`toggle
+      // ManualHotWindow` was deleted).  The columns still exist and still read
+      // back — they are kept, not deleted (FR-031) — but always at "off".
+      expect(before.manualHotEnabled, isFalse);
+      expect(before.manualHotUntil, isNull);
 
       cache.markReadInAllFolders(_sourceKey, 'one');
       final read = cache.getComicsWithUpdatesInfo(folder).single;
       expect(read.hasNewUpdate, isFalse);
-      expect(read.manualHotEnabled, isTrue);
-      expect(read.lastCheckTime, before.lastCheckTime);
-
-      final disabled = cache.toggleManualHotWindow(
-        _sourceKey,
-        'one',
-        enabled: false,
-        now: DateTime.utc(2026, 9, 9),
+      expect(
+        read.manualHotEnabled,
+        isFalse,
+        reason: 'marking read must not enable a hot window',
       );
-      expect(disabled?.manualHotEnabled, isFalse);
+      expect(read.manualHotUntil, isNull);
+      expect(read.lastCheckTime, before.lastCheckTime);
+      expect(read.nextCheckAt, before.nextCheckAt);
+      expect(read.updateMarker, before.updateMarker);
     },
   );
+
+  test('the manual hot-window write entry no longer exists anywhere', () {
+    // `toggleManualHotWindow` was the last production writer of the legacy
+    // marker store's manual hot-window columns.  It cannot be referenced from
+    // Dart any more (the analyzer would reject it), so the remaining guard is
+    // structural: no source file may define or call it.
+    const paths = <String>[
+      'lib/foundation/favorites.dart',
+      'lib/pages/comic_details_page/comic_page.dart',
+      'lib/pages/comic_details_page/favorite.dart',
+      'lib/pages/follow_updates_page.dart',
+      'lib/pages/settings/settings_page.dart',
+    ];
+    for (final path in paths) {
+      final source = File(path)
+          .readAsStringSync()
+          .split('\n')
+          .where((line) => !line.trimLeft().startsWith('//'))
+          .join('\n');
+      expect(
+        source,
+        isNot(contains('toggleManualHotWindow')),
+        reason: '$path must not carry a manual hot-window write path',
+      );
+    }
+  });
 
   test(
     'initialized historical scan rows remain readable without execution',

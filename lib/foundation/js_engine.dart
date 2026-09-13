@@ -444,7 +444,18 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
       if (isScanRequest) {
         // These values are host-owned.  They are never taken from a JS
         // `extra` object supplied by the source.
-        extra = <String, dynamic>{'veneraScan': true};
+        //
+        // `veneraScanContext` is the scan's log identity (007 Contract L4/L7):
+        // the request interceptor reads it to prefix the scan log line with
+        // "which source, which comic / which page".  It lives in `extra`, which
+        // is Dio-local metadata — it is **not** merged into `headers`, so it is
+        // never sent to the remote server.
+        final logLabel = scanLease?.logLabel;
+        extra = <String, dynamic>{
+          'veneraScan': true,
+          if (logLabel != null && logLabel.isNotEmpty)
+            'veneraScanContext': logLabel,
+        };
       }
       if (headers["user-agent"] == null && headers["User-Agent"] == null) {
         headers["User-Agent"] = webUA;

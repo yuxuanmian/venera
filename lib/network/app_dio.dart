@@ -27,6 +27,18 @@ class MyLogInterceptor implements Interceptor {
   final Map<RequestOptions, Stopwatch> _scanTimers =
       <RequestOptions, Stopwatch>{};
 
+  /// The scan log's identity prefix, or an empty string when there is none.
+  ///
+  /// 007 Contract L4: every scan request line carries "which source, which comic
+  /// / which page".  The value is host-owned metadata written into `extra` by the
+  /// JS engine, never a header, so it is not transmitted (L7).  A request without
+  /// one keeps the original, unprefixed format — the change is additive (L8).
+  static String _scanPrefix(RequestOptions options) {
+    final label = options.extra['veneraScanContext'];
+    if (label is! String || label.isEmpty) return '';
+    return ' $label';
+  }
+
   @override
   void onError(DioException err, ErrorInterceptorHandler handler) {
     if (err.requestOptions.extra['veneraScan'] == true) {
@@ -35,7 +47,7 @@ class MyLogInterceptor implements Interceptor {
       final status = err.response?.statusCode;
       Log.error(
         "Network",
-        "Scan ${err.requestOptions.method} ${status == null ? 'transport-failure' : 'status=$status'}"
+        "Scan${_scanPrefix(err.requestOptions)} ${err.requestOptions.method} ${status == null ? 'transport-failure' : 'status=$status'}"
             "${elapsed == null ? '' : ' ${elapsed}ms'} ${err.type.name}",
       );
       handler.next(err);
@@ -111,7 +123,7 @@ class MyLogInterceptor implements Interceptor {
       final elapsed = timer?.elapsedMilliseconds;
       Log.info(
         "Network",
-        "Scan ${response.requestOptions.method} status=${response.statusCode ?? 'unknown'}"
+        "Scan${_scanPrefix(response.requestOptions)} ${response.requestOptions.method} status=${response.statusCode ?? 'unknown'}"
             "${elapsed == null ? '' : ' ${elapsed}ms'}",
       );
       handler.next(response);
@@ -159,7 +171,10 @@ class MyLogInterceptor implements Interceptor {
     options.sendTimeout = const Duration(seconds: 15);
     if (options.extra['veneraScan'] == true) {
       _scanTimers[options] = Stopwatch()..start();
-      Log.info("Network", "Scan ${options.method} started");
+      Log.info(
+        "Network",
+        "Scan${_scanPrefix(options)} ${options.method} started",
+      );
       handler.next(options);
       return;
     }

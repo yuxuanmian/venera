@@ -426,6 +426,20 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   final Set<String> _fullCaching = {};
   final Map<String, int> _favoriteSessionEpochs = <String, int>{};
   int _cacheGeneration = 0;
+
+  /// Source keys whose cache changed since the last drain (Contract F1.4).
+  ///
+  /// A `ChangeNotifier` carries no payload, so "which source changed?" has to be
+  /// recorded by the writer while it still holds the key.  Without it the only
+  /// thing a listener can do is scan every criterion source — which is how
+  /// browsing one source's favorites used to re-walk another source's whole
+  /// collection.
+  final Set<String> _changedSourceKeys = <String>{};
+
+  /// Whether a change could not be attributed to one source, so every source
+  /// must be treated as changed.  Set by a whole-cache clear and by the legacy
+  /// batched flush, which are both genuinely source-agnostic.
+  bool _everySourceChanged = false;
   static const _backgroundRefreshAfter = Duration(minutes: 5);
   static const backgroundSummaryRefreshAfter = Duration(hours: 6);
   static const _followScheduleBackfillKey = 'follow_schedule_state_backfill_v1';
@@ -899,7 +913,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     _cacheGeneration++;
     _refreshing.clear();
     _fullCaching.clear();
-    notifyListeners();
+    _notifySourceChanged(null);
   }
 
   /// Changes only after [clearAllCache] commits. UI cache-first pages use this
@@ -1036,7 +1050,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       _db.execute('ROLLBACK');
       rethrow;
     }
-    notifyListeners();
+    _notifySourceChanged(sourceKey);
   }
 
   Future<Res<List<NetworkFavoriteFolder>>> refreshFolders(
@@ -1271,7 +1285,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       _db.execute('ROLLBACK');
       rethrow;
     }
-    notifyListeners();
+    _notifySourceChanged(sourceKey);
   }
 
   CachedFavoritePage? getCachedPage(
@@ -1514,7 +1528,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       rethrow;
     }
     final cached = _getCachedPage(folder, requestToken)!;
-    notifyListeners();
+    _notifySourceChanged(folder.sourceKey);
     return cached;
   }
 
@@ -2115,7 +2129,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         folder.folderId,
       ],
     );
-    notifyListeners();
+    _notifySourceChanged(folder.sourceKey);
   }
 
   bool isFavoriteKnown(String sourceKey, String comicId) {
@@ -2211,7 +2225,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       _db.execute('ROLLBACK');
       rethrow;
     }
-    notifyListeners();
+    _notifySourceChanged(folder.sourceKey);
     return const Res(true);
   }
 
@@ -2228,7 +2242,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     final result = await data.deleteFolder!(folder.folderId);
     if (result.error) return result;
     _deleteFolderCache(folder.sourceKey, folder.folderId);
-    notifyListeners();
+    _notifySourceChanged(folder.sourceKey);
     return const Res(true);
   }
 
@@ -2329,98 +2343,18 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   /// Toggles only the user-controlled hot-window flag. The transaction reads
   /// the latest deadline so repeated taps or two pages toggling at once cannot
   /// append multiple 14-day periods.
-  FavoriteItemWithUpdateInfo? toggleManualHotWindow(
-    String sourceKey,
-    String comicId, {
-    required bool enabled,
-    DateTime? now,
-  }) {
-    final completedAt = now ?? DateTime.now();
-    _db.execute('BEGIN');
-    try {
-      // A cached favorite can legitimately predate comic_check_state. Create
-      // only the comic-level row here, inside the same transaction as the
-      // toggle, so it remains a missing-baseline candidate.
-      _db.execute(
-        '''INSERT OR IGNORE INTO comic_check_state (source_key, comic_id)
-           VALUES (?, ?)''',
-        [sourceKey, comicId],
-      );
-      final rows = _db.select(
-        '''SELECT * FROM comic_check_state
-           WHERE source_key = ? AND comic_id = ? LIMIT 1''',
-        [sourceKey, comicId],
-      );
-      if (rows.isEmpty) {
-        throw StateError('Unable to create comic check state');
-      }
-      final state = rows.first;
-      final existingUntil = _dateTimeFromRow(state['manual_hot_until']);
-      final activeExisting =
-          existingUntil != null && existingUntil.isAfter(completedAt);
-      var manualUntil = existingUntil;
-      if (enabled) {
-        manualUntil = activeExisting
-            ? existingUntil
-            : completedAt.add(kFollowUpdateHotWindow);
-      }
-      final effectiveActivity =
-          _dateTimeFromRow(state['source_activity_at']) ??
-          _dateTimeFromRow(state['baseline_at']);
-      final oldJitter =
-          (state['old_schedule_jitter_applied'] as int? ?? 0) != 0;
-      final autoUntil = _dateTimeFromRow(state['auto_hot_until']);
-      final nextBefore = _dateTimeFromRow(state['next_check_at']);
-      var jitterApplied = oldJitter;
-      DateTime? nextCheck = nextBefore;
-      if (effectiveActivity != null) {
-        final decision = computeNextSchedule(
-          completedAt: completedAt,
-          effectiveActivityAt: effectiveActivity,
-          autoHotUntil: autoUntil,
-          manualHotEnabled: enabled,
-          manualHotUntil: manualUntil,
-          oldScheduleJitterApplied: oldJitter,
-          sourceKey: sourceKey,
-          comicId: comicId,
-        );
-        jitterApplied = decision.appliedOldScheduleJitter;
-        if (!enabled) {
-          nextCheck = decision.nextCheckAt;
-        } else {
-          final hotDeadline = completedAt.add(kFollowUpdateHotInterval);
-          if (nextCheck == null || nextCheck.isAfter(hotDeadline)) {
-            nextCheck = hotDeadline;
-          }
-        }
-      }
-      _db.execute(
-        '''UPDATE comic_check_state
-           SET manual_hot_enabled = ?, manual_hot_until = ?, next_check_at = ?,
-               old_schedule_jitter_applied = ?
-           WHERE source_key = ? AND comic_id = ?''',
-        [
-          enabled ? 1 : 0,
-          manualUntil?.millisecondsSinceEpoch,
-          nextCheck?.millisecondsSinceEpoch,
-          jitterApplied ? 1 : 0,
-          sourceKey,
-          comicId,
-        ],
-      );
-      _db.execute('COMMIT');
-    } catch (_) {
-      _db.execute('ROLLBACK');
-      rethrow;
-    }
-    notifyListeners();
-    final folderIds = getKnownFolderIds(sourceKey, comicId);
-    for (final folderId in folderIds) {
-      final result = getComicUpdateInfo(sourceKey, comicId, folderId);
-      if (result != null) return result;
-    }
-    return null;
-  }
+  ///
+  /// **Removed by 007 (FR-001 / FR-002 / FR-011).**  This was the last
+  /// production writer of the legacy marker store's manual hot-window columns.
+  /// The manual hot window is retired as a user capability — the cloud direction
+  /// replaces per-comic "watch this closely" with one server-side cadence — so
+  /// there is no longer any entry point that could call it, and its columns are
+  /// left in place, permanently at their default "off".
+  ///
+  /// The *columns* (`manual_hot_enabled`, `manual_hot_until`) stay in both
+  /// `comic_check_state` and `schedule_state`: this requirement deletes no data
+  /// (FR-031).  The schedule algorithm still reads them, and they read as
+  /// "disabled" because nothing sets them any more.
 
   int countComicsWithUpdatesInfo(NetworkFavoriteFolderRef folder) {
     final row = _db
@@ -2576,12 +2510,73 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
          WHERE source_key = ? AND comic_id = ?''',
       [sourceKey, comicId],
     );
-    notifyListeners();
+    _notifySourceChanged(sourceKey);
   }
 
   /// Flushes update-check changes that are deliberately batched to avoid a UI
   /// notification for every comic in a follow-updates run.
-  void notifyCacheChanged() => notifyListeners();
+  ///
+  /// Source-agnostic by construction: the caller only says "something settled",
+  /// so every source counts as changed (Contract F1.4).  That is the
+  /// conservative answer, deliberately not a narrow one.
+  void notifyCacheChanged() => _notifySourceChanged(null);
+
+  /// The source keys whose cache changed since the last drain (Contract F1.4).
+  ///
+  /// `null` means **every source** — a whole-cache clear or a source-agnostic
+  /// flush, where no narrower answer exists.  An empty set means "nothing
+  /// changed", which is a different answer from `null` and is what lets the
+  /// follow-up trigger skip a round instead of scanning everything.
+  ///
+  /// Draining is the caller's acknowledgement.  A caller that cannot act on the
+  /// marks yet MUST NOT drain, so that the next trigger still sees them.
+  Set<String>? takeChangedSourceKeys() {
+    if (_everySourceChanged) {
+      _everySourceChanged = false;
+      _changedSourceKeys.clear();
+      return null;
+    }
+    if (_changedSourceKeys.isEmpty) return const <String>{};
+    final drained = Set<String>.of(_changedSourceKeys);
+    _changedSourceKeys.clear();
+    return drained;
+  }
+
+  /// Whether any source's cache changed since the last drain.
+  ///
+  /// A peek, not a drain: the follow-up trigger asks this to decide whether a
+  /// coalesced round is still owed, and only [takeChangedSourceKeys] consumes
+  /// the answer.
+  bool get hasChangedSourceKeys =>
+      _everySourceChanged || _changedSourceKeys.isNotEmpty;
+
+  /// Records which source changed, then notifies (Contract F1.4).
+  ///
+  /// The single write path for every cache mutation: `notifyListeners()` alone
+  /// says *that* something changed, not *what*, and the follow-up consumer needs
+  /// the second half in order to scope a round to the source that changed.
+  void _notifySourceChanged(String? sourceKey) {
+    if (sourceKey == null || sourceKey.isEmpty) {
+      _everySourceChanged = true;
+    } else {
+      _changedSourceKeys.add(sourceKey);
+    }
+    super.notifyListeners();
+  }
+
+  /// A cache change whose source could not be attributed.
+  ///
+  /// Overridden rather than merely inherited so that attribution cannot be
+  /// forgotten: every writer in this class goes through [_notifySourceChanged],
+  /// which records the source first, so a notification arriving *here* is by
+  /// construction one that named no source.  The conservative reading is "every
+  /// source may have changed" — failing **toward** a check, because silently
+  /// skipping a real cache change is the worse error for a follow-up feature.
+  @override
+  void notifyListeners() {
+    _everySourceChanged = true;
+    super.notifyListeners();
+  }
 
   /// Number of cached comics in [folder] that have never been checked at all.
   /// A comic only counts as checked once its detail request succeeded or its
@@ -2693,7 +2688,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       _db.execute('ROLLBACK');
       rethrow;
     }
-    notifyListeners();
+    _notifySourceChanged(sourceKey);
   }
 
   /// Clears the account-scoped favorite caches of one source (Contract F8).
@@ -2756,20 +2751,18 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   /// Read-only and unfiltered: the caller decides which identities are in
   /// scope.  **Nothing is deleted from this table** — it is inside 003's
   /// retirement boundary, and emptying it needs its own storage migration.
+  ///
+  /// 007 narrowed the projection to the three columns the migration still uses
+  /// (FR-009): the retired scheduler columns and the manual hot-window
+  /// preference are no longer read, because the migration no longer carries
+  /// them into the schedule store.
   List<LegacyFollowUpRow> readLegacyFollowUpRows() => [
-    for (final row in _db.select(
-      '''SELECT source_key, comic_id, has_new_update, next_check_at,
-                auto_hot_until, manual_hot_enabled, manual_hot_until
-         FROM comic_check_state''',
-    ))
+    for (final row in _db.select('''SELECT source_key, comic_id, has_new_update
+         FROM comic_check_state'''))
       LegacyFollowUpRow(
         sourceKey: row['source_key'] as String,
         comicId: row['comic_id'] as String,
         hasNewUpdate: (row['has_new_update'] as int? ?? 0) != 0,
-        nextCheckAtMs: row['next_check_at'] as int?,
-        autoHotUntilMs: row['auto_hot_until'] as int?,
-        manualHotEnabled: (row['manual_hot_enabled'] as int? ?? 0) != 0,
-        manualHotUntilMs: row['manual_hot_until'] as int?,
       ),
   ];
 

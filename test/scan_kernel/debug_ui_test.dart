@@ -79,7 +79,11 @@ void main() {
 
     expect(find.text('Raw Scan Result'), findsOneWidget);
     expect(find.text('No persisted scan result'), findsOneWidget);
-    expect(find.text('Follow-up State'), findsOneWidget);
+    // 007 replaced the historical follow-up block with two current-value blocks
+    // (Contract D), so the old title is gone and both new ones are present.
+    expect(find.text('Follow-up State'), findsNothing);
+    expect(find.text('Schedule'), findsOneWidget);
+    expect(find.text('Collection Scope'), findsOneWidget);
   });
 
   testWidgets('the original desktop Debug menu drives a persisted scan', (

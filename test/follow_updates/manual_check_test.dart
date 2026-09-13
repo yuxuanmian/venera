@@ -62,7 +62,9 @@ void main() {
     Set<String> sources = const {'src'},
     Set<String> complete = const {'src'},
     int batchThreshold = 50,
+    bool Function()? enabled,
   }) => FollowUpdateCoordinator(
+    followUpdatesEnabledReader: enabled ?? () => true,
     judgmentService: judgment,
     scanService: scan,
     scheduleService: schedule,
@@ -185,6 +187,7 @@ void main() {
       // the cause.
       observe('src', 'a');
       final coordinator = FollowUpdateCoordinator(
+        followUpdatesEnabledReader: () => true,
         judgmentService: judgment,
         scanService: scan,
         scanRepository: scanItems,
@@ -248,6 +251,46 @@ void main() {
       await coordinator.onProcessStart();
       await coordinator.runRound(FollowUpdateTrigger.manual);
       expect(scan.calls, hasLength(2));
+    });
+  });
+
+  group('the master switch is the only gate (F1.4)', () {
+    test('every trigger is silent while follow-up is off', () async {
+      final coordinator = buildCoordinator(enabled: () => false);
+
+      expect(await coordinator.runRound(FollowUpdateTrigger.startup), isFalse);
+      expect(await coordinator.runRound(FollowUpdateTrigger.manual), isFalse);
+      expect(
+        await coordinator.runRound(FollowUpdateTrigger.cacheChanged),
+        isFalse,
+      );
+      await coordinator.onProcessStart();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        scan.calls,
+        isEmpty,
+        reason:
+            'a round that only discovers there is nothing to do is still a '
+            'round: with the feature off there must be no acquisition call at '
+            'all, and no round state to show',
+      );
+      expect(coordinator.isRunning, isFalse);
+    });
+
+    test('switching it on later still gets the first round', () async {
+      var enabled = false;
+      final coordinator = buildCoordinator(enabled: () => enabled);
+
+      // The process starts while the feature is off: that must not consume the
+      // session boundary, or turning the feature on would silently do nothing
+      // until the next launch.
+      await coordinator.onProcessStart();
+      expect(scan.calls, isEmpty);
+
+      enabled = true;
+      await coordinator.onProcessStart();
+      expect(scan.calls, hasLength(1));
     });
   });
 
@@ -447,6 +490,7 @@ void main() {
         ),
       );
       final coordinator = FollowUpdateCoordinator(
+        followUpdatesEnabledReader: () => true,
         judgmentService: judgment,
         scanService: service,
         scanRepository: scanRepository,
@@ -550,6 +594,7 @@ void main() {
         );
         final localScan = _RecordingScanService();
         final coordinator = FollowUpdateCoordinator(
+          followUpdatesEnabledReader: () => true,
           judgmentService: service,
           scanService: localScan,
           scheduleService: schedule,
@@ -692,6 +737,8 @@ class _RecordingScanService extends ScanDebugService {
   @override
   Future<FullScanSummary> startFullScan({
     Map<String, Set<String>>? dueComicIdsBySource,
+    Set<String>? scopeSourceKeys,
+    String? roundLabel,
   }) async {
     calls.add(dueComicIdsBySource);
     if (hold) {

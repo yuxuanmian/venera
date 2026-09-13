@@ -152,6 +152,22 @@ class ScheduleService {
     return _repository.applyBatch(recomputed);
   }
 
+  /// Reads one identity's stored schedule for **presentation only** (007).
+  ///
+  /// Contract W4/W8 and FR-030: this is a thin, side-effect-free passthrough.
+  /// It MUST NOT trigger a scan, a judgment or a recompute; it MUST NOT write
+  /// anything; it MUST NOT create a row to satisfy a caller.  A `null` result
+  /// means "this comic has no check record yet" and is a normal state.
+  ///
+  /// The one production caller is the details page indicator, which asks
+  /// whether the automatic hot window is still open.  Keeping the read here
+  /// rather than in the page is what stops the page from re-deriving schedule
+  /// rules (Contract W3).
+  Future<ScheduleState?> readIdentity(String sourceKey, String comicId) async {
+    await _repository.ensureOpen();
+    return _repository.readByIdentity(sourceKey, comicId);
+  }
+
   /// The identities of one source whose recorded schedule says "due".
   ///
   /// Answers only the two conditions the schedule store can answer alone

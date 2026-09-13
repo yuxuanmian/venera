@@ -8,7 +8,12 @@ import 'models.dart';
 enum ScanLeaseCloseReason { completed, controlCanceled, deadline }
 
 class ScanCallLease {
-  ScanCallLease({required this.guard, Duration? timeout, this.onClosed}) {
+  ScanCallLease({
+    required this.guard,
+    this.logLabel,
+    Duration? timeout,
+    this.onClosed,
+  }) {
     if (timeout != null) {
       _timer = Timer(
         timeout,
@@ -18,6 +23,17 @@ class ScanCallLease {
   }
 
   final ScanExecutionGuard guard;
+
+  /// This call's log identity: `sourceKey` plus a short name hint or page
+  /// ordinal (007 Contract L4), or null when the caller has none.
+  ///
+  /// The lease is the natural carrier because it is already "this one call" —
+  /// the executor creates it, the adapter uses it, and the request entry point
+  /// already receives it — so adding the label needed **no call-signature
+  /// change** anywhere.  Null means "no label": the request log keeps its
+  /// original, unprefixed format (L8's backward-compatible half).
+  final String? logLabel;
+
   final void Function(ScanCallLease lease)? onClosed;
   final CancelToken cancelToken = CancelToken();
   final Set<CancelToken> _requests = <CancelToken>{};

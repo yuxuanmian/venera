@@ -121,6 +121,7 @@ void main() {
   /// Without the injection its gate would read a different manager and report
   /// "nothing complete" no matter what the fixture seeded.
   FollowUpdateCoordinator buildCoordinator() => FollowUpdateCoordinator(
+    followUpdatesEnabledReader: () => true,
     judgmentService: JudgmentService(
       repository: InMemoryJudgmentRepository(),
       scanRepository: InMemoryScanItemStore(),
@@ -190,30 +191,27 @@ void main() {
       expect(sourceDeclaresUnreadSignal('never-installed'), isFalse);
     });
 
-    test(
-      'the retired channel alone is NOT a criterion',
-      () {
-        // Contract F8: the criterion MUST NOT depend on whether the retired
-        // observation channel exists.  It is also wrong on its own terms — a
-        // source that declares only `updateCheck` has no account-level signal,
-        // so its update flag comes from the comparison and is account
-        // **independent**.  Cleaning it on an account switch would discard a
-        // legitimate update.
-        final source = buildSource(
-          plainSource,
-          declaresUnread: false,
-          declaresRetiredChannel: true,
-        );
-        expect(
-          source.favoriteData?.updateCheck,
-          isNotNull,
-          reason: 'the fixture must declare the retired channel',
-        );
-        install(source);
+    test('the retired channel alone is NOT a criterion', () {
+      // Contract F8: the criterion MUST NOT depend on whether the retired
+      // observation channel exists.  It is also wrong on its own terms — a
+      // source that declares only `updateCheck` has no account-level signal,
+      // so its update flag comes from the comparison and is account
+      // **independent**.  Cleaning it on an account switch would discard a
+      // legitimate update.
+      final source = buildSource(
+        plainSource,
+        declaresUnread: false,
+        declaresRetiredChannel: true,
+      );
+      expect(
+        source.favoriteData?.updateCheck,
+        isNotNull,
+        reason: 'the fixture must declare the retired channel',
+      );
+      install(source);
 
-        expect(sourceDeclaresUnreadSignal(plainSource), isFalse);
-      },
-    );
+      expect(sourceDeclaresUnreadSignal(plainSource), isFalse);
+    });
 
     test(
       'the criterion does not depend on the retired observation channel',

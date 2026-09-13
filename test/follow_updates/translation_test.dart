@@ -58,6 +58,46 @@ void main() {
       'Bypass the follow-up gate (debug)',
       'Shows the list even when the cache is incomplete.',
     ],
+    // 007 Contract W — the read-only "recently updated" indicator.  Its tooltip
+    // is the only place the exact deadline is available to the reader (W5), so a
+    // missing translation would silently hide the explanation in one locale.
+    'indicator (007)': [
+      'Recently updated',
+      'No recent update',
+      'Auto hot window until @time',
+      'Recently changed at @time',
+    ],
+    // 007 Contract D — the two in-place Debug blocks.  The defaults are part of
+    // the contract (D4: a default MUST be distinguishable from a real value and
+    // MUST NOT use an action verb), so they are translated like any other label.
+    'debug blocks (007)': [
+      'Schedule',
+      'Activity Anchor',
+      'Auto Hot Window',
+      'Auto Hot Until',
+      'Schedule Jitter Applied',
+      'Collection Scope',
+      'Scan Capability',
+      'Scan Preferred Method',
+      'Scan Capability Invalid',
+      'Invalid scan capability',
+      'Scope Type',
+      'Scope Key',
+      'Scope Started',
+      'Scope Finished',
+      'Scope Items',
+      'Scope Failure',
+      'No check record',
+      'No scan record',
+      'No scope record',
+      'Not computed yet',
+      'Active',
+      'Inactive',
+      'Not finished',
+      'Schedule State Unreadable',
+      'Scan State Unreadable',
+      'No scan capability',
+    ],
   };
 
   late Map<String, dynamic> translations;
@@ -114,6 +154,30 @@ void main() {
     expect(onlyInZhCn, isEmpty, reason: 'present in zh_CN but not zh_TW');
   });
 
+  /// The retired manual hot-window wording MUST stay in the asset.
+  ///
+  /// 007 removed the switch, so nothing renders these strings any more.  Their
+  /// keys are kept deliberately: `follow_update_hot_window_widget_test.dart`
+  /// asserts they are **not** rendered, and a reverse guard can only work while
+  /// the key it guards still exists.  Deleting them would turn "the wording is
+  /// gone" into "the key is gone", which passes for the wrong reason.
+  test('retired manual hot-window keys survive for the reverse guards', () {
+    const retired = <String>[
+      'Enable 14-day hot window',
+      'Disable 14-day hot window',
+    ];
+    for (final locale in const ['zh_CN', 'zh_TW']) {
+      final table = translations[locale] as Map<String, dynamic>;
+      for (final key in retired) {
+        expect(
+          table.containsKey(key),
+          isTrue,
+          reason: '"$key" must stay in $locale as the reverse guard anchor',
+        );
+      }
+    }
+  });
+
   test('the two locales do not simply repeat one another', () {
     // A placeholder-filled key whose translations are identical often means the
     // zh_TW entry was copy-pasted from zh_CN, which is a real defect for
@@ -123,12 +187,17 @@ void main() {
     // and pre-existing entries whose Simplified and Traditional forms happen to
     // be written identically.  `No updates found` and `Updates` are in the
     // last group — they predate this feature and are not this feature's to
-    // reword.
+    // reword.  The three Debug labels below have no Simplified/Traditional
+    // distinction at all (排期 / 生效中 / 未生效), which is why they read the
+    // same in both locales.
     const legitimatelyIdentical = <String>{
       'Cancel',
       '@done/@total tasks',
       'No updates found',
       'Updates',
+      'Schedule',
+      'Active',
+      'Inactive',
     };
     final identical = <String>[];
     final zhCn = translations['zh_CN'] as Map<String, dynamic>;

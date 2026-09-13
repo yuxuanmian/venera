@@ -266,8 +266,12 @@ void main() {
       );
 
       expect(find.text('Raw Scan Result'), findsOneWidget);
-      expect(find.text('Displayed scan state is historical'), findsOneWidget);
-      expect(find.text('Follow-up State'), findsOneWidget);
+      // 007 (Contract D5) removed the historical disclaimer and the two
+      // historical blocks; the same two positions now show current values.
+      expect(find.text('Displayed scan state is historical'), findsNothing);
+      expect(find.text('Follow-up State'), findsNothing);
+      expect(find.text('Schedule'), findsOneWidget);
+      expect(find.text('Collection Scope'), findsOneWidget);
       expect(find.text('2026-09-10'), findsOneWidget);
     },
   );
