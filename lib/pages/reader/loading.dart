@@ -85,29 +85,6 @@ class _ReaderWithLoadingState
       );
     }
   }
-
-  @override
-  @protected
-  bool shouldRetryLoad(String message, int retryCount) {
-    return classifyNotFoundError(message) != NotFoundSignal.strong;
-  }
-
-  @override
-  FutureOr<void> onDataLoaded() {
-    final cache = NetworkFavoriteCacheManager();
-    if (cache.isComicSuspectGone(widget.sourceKey, widget.id)) {
-      cache.clearComicSuspectGoneEverywhere(widget.sourceKey, widget.id);
-    }
-  }
-
-  @override
-  void onLoadError(String message) {
-    if (!isNotFoundError(message)) return;
-    final cache = NetworkFavoriteCacheManager();
-    if (cache.isFavoriteKnown(widget.sourceKey, widget.id)) {
-      cache.recordComicNotFoundEverywhere(widget.sourceKey, widget.id);
-    }
-  }
 }
 
 class ReaderProps {

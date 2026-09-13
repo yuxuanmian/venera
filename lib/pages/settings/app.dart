@@ -148,6 +148,13 @@ class _AppSettingsState extends State<AppSettings> {
           },
         ).toSliver(),
         _SettingPartTitle(title: "User".tl, icon: Icons.person_outline),
+        // 007 FR-026: this switch moved here from the removed Favorites settings
+        // page.  The storage key and the behaviour are unchanged — only its home
+        // is — so an existing user's value keeps working.
+        _SwitchSetting(
+          title: "Auto close favorite panel after operation".tl,
+          settingKey: "autoCloseFavoritePanel",
+        ).toSliver(),
         SelectSetting(
           title: "Language".tl,
           settingKey: "language",

@@ -1,0 +1,7 @@
+[
+  {"update":{"updatedAt":"bad","latestChapterId":" chapter-1 "},"sourceUnread":false},
+  {"update":{"chapterCount":0,"recentChapterIds":["a","a","b","c","d","e"]}},
+  {"update":{"updatedAt":"2026-02-29"}},
+  {"update":{"updatedAt":"2026-09-10T12:30:45.123+08:00"}},
+  {"update":{"marker":"legacy","revision":"legacy"},"sourceUnread":false}
+]

@@ -1,18 +1,31 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
-import 'package:venera/foundation/catalog/source_preferences.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_updates.dart';
+import 'package:venera/foundation/follow_updates_service.dart';
 import 'package:venera/foundation/global_state.dart';
-import 'package:venera/foundation/log.dart';
+import 'package:venera/foundation/tracking/judgment_service.dart';
+import 'package:venera/pages/comic_details_page/comic_page.dart';
 import 'package:venera/utils/translations.dart';
 
+/// Debug builds may bypass the pre-condition gate (Contract F2.6).
+///
+/// Kept as a top-level flag so the bypass survives page rebuilds, and gated on
+/// [kDebugMode] so a release build cannot reach the toggle at all.
+bool _debugGateBypass = false;
+
+/// The entry badge.
+///
+/// Reads the **same** source as the list (Contract F3.2): a count that came
+/// from anywhere else could disagree with the list, which is exactly the
+/// "badge says 3, list is empty" failure.
 class FollowUpdatesWidget extends StatefulWidget {
   const FollowUpdatesWidget({super.key});
 
@@ -23,25 +36,80 @@ class FollowUpdatesWidget extends StatefulWidget {
 class _FollowUpdatesWidgetState
     extends AutomaticGlobalState<FollowUpdatesWidget> {
   int _count = 0;
+  int _requestId = 0;
+  StreamSubscription<void>? _judgmentBatches;
 
   bool get _enabled => followUpdatesEnabled;
 
-  void getCount() {
+  /// Reads the count asynchronously, discarding a response whose request is no
+  /// longer current (Contract F7).
+  ///
+  /// The judgment store is asynchronous while the old local cache was not, so
+  /// "call and it is done" no longer holds: two overlapping reads can return
+  /// out of order and leave the older one displayed.
+  ///
+  /// A failed read leaves the badge at zero rather than showing a stale count,
+  /// and the page itself reports the unreadable state explicitly — the badge is
+  /// a decoration, and the page is where "we could not read it" belongs.
+  ///
+  /// The count applies the **same per-source rule as the list** (Contract F3.2):
+  /// a flagged comic whose source is still caching is not on screen, so counting
+  /// it would produce the "badge says 3, list shows 1" failure this contract
+  /// exists to prevent.
+  Future<void> getCount() async {
     if (!_enabled) {
       _count = 0;
       return;
     }
-    _count = NetworkFavoriteCacheManager().countUpdatesInFolders(
-      getFollowUpdateFolders(),
-    );
+    final requestId = ++_requestId;
+    try {
+      await judgmentService.repository.ensureOpen();
+      final snapshot = await judgmentService.repository.readSnapshot();
+      if (!mounted || requestId != _requestId) return;
+      final sources = followUpdateCoordinator
+          .evaluateGate()
+          .satisfiedSourceKeys;
+      setState(() {
+        _count = snapshot.values
+            .where(
+              (state) =>
+                  state.hasNewUpdate && sources.contains(state.sourceKey),
+            )
+            .length;
+      });
+    } catch (_) {
+      if (!mounted || requestId != _requestId) return;
+      setState(() => _count = 0);
+    }
   }
 
-  void updateCount() => setState(getCount);
+  void updateCount() => unawaited(getCount());
 
   @override
   void initState() {
     super.initState();
-    getCount();
+    updateCount();
+    followUpdateCoordinator.progress.addListener(_onProgress);
+    // FR-009: the UI side consumes the judgment batch event.  The count can
+    // only change when judgment commits, so this is the precise moment to
+    // re-read; the per-task progress frames are for the bar, not for the count.
+    _judgmentBatches = judgmentService.events.listen((_) => updateCount());
+  }
+
+  @override
+  void dispose() {
+    followUpdateCoordinator.progress.removeListener(_onProgress);
+    unawaited(_judgmentBatches?.cancel());
+    super.dispose();
+  }
+
+  /// Re-reads the count only when a round (or a cache run) has ended.
+  ///
+  /// Nothing the badge shows can change in between, and a read per task would
+  /// scan the whole judgment table per task.
+  void _onProgress() {
+    if (!mounted) return;
+    if (followUpdateCoordinator.currentProgress.isRoundEnd) updateCount();
   }
 
   @override
@@ -74,30 +142,14 @@ class _FollowUpdatesWidgetState
                 ),
               ).paddingHorizontal(16),
               if (!_enabled)
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 2,
-                  ),
-                  margin: const EdgeInsets.only(bottom: 16, left: 16),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(8),
-                    color: Theme.of(context).colorScheme.surfaceContainerHigh,
-                  ),
-                  child: Text('Follow updates disabled'.tl, style: ts.s16),
+                _chip(
+                  context,
+                  Text('Follow updates disabled'.tl, style: ts.s16),
                 ),
-              if (_enabled && _count > 0) ...[
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 2,
-                  ),
-                  margin: const EdgeInsets.only(bottom: 16, left: 16),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(8),
-                    color: Theme.of(context).colorScheme.primaryContainer,
-                  ),
-                  child: Row(
+              if (_enabled && _count > 0)
+                _chip(
+                  context,
+                  Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Icon(
@@ -117,14 +169,27 @@ class _FollowUpdatesWidgetState
                       ),
                     ],
                   ),
+                  highlight: true,
                 ),
-              ],
             ],
           ),
         ),
       ),
     );
   }
+
+  Widget _chip(BuildContext context, Widget child, {bool highlight = false}) =>
+      Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+        margin: const EdgeInsets.only(bottom: 16, left: 16),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(8),
+          color: highlight
+              ? Theme.of(context).colorScheme.primaryContainer
+              : Theme.of(context).colorScheme.surfaceContainerHigh,
+        ),
+        child: child,
+      );
 
   @override
   Object? get key => 'FollowUpdatesWidget';
@@ -134,78 +199,185 @@ class FollowUpdatesPage extends StatefulWidget {
   const FollowUpdatesPage({super.key});
 
   @override
-  State<FollowUpdatesPage> createState() => _FollowUpdatesPageState();
+  State<FollowUpdatesPage> createState() => FollowUpdatesPageState();
 }
 
-class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
+/// Public so [updateFollowUpdatesUI] can reach it through [GlobalState].
+class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
+  /// The single update list (Contract F3.1).
   List<FavoriteItemWithUpdateInfo> updatedComics = [];
-  List<FavoriteItemWithUpdateInfo> allComics = [];
-  int _allComicsPage = 0;
-  int _allComicsTotal = 0;
-  int _allComicsRequestId = 0;
-  bool _allComicsHasMore = false;
-  bool _allComicsLoading = false;
-  bool _allComicsExpanded = false;
-  bool _allComicsLoadedOnce = false;
-  List<FavoriteItemWithUpdateInfo> suspectComics = [];
-  bool _suspectComicsExpanded = true;
+
+  bool _loading = true;
+  bool _unreadable = false;
+  int _requestId = 0;
+  StreamSubscription<void>? _judgmentBatches;
 
   bool get _enabled => followUpdatesEnabled;
 
-  bool get _baselineIncomplete {
-    if (!_enabled) return false;
-    return hasPendingFollowUpdateWork(
-      mode: FollowUpdateMode.missing,
-      folders: getFollowUpdateFolders(),
-    );
+  /// The gate, read from configuration (Contract F2).
+  ///
+  /// The coordinator's own criterion set is used, so the gate judges exactly the
+  /// sources a round would scan, and the coordinator's cache reader, so the
+  /// completeness answer comes from the same store.
+  FollowUpdateGate get gate => followUpdateCoordinator.evaluateGate();
+
+  bool get _gateBypassed => kDebugMode && _debugGateBypass;
+
+  /// The source whose account-switch clear explains an unsatisfied gate.
+  ///
+  /// Read once per build from the process-lifetime marker the cache manager
+  /// sets, so the page can attribute the empty cache to an account change
+  /// (FR-034) rather than presenting it as "never cached".
+  String? get _accountSwitchSourceKey =>
+      NetworkFavoriteCacheManager.accountSwitchClearedSourceKey;
+
+  bool get _showList => !_enabled || _gateBypassed || gate.isSatisfied;
+
+  /// The entries the gate currently allows on screen (F2.3, revised).
+  ///
+  /// Per source: a source's entries are shown only once **that source's** own
+  /// cache is complete, because a partial cache would render a partial answer
+  /// as if it were the whole one.  Applied at build time rather than when the
+  /// snapshot is read, so a source that finishes caching appears as soon as the
+  /// next frame arrives instead of waiting for another store read.
+  ///
+  /// The debug bypass (F2.6) is exactly the switch that removes this rule, so it
+  /// returns everything.
+  List<FavoriteItemWithUpdateInfo> get visibleComics {
+    if (_gateBypassed) return updatedComics;
+    final sources = gate.satisfiedSourceKeys;
+    return updatedComics
+        .where((comic) => sources.contains(comic.sourceKeyValue))
+        .toList();
   }
 
   @override
   void initState() {
     super.initState();
-    updateComics();
+    unawaited(updateComics());
+    followUpdateCoordinator.progress.addListener(_onProgress);
+    // FR-009: the judgment batch event is consumed by the UI side as well as
+    // by the schedule.  It is the signal that actually corresponds to content
+    // changing, so it — rather than the per-task progress frames — decides when
+    // the list is re-read.
+    _judgmentBatches = judgmentService.events.listen((_) {
+      unawaited(updateComics());
+    });
+  }
+
+  @override
+  void dispose() {
+    followUpdateCoordinator.progress.removeListener(_onProgress);
+    unawaited(_judgmentBatches?.cancel());
+    super.dispose();
+  }
+
+  /// Repaints the bar on every frame; re-reads the list only at a boundary.
+  ///
+  /// The bar has to move as each task settles (F5.4), while a read is a join of
+  /// the whole judgment table with the favorite cache: reading per task would
+  /// make the page's cost grow with the number of comics.
+  void _onProgress() {
+    if (!mounted) return;
+    if (followUpdateCoordinator.currentProgress.isRoundEnd) {
+      unawaited(updateComics());
+      return;
+    }
+    setState(() {});
+  }
+
+  /// Reads the visible update set and joins it to the presentation cache.
+  ///
+  /// Asynchronous, with a sequencing guard: the page is refreshed from progress
+  /// and cache events as well as from the first build, and an older response
+  /// arriving late must not overwrite a newer one.
+  Future<void> updateComics() async {
+    if (!mounted) return;
+    final requestId = ++_requestId;
+    if (!_enabled) {
+      setState(() {
+        updatedComics = [];
+        _loading = false;
+        _unreadable = false;
+      });
+      return;
+    }
+    try {
+      await judgmentService.repository.ensureOpen();
+      final snapshot = await judgmentService.repository.readSnapshot();
+      if (!mounted || requestId != _requestId) return;
+      setState(() {
+        updatedComics = _resolvePresentation(
+          snapshot.values
+              .where((state) => state.hasNewUpdate)
+              .map((state) => (state.sourceKey, state.comicId))
+              .toList(),
+        );
+        _loading = false;
+        _unreadable = false;
+      });
+    } catch (_) {
+      if (!mounted || requestId != _requestId) return;
+      setState(() {
+        updatedComics = [];
+        _loading = false;
+        _unreadable = true;
+      });
+    }
+  }
+
+  /// Joins each flagged identity to its cached favorite entry.
+  ///
+  /// The judgment store deliberately carries no title or cover; those live in
+  /// the favorite cache.  Contract F3.3 requires every listed entry to render,
+  /// so this returns only identities the cache can describe — which is
+  /// precisely why the gate exists: the cache is guaranteed complete for a
+  /// criterion source before the list is shown at all.
+  List<FavoriteItemWithUpdateInfo> _resolvePresentation(
+    List<(String, String)> identities,
+  ) {
+    if (identities.isEmpty) return const [];
+    final cache = NetworkFavoriteCacheManager();
+    final result = <FavoriteItemWithUpdateInfo>[];
+    try {
+      final foldersBySource = <String, List<NetworkFavoriteFolderRef>>{};
+      for (final folder in cache.getAllCachedFolders()) {
+        foldersBySource.putIfAbsent(folder.sourceKey, () => []).add(folder);
+      }
+      for (final (sourceKey, comicId) in identities) {
+        for (final folder in foldersBySource[sourceKey] ?? const []) {
+          final item = cache.getComicUpdateInfo(
+            sourceKey,
+            comicId,
+            folder.folderId,
+          );
+          if (item != null) {
+            result.add(item);
+            break;
+          }
+        }
+      }
+    } catch (_) {
+      return const [];
+    }
+    result.sort((a, b) => a.name.compareTo(b.name));
+    return result;
   }
 
   @override
   Widget build(BuildContext context) {
-    final baselineIncomplete = _baselineIncomplete;
     return Scaffold(
       body: SmoothCustomScrollView(
         slivers: [
           SliverAppbar(
             title: Text('Follow Updates'.tl),
             actions: [
-              ValueListenableBuilder<bool>(
-                valueListenable: FollowUpdatesService.taskRunning,
-                builder: (context, running, _) {
-                  final show = _enabled && (running || baselineIncomplete);
-                  return show
-                      ? IconButton(
-                          tooltip: 'Update check progress'.tl,
-                          onPressed: showBaselineProgress,
-                          icon: ValueListenableBuilder<BaselineStatus?>(
-                            valueListenable:
-                                FollowUpdatesService.baselineStatus,
-                            builder: (context, status, _) {
-                              final runningNow =
-                                  status?.isRunning == true ||
-                                  (status == null &&
-                                      FollowUpdatesService.taskRunning.value);
-                              return runningNow
-                                  ? const SizedBox(
-                                      width: 20,
-                                      height: 20,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : const Icon(Icons.sync_problem);
-                            },
-                          ),
-                        )
-                      : const SizedBox.shrink();
-                },
-              ),
+              if (_enabled)
+                IconButton(
+                  tooltip: 'Update check progress'.tl,
+                  onPressed: showBaselineProgress,
+                  icon: const Icon(Icons.pause_circle_outline),
+                ),
               if (_enabled)
                 PopupMenuButton<String>(
                   tooltip: 'more'.tl,
@@ -230,16 +402,8 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
           if (!_enabled)
             buildDisabled(context)
           else ...[
-            ValueListenableBuilder<bool>(
-              valueListenable: FollowUpdatesService.taskRunning,
-              builder: (context, running, _) => running || baselineIncomplete
-                  ? buildBaselineInProgress(context)
-                  : const SliverToBoxAdapter(child: SizedBox.shrink()),
-            ),
-            const SliverPadding(padding: EdgeInsets.only(top: 8)),
-            buildUpdatedComics(),
-            buildSuspectComics(),
-            buildAllComics(),
+            buildProgressArea(context),
+            if (!_showList) buildGateNotice(context) else buildUpdatedComics(),
           ],
         ],
       ),
@@ -270,112 +434,132 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
     ),
   );
 
-  Widget buildBaselineInProgress(BuildContext context) {
+  /// The gate's presentation (Contract F2.3/F2.4).
+  ///
+  /// Shows an explanation and an entry point to the full cache, and **no list
+  /// in any form** — not a partial one and not a placeholder one.  A partial
+  /// list would look like a complete answer, and the whole reason the gate
+  /// exists is that the presentation data is not complete yet.
+  Widget buildGateNotice(BuildContext context) {
+    final currentGate = gate;
+    final noSources = !currentGate.hasSources;
+    return SliverFillRemaining(
+      hasScrollBody: false,
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                noSources ? Icons.inbox_outlined : Icons.downloading,
+                size: 48,
+                color: Theme.of(context).colorScheme.outline,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                noSources
+                    ? 'No source can be followed'.tl
+                    : 'Favorites are not fully cached yet'.tl,
+                style: ts.s18,
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                noSources
+                    ? 'Enable and sign in to at least one source that supports scanning.'
+                          .tl
+                    : 'Follow-up results need a complete favorite cache for every tracked source.'
+                          .tl,
+                style: ts.s14,
+                textAlign: TextAlign.center,
+              ),
+              if (!noSources) ...[
+                const SizedBox(height: 8),
+                Text(
+                  '@c sources still pending'.tlParams({
+                    'c': currentGate.pendingSourceKeys.length,
+                  }),
+                  style: ts.s12,
+                ),
+                if (_accountSwitchSourceKey != null) ...[
+                  const SizedBox(height: 8),
+                  // FR-034: the user must be told the results are missing
+                  // *because the account changed*, not because something broke.
+                  Text('Account switched'.tl, style: ts.s14),
+                  Text(
+                    'Follow-up needs a complete favorite cache again after '
+                            'switching accounts.'
+                        .tl,
+                    style: ts.s12,
+                  ),
+                ],
+                const SizedBox(height: 16),
+                FilledButton.icon(
+                  onPressed: startFullCache,
+                  icon: const Icon(Icons.cloud_download),
+                  label: Text('Cache favorites completely'.tl),
+                ),
+              ],
+              if (kDebugMode) ...[
+                const SizedBox(height: 24),
+                SwitchListTile(
+                  value: _debugGateBypass,
+                  onChanged: (value) =>
+                      setState(() => _debugGateBypass = value),
+                  title: Text('Bypass the follow-up gate (debug)'.tl),
+                  subtitle: Text(
+                    'Shows the list even when the cache is incomplete.'.tl,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The in-progress state of a full cache, or of a round (Contract F2.3).
+  Widget buildProgressArea(BuildContext context) {
+    final caching = followUpdateCoordinator.isCachingFavorites;
+    final running = followUpdateCoordinator.isRunning;
+    if (!running && !caching) return buildPostCacheTransition(context);
+    final progress = followUpdateCoordinator.currentProgress;
     return SliverToBoxAdapter(
       child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
-          border: Border.all(
-            color: Theme.of(context).colorScheme.outlineVariant,
-            width: 0.6,
-          ),
+          color: Theme.of(context).colorScheme.surfaceContainerHigh,
           borderRadius: BorderRadius.circular(8),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            ListTile(
-              leading: const Icon(Icons.sync),
-              title: Text('Checking updates'.tl),
-            ),
-            ValueListenableBuilder<BaselineStatus?>(
-              valueListenable: FollowUpdatesService.baselineStatus,
-              builder: (context, status, _) {
-                final cache = NetworkFavoriteCacheManager();
-                final folders = getFollowUpdateFolders();
-                // While a scan runs, show the queue's own numbers (final total
-                // from the first frame, monotonic completion); when idle, fall
-                // back to the database gap counts.
-                final running = status?.isRunning == true;
-                // A task is active but has not published its queue yet (folder
-                // summaries still refreshing, queue being built). Database gap
-                // counts are meaningless in that window: a fully checked cache
-                // would render a false 100% and then jump backwards when the
-                // scan's real queue numbers arrive. Show an indeterminate
-                // state instead.
-                final starting =
-                    status == null && FollowUpdatesService.taskRunning.value;
-                final total = running
-                    ? (status?.total ?? 0)
-                    : cache.countCachedComicsInFolders(folders);
-                final completed = running
-                    ? (status?.completed ?? 0)
-                    : total - cache.countUncheckedComicsInFolders(folders);
-                final incomplete = !running && total > completed;
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: LinearProgressIndicator(
-                        value: starting || total == 0
-                            ? null
-                            : completed / total,
-                      ),
-                    ),
-                    if (!starting)
-                      Text(
-                        (status?.containsBatchWork == true
-                                ? '@completed / @total scan tasks'
-                                : '@completed / @total checked')
-                            .tlParams({'completed': completed, 'total': total}),
-                        style: ts.s14,
-                      ).paddingHorizontal(16).paddingTop(8),
-                    if (status != null && status.currentComic != null)
-                      Text(
-                        'Checking: @title'.tlParams({
-                          'title': status.currentComic!,
-                        }),
-                        style: ts.s12,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ).paddingHorizontal(16).paddingTop(4),
-                    if (status != null && status.isBatchWork)
-                      Text(
-                        'Scanning list: @title'.tlParams({
-                          'title': status.currentLabel ?? '-',
-                        }),
-                        style: ts.s12,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ).paddingHorizontal(16).paddingTop(4),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            starting || running
-                                ? 'Follow-up scan in progress'.tl
-                                : status != null && status.errors > 0
-                                ? '@count failed, will retry later'.tlParams({
-                                    'count': status.errors,
-                                  })
-                                : 'Some comics not checked, waiting for next scan'
-                                      .tl,
-                            style: ts.s12,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        if (incomplete && !starting)
-                          FilledButton.tonal(
-                            onPressed: FollowUpdatesService.startBaseline,
-                            child: Text('Retry'.tl),
-                          ),
-                      ],
-                    ).paddingHorizontal(16).paddingVertical(8),
-                  ],
-                );
-              },
+            // A full cache is named as such: it is the step that unblocks the
+            // gate, so presenting it as an ordinary update check would leave
+            // the user waiting for a list that is still withheld (F2.3/F2.5).
+            Text(caching ? 'Caching favorites'.tl : 'Checking updates'.tl),
+            const SizedBox(height: 8),
+            // A determinate bar, never an indeterminate spinner: both counts
+            // are known before the work starts (Contract F5.2).
+            LinearProgressIndicator(value: progress.fraction),
+            const SizedBox(height: 4),
+            Text(followUpdateProgressLabel(progress), style: ts.s12),
+            if (caching) ...[
+              const SizedBox(height: 4),
+              Text('Caching is not finished yet'.tl, style: ts.s12),
+            ],
+            const SizedBox(height: 8),
+            // Non-modal: the page stays fully operable while work runs
+            // (Contract F1.3 / FR-005).
+            OutlinedButton.icon(
+              onPressed: caching
+                  ? followUpdateCoordinator.cancelFullCache
+                  : followUpdateCoordinator.cancel,
+              icon: const Icon(Icons.stop),
+              label: Text('Cancel'.tl),
             ),
           ],
         ),
@@ -383,81 +567,201 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
     );
   }
 
-  Widget buildUpdatedComics() => SliverMainAxisGroup(
-    slivers: [
-      SliverToBoxAdapter(
-        child: Container(
-          margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          padding: const EdgeInsets.symmetric(vertical: 4),
-          decoration: BoxDecoration(
-            border: Border(
-              bottom: BorderSide(
-                color: Theme.of(context).colorScheme.outlineVariant,
-                width: 0.6,
-              ),
+  /// The transition once a full cache has finished (Contract F2.3).
+  ///
+  /// The gate has just opened, so the list is available for the first time.  A
+  /// refresh entry point is shown rather than silently swapping the page's
+  /// content: the user pressed "cache completely", so they should be able to see
+  /// that it worked and that the results are now theirs to look at.
+  Widget buildPostCacheTransition(BuildContext context) {
+    if (!followUpdateCoordinator.favoritesJustCached) {
+      return const SliverToBoxAdapter();
+    }
+    return SliverToBoxAdapter(
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.primaryContainer,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.check_circle_outline),
+            const SizedBox(width: 8),
+            Expanded(child: Text('Favorites are fully cached now'.tl)),
+            TextButton(
+              onPressed: () {
+                followUpdateCoordinator.acknowledgeFavoritesCached();
+                unawaited(updateComics());
+              },
+              child: Text('Show updates'.tl),
             ),
-          ),
-          child: Row(
-            children: [
-              const Icon(Icons.update),
-              const SizedBox(width: 8),
-              Text('Updates'.tl, style: ts.s18),
-              const Spacer(),
-              ValueListenableBuilder<bool>(
-                valueListenable: FollowUpdatesService.taskRunning,
-                builder: (context, running, _) {
-                  return IconButton(
-                    tooltip: 'Check Now'.tl,
-                    onPressed: running ? null : startRefresh,
-                    icon: running
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.refresh),
-                  );
-                },
-              ),
-              if (updatedComics.isNotEmpty)
-                IconButton(
-                  tooltip: 'Mark all as read'.tl,
-                  icon: const Icon(Icons.clear_all),
-                  onPressed: markAllAsRead,
-                ),
-            ],
-          ),
+          ],
         ),
       ),
-      if (updatedComics.isNotEmpty)
+    );
+  }
+
+  Widget buildUpdatedComics() {
+    final comics = visibleComics;
+    return SliverMainAxisGroup(
+      slivers: [
         SliverToBoxAdapter(
-          child: Text(
-            'Updates are marked read when you start reading.'.tl,
-          ).paddingHorizontal(16).paddingVertical(4),
-        ),
-      if (updatedComics.isNotEmpty)
-        SliverGridComics(comics: updatedComics)
-      else
-        SliverToBoxAdapter(
-          child: SizedBox(
-            height: math.max(240, MediaQuery.sizeOf(context).height * 0.5),
-            child: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.notifications_none,
-                    size: 40,
-                    color: Theme.of(context).colorScheme.outline,
-                  ),
-                  const SizedBox(height: 8),
-                  Text('No updates found'.tl, style: ts.s16),
-                ],
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(
+                  color: Theme.of(context).colorScheme.outlineVariant,
+                  width: 0.6,
+                ),
               ),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.update),
+                const SizedBox(width: 8),
+                Text('Updates'.tl, style: ts.s18),
+                const Spacer(),
+                if (followUpdateCoordinator.isRunning)
+                  Text('Follow-up scan in progress'.tl, style: ts.s12),
+                IconButton(
+                  tooltip: 'Check Now'.tl,
+                  onPressed: startRefresh,
+                  icon: const Icon(Icons.refresh),
+                ),
+                if (comics.isNotEmpty)
+                  IconButton(
+                    tooltip: 'Mark all as read'.tl,
+                    icon: const Icon(Icons.clear_all),
+                    onPressed: markAllAsRead,
+                  ),
+              ],
             ),
           ),
         ),
-    ],
+        // The partial case (F2.7): results are shown, but not from every
+        // tracked source.  Without this line the list would simply be missing
+        // entries with nothing to explain why — the failure mode the old
+        // all-or-nothing gate avoided by showing nothing at all.
+        if (gate.hasPendingSources)
+          SliverToBoxAdapter(
+            child: Row(
+              children: [
+                Icon(
+                  Icons.info_outline,
+                  size: 14,
+                  color: Theme.of(context).colorScheme.outline,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    '@c sources are not fully cached yet, so they are not followed'
+                        .tlParams({'c': gate.pendingSourceKeys.length}),
+                    style: ts.s12,
+                  ),
+                ),
+              ],
+            ).paddingHorizontal(16).paddingVertical(4),
+          ),
+        if (comics.isNotEmpty)
+          SliverToBoxAdapter(
+            child: Text(
+              'Updates are marked read when you start reading.'.tl,
+            ).paddingHorizontal(16).paddingVertical(4),
+          ),
+        if (_loading)
+          const SliverToBoxAdapter(
+            child: Padding(
+              padding: EdgeInsets.symmetric(vertical: 48),
+              child: Center(child: CircularProgressIndicator()),
+            ),
+          )
+        else if (_unreadable)
+          SliverToBoxAdapter(child: buildUnreadableNotice(context))
+        else if (comics.isNotEmpty)
+          SliverGridComics(
+            comics: comics,
+            // Entering from the follow-up list counts as read (Contract F4), so
+            // the entry clears the flag on the way through.  The navigation is
+            // still the default one: the clear is a side effect, not a
+            // replacement for opening the comic.
+            onTap: (comic, heroID) => _openFromList(comic, heroID),
+          )
+        else
+          SliverToBoxAdapter(child: buildEmptyState(context)),
+      ],
+    );
+  }
+
+  /// Opens one comic from the list, clearing its flag first (Contract F4).
+  ///
+  /// The clear is awaited before navigating so the list behind the pushed page
+  /// is already correct when the user comes back — no manual refresh, and no
+  /// window in which the comic is both open and still listed.
+  Future<void> _openFromList(Comic comic, int? heroID) async {
+    try {
+      await judgmentService.clearVisibleFlag(comic.sourceKey, comic.id);
+    } catch (_) {
+      // A storage problem must not stop the comic from opening; the flag will
+      // be cleared on the next entry instead.
+    }
+    if (!mounted) return;
+    // Refresh the list and the badge before the push, so returning shows the
+    // comic already gone.
+    await updateComics();
+    updateFollowUpdatesUI();
+    if (!mounted) return;
+    context.to(
+      () => ComicPage(
+        id: comic.id,
+        sourceKey: comic.sourceKey,
+        cover: comic.cover,
+        title: comic.title,
+        heroID: heroID,
+      ),
+    );
+  }
+
+  /// Unreadable is reported, never rendered as an empty list (Contract F3.4).
+  Widget buildUnreadableNotice(BuildContext context) => Container(
+    margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+    padding: const EdgeInsets.all(12),
+    decoration: BoxDecoration(
+      color: Theme.of(context).colorScheme.errorContainer,
+      borderRadius: BorderRadius.circular(8),
+    ),
+    child: Row(
+      children: [
+        const Icon(Icons.error_outline),
+        const SizedBox(width: 8),
+        Expanded(child: Text('Update state could not be read'.tl)),
+        TextButton(
+          onPressed: () => unawaited(updateComics()),
+          child: Text('Retry'.tl),
+        ),
+      ],
+    ),
+  );
+
+  Widget buildEmptyState(BuildContext context) => SizedBox(
+    height: math.max(240, MediaQuery.sizeOf(context).height * 0.5),
+    child: Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.notifications_none,
+            size: 40,
+            color: Theme.of(context).colorScheme.outline,
+          ),
+          const SizedBox(height: 8),
+          Text('No updates found'.tl, style: ts.s16),
+        ],
+      ),
+    ),
   );
 
   void markAllAsRead() {
@@ -466,1009 +770,91 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
       title: 'Mark all as read'.tl,
       content: 'Do you want to mark all as read?'.tl,
       onConfirm: () {
-        final cache = NetworkFavoriteCacheManager();
-        for (final comic in updatedComics) {
-          cache.markReadInAllFolders(comic.sourceKey, comic.id);
-        }
-        updateFollowUpdatesUI();
+        unawaited(_markAllAsReadNow());
       },
     );
   }
 
-  Widget buildSuspectComics() => SliverMainAxisGroup(
-    slivers: [
-      SliverToBoxAdapter(
-        child: InkWell(
-          onTap: () =>
-              setState(() => _suspectComicsExpanded = !_suspectComicsExpanded),
-          child: Container(
-            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            padding: const EdgeInsets.symmetric(vertical: 4),
-            decoration: BoxDecoration(
-              border: Border(
-                bottom: BorderSide(
-                  color: Theme.of(context).colorScheme.outlineVariant,
-                  width: 0.6,
-                ),
-              ),
-            ),
-            child: Row(
-              children: [
-                const Icon(Icons.error_outline),
-                const SizedBox(width: 8),
-                Text('Suspected removed'.tl, style: ts.s18),
-                if (suspectComics.isNotEmpty) ...[
-                  const SizedBox(width: 8),
-                  Text('${suspectComics.length}', style: ts.s14),
-                ],
-                const Spacer(),
-                AnimatedRotation(
-                  turns: _suspectComicsExpanded ? 0.5 : 0,
-                  duration: const Duration(milliseconds: 200),
-                  child: const Icon(Icons.expand_more),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-      if (_suspectComicsExpanded) ...[
-        SliverGridComics(
-          comics: suspectComics,
-          badgeBuilder: (_) => 'Suspected removed'.tl,
-          dimmedBuilder: (_) => true,
-        ),
-      ],
-    ],
-  );
-
-  Widget buildAllComics() => SliverMainAxisGroup(
-    slivers: [
-      SliverToBoxAdapter(
-        child: InkWell(
-          onTap: _toggleAllComics,
-          child: Container(
-            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            padding: const EdgeInsets.symmetric(vertical: 4),
-            decoration: BoxDecoration(
-              border: Border(
-                bottom: BorderSide(
-                  color: Theme.of(context).colorScheme.outlineVariant,
-                  width: 0.6,
-                ),
-              ),
-            ),
-            child: Row(
-              children: [
-                const Icon(Icons.list),
-                const SizedBox(width: 8),
-                Text('All Comics'.tl, style: ts.s18),
-                const Spacer(),
-                AnimatedRotation(
-                  turns: _allComicsExpanded ? 0.5 : 0,
-                  duration: const Duration(milliseconds: 200),
-                  child: const Icon(Icons.expand_more),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-      if (_allComicsExpanded) ...[
-        SliverGridComics(
-          comics: allComics,
-          badgeBuilder: (comic) =>
-              comic is FavoriteItemWithUpdateInfo && comic.isSuspectGone
-              ? 'Suspected removed'.tl
-              : null,
-          dimmedBuilder: (comic) =>
-              comic is FavoriteItemWithUpdateInfo && comic.isSuspectGone,
-          onLastItemBuild: _loadMoreAllComics,
-        ),
-        if (_allComicsHasMore)
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 16),
-              child: Center(
-                child: _allComicsLoading
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const SizedBox.shrink(),
-              ),
-            ),
-          ),
-        if (_allComicsLoadedOnce && allComics.isEmpty)
-          SliverToBoxAdapter(
-            child: Text(
-              'No cached favorites found'.tl,
-            ).paddingHorizontal(16).paddingVertical(8),
-          ),
-      ],
-    ],
-  );
-
-  void _toggleAllComics() {
-    setState(() => _allComicsExpanded = !_allComicsExpanded);
-    if (_allComicsExpanded && !_allComicsLoadedOnce) {
-      _loadAllComics();
+  Future<void> _markAllAsReadNow() async {
+    // Only what the user can actually see: marking a hidden source's entries
+    // read would silently discard flags they were never shown (F2.3, revised).
+    // One single-row clear per entry; never a whole-table rewrite (Contract E6).
+    for (final comic in List.of(visibleComics)) {
+      await judgmentService.clearVisibleFlag(comic.sourceKey, comic.id);
     }
+    await updateComics();
+    updateFollowUpdatesUI();
   }
 
   void enable() {
     appdata.settings['followUpdatesEnabled'] = true;
     appdata.saveData();
     updateFollowUpdatesUI();
-    FollowUpdatesService.startBaseline();
+    unawaited(followUpdateCoordinator.onProcessStart());
   }
 
   void disable() {
-    FollowUpdatesService.cancelChecking();
-    FollowUpdatesService.baselineStatus.value = null;
+    followUpdateCoordinator.cancel();
     appdata.settings['followUpdatesEnabled'] = false;
     appdata.settings['followUpdatesFolder'] = null;
     appdata.saveData();
     updateFollowUpdatesUI();
   }
 
+  /// The manual entry point.
+  ///
+  /// Goes through the coordinator's single range rule, so it is a
+  /// schedule-respecting check and **not** a forced full scan (Contract F1).
   void startRefresh() {
-    if (!_enabled || FollowUpdatesService.taskRunning.value) return;
-    context.showMessage(message: 'Refresh started'.tl);
-    unawaited(
-      FollowUpdatesService.runCheckNow().then((_) {
-        if (mounted) updateFollowUpdatesUI();
-      }),
-    );
-  }
-
-  Future<void> showBaselineProgress() async {
     if (!_enabled) return;
-    await showDialog(
-      context: App.rootContext,
-      builder: (context) => ContentDialog(
-        title: 'Update check progress'.tl,
-        content: ValueListenableBuilder<BaselineStatus?>(
-          valueListenable: FollowUpdatesService.baselineStatus,
-          builder: (context, status, _) {
-            final cache = NetworkFavoriteCacheManager();
-            final folders = getFollowUpdateFolders();
-            // While a scan runs, show the queue's own numbers (final total
-            // from the first frame, monotonic completion); when idle, fall
-            // back to the database gap counts.
-            final running = status?.isRunning == true;
-            // A task is active but has not published its queue yet (folder
-            // summaries still refreshing, queue being built). Database gap
-            // counts are meaningless in that window: a fully checked cache
-            // would render a false 100% and then jump backwards when the
-            // scan's real queue numbers arrive. Show an indeterminate
-            // state instead.
-            final starting =
-                status == null && FollowUpdatesService.taskRunning.value;
-            final total = running
-                ? (status?.total ?? 0)
-                : cache.countCachedComicsInFolders(folders);
-            final completed = running
-                ? (status?.completed ?? 0)
-                : total - cache.countUncheckedComicsInFolders(folders);
-            final incomplete = !running && total > completed;
-            return Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  LinearProgressIndicator(
-                    value: starting || total == 0 ? null : completed / total,
-                  ),
-                  if (!starting)
-                    Text(
-                      (status?.containsBatchWork == true
-                              ? '@completed / @total scan tasks'
-                              : '@completed / @total checked')
-                          .tlParams({'completed': completed, 'total': total}),
-                      style: ts.s16,
-                    ).paddingTop(12),
-                  if (status != null && status.currentComic != null)
-                    Text(
-                      'Checking: @title'.tlParams({
-                        'title': status.currentComic!,
-                      }),
-                      style: ts.s14,
-                    ).paddingTop(8),
-                  if (status != null && status.isBatchWork)
-                    Text(
-                      'Scanning list: @title'.tlParams({
-                        'title': status.currentLabel ?? '-',
-                      }),
-                      style: ts.s14,
-                    ).paddingTop(8),
-                  if (status != null && status.errors > 0)
-                    Text(
-                      '@count failed'.tlParams({'count': status.errors}),
-                      style: ts.s14,
-                    ).paddingTop(8),
-                  Text(
-                    starting || running
-                        ? 'Follow-up scan in progress'.tl
-                        : incomplete
-                        ? 'Some comics not checked, waiting for next scan'.tl
-                        : 'All checks complete'.tl,
-                    style: ts.s14,
-                  ).paddingTop(12),
-                ],
-              ),
-            );
-          },
-        ),
-        actions: [
-          ValueListenableBuilder<BaselineStatus?>(
-            valueListenable: FollowUpdatesService.baselineStatus,
-            builder: (context, status, _) {
-              final cache = NetworkFavoriteCacheManager();
-              final folders = getFollowUpdateFolders();
-              final total = cache.countCachedComicsInFolders(folders);
-              final completed =
-                  total - cache.countUncheckedComicsInFolders(folders);
-              final running = status?.isRunning == true;
-              final starting =
-                  status == null && FollowUpdatesService.taskRunning.value;
-              final incomplete = !starting && !running && total > completed;
-              return Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (incomplete)
-                    FilledButton.tonal(
-                      onPressed: FollowUpdatesService.startBaseline,
-                      child: Text('Retry'.tl),
-                    ),
-                  if (incomplete) const SizedBox(width: 8),
-                  FilledButton(onPressed: context.pop, child: Text('Close'.tl)),
-                ],
-              );
-            },
-          ),
-        ],
-      ),
-    );
+    unawaited(followUpdateCoordinator.runRound(FollowUpdateTrigger.manual));
   }
 
-  void updateComics() {
-    setState(() {
-      final cache = NetworkFavoriteCacheManager();
-      if (!_enabled) {
-        updatedComics = [];
-        allComics = [];
-        suspectComics = [];
-        _allComicsPage = 0;
-        _allComicsTotal = 0;
-        _allComicsHasMore = false;
-        _allComicsLoading = false;
-        _allComicsExpanded = false;
-        _allComicsLoadedOnce = false;
-        _allComicsRequestId++;
-        return;
-      }
-      updatedComics = cache.getUpdatedComicsInFolders(getFollowUpdateFolders());
-      suspectComics = cache.getSuspectGoneComicsInFolders(
-        getFollowUpdateFolders(),
-      );
-      allComics = [];
-      _allComicsPage = 0;
-      _allComicsTotal = 0;
-      _allComicsHasMore = false;
-      _allComicsLoading = false;
-      _allComicsLoadedOnce = false;
-      _allComicsRequestId++;
-    });
-    if (_enabled && _allComicsExpanded) {
-      _loadAllComics();
+  /// Starts (or reports) the full favorite cache, which is what unblocks the
+  /// gate (Contract F2.5: cache first, then check).
+  void startFullCache() {
+    final coordinator = followUpdateCoordinator;
+    if (coordinator.startFullFavoriteCache()) {
+      context.showMessage(message: 'Caching favorites'.tl);
+    } else {
+      context.showMessage(message: 'A check is already in progress'.tl);
     }
   }
 
-  Future<void> _loadAllComics() async {
-    if (!_enabled || !_allComicsExpanded || _allComicsLoading) return;
-    if (!_allComicsLoadedOnce) {
-      setState(() {
-        _allComicsTotal = NetworkFavoriteCacheManager()
-            .countComicsWithUpdatesInfoInFolders(getFollowUpdateFolders());
-        _allComicsHasMore = _allComicsTotal > 0;
-        _allComicsLoadedOnce = true;
-      });
-      if (!_allComicsHasMore) return;
-    } else if (!_allComicsHasMore) {
+  /// Reports the current round's progress rather than starting anything.
+  void showBaselineProgress() {
+    if (!_enabled) return;
+    final progress = followUpdateCoordinator.currentProgress;
+    if (!followUpdateCoordinator.isRunning) {
+      context.showMessage(message: 'No check is running'.tl);
       return;
     }
-    final requestId = _allComicsRequestId;
-    setState(() => _allComicsLoading = true);
-    final page = NetworkFavoriteCacheManager()
-        .getComicsWithUpdatesInfoPageInFolders(
-          getFollowUpdateFolders(),
-          limit: 50,
-          offset: _allComicsPage * 50,
-        );
-    if (!mounted || requestId != _allComicsRequestId) return;
-    setState(() {
-      allComics.addAll(page);
-      _allComicsPage++;
-      _allComicsLoading = false;
-      _allComicsHasMore = allComics.length < _allComicsTotal;
-    });
-  }
-
-  void _loadMoreAllComics() {
-    if (!_allComicsLoading && _allComicsHasMore) {
-      _loadAllComics();
-    }
+    context.showMessage(message: followUpdateProgressLabel(progress));
   }
 
   @override
   Object? get key => 'FollowUpdatesPage';
 }
 
-class _FollowUpdatesTaskToken implements ScanCancellationToken {
-  _FollowUpdatesTaskToken(this.generation, this._isCurrent);
-
-  final int generation;
-  final bool Function() _isCurrent;
-  bool _canceled = false;
-
-  void cancel() => _canceled = true;
-
-  @override
-  bool get isCanceled => _canceled;
-
-  @override
-  bool get isCurrent => _isCurrent();
-
-  @override
-  bool get canCommit => !isCanceled && isCurrent;
-}
-
-/// Background service for checking cached remote favorites.
-abstract class FollowUpdatesService {
-  static bool _isInitialized = false;
-  static bool _taskRunning = false;
-  static Future<void>? _activeTask;
-  static _FollowUpdatesTaskToken? _activeToken;
-  static int _generation = 0;
-  static void Function()? _cancelCurrent;
-  static Timer? _autoScanTimer;
-  static Timer? _checkTimer;
-  static Timer? _summaryTimer;
-  static Timer? _resumeTimer;
-  static bool _cacheListenerAttached = false;
-  static DateTime? _lastScanCompletedAt;
-  static bool _resumeCheckPending = false;
-  static bool _resumeCheckAfterTask = false;
-  static const _resumeDebounce = Duration(seconds: 2);
-  static const _resumeStaleAfter = Duration(minutes: 10);
-
-  static List<NetworkFavoriteFolderRef> _effectiveLocalFolders(
-    List<NetworkFavoriteFolderRef> folders,
-  ) {
-    return folders
-        .where((folder) => isSourceEnabled(folder.sourceKey))
-        .toList();
-  }
-
-  /// Latest progress of the background baseline run, or null when no baseline
-  /// task is active.
-  static final ValueNotifier<BaselineStatus?> baselineStatus =
-      ValueNotifier<BaselineStatus?>(null);
-
-  static final ValueNotifier<bool> taskRunning = ValueNotifier<bool>(false);
-
-  static void cancelChecking() => _cancelCurrent?.call();
-
-  /// Debug-only: pick 5-10 random cached comics (any state) and refresh their
-  /// check state with a live detail request, ignoring windows and cooldowns.
-  /// Runs inside the task queue so the progress card and the appbar indicator
-  /// light up like any other scan.
-  static Future<void> refreshRandomComics() {
-    return _startTask(
-      (token) async {
-        final cache = NetworkFavoriteCacheManager();
-        final folders = _effectiveLocalFolders(getFollowUpdateFolders());
-        final listFolders = <NetworkFavoriteFolderRef>[];
-        final listSources = <String>{};
-        final comics =
-            <({String sourceKey, String comicId, String folderId})>[];
-        final seen = <String>{};
-        for (final folder in folders) {
-          final source = ComicSource.find(folder.sourceKey);
-          final updateCheck = source?.favoriteData?.updateCheck;
-          if (updateCheck != null) {
-            if (listSources.add(folder.sourceKey)) listFolders.add(folder);
-            continue;
-          }
-          for (final comic in cache.getComicsWithUpdatesInfo(folder)) {
-            final key = '${comic.sourceKey}\u0000${comic.id}';
-            if (seen.add(key)) {
-              comics.add((
-                sourceKey: comic.sourceKey,
-                comicId: comic.id,
-                folderId: folder.folderId,
-              ));
-            }
-          }
-        }
-        if (comics.isEmpty && listFolders.isEmpty) return;
-        final random = math.Random();
-        final count = math.min(5 + random.nextInt(6), comics.length);
-        comics.shuffle(random);
-        var updated = 0;
-        var errors = 0;
-        var completed = 0;
-        final total = count + listFolders.length;
-        if (!token.canCommit) return;
-        baselineStatus.value = BaselineStatus(
-          isRunning: true,
-          total: total,
-          completed: 0,
-          errors: 0,
-          updated: 0,
-          containsBatchWork: listFolders.isNotEmpty,
-        );
-        final expectedEpochs = <String, int>{
-          for (final folder in listFolders)
-            folder.sourceKey: cache.captureFavoriteSessionEpoch(
-              folder.sourceKey,
-            ),
-        };
-        for (final folder in listFolders) {
-          final folderToken = token;
-          if (!folderToken.canCommit) return;
-          if (!cache.tryAcquireFullCacheLock(folder)) {
-            completed++;
-            if (folderToken.canCommit) {
-              baselineStatus.value = BaselineStatus(
-                isRunning: true,
-                total: total,
-                completed: completed,
-                errors: errors,
-                updated: updated,
-                isBatchWork: true,
-                currentLabel: '${folder.sourceKey}/${folder.folderId}',
-                containsBatchWork: true,
-              );
-            }
-            continue;
-          }
-          final source = ComicSource.find(folder.sourceKey);
-          final data = source?.favoriteData;
-          final updateCheck = data?.updateCheck;
-          final expectedEpoch = expectedEpochs[folder.sourceKey]!;
-          try {
-            if (data == null || updateCheck == null) {
-              errors++;
-            } else {
-              cache.recordFavoriteUpdateScanAttempt(folder);
-              final result = await updateCheck.load(folder.folderId);
-              if (!folderToken.canCommit) return;
-              if (cache.isFavoriteSessionEpochCurrent(
-                folder.sourceKey,
-                expectedEpoch,
-              )) {
-                if (result.error) {
-                  cache.recordFavoriteUpdateScanFailure(folder);
-                  errors++;
-                } else if (cache.isFavoriteSessionEpochCurrent(
-                      folder.sourceKey,
-                      expectedEpoch,
-                    ) &&
-                    folderToken.canCommit) {
-                  final applied = cache.applyCompleteFavoriteUpdateSnapshot(
-                    data,
-                    folder,
-                    result.data,
-                    completedAt: DateTime.now(),
-                  );
-                  updated += applied.updatedComicCount;
-                } else {
-                  // The account changed between the response and commit.
-                }
-              }
-            }
-          } catch (e, s) {
-            if (!folderToken.canCommit) return;
-            if (cache.isFavoriteSessionEpochCurrent(
-              folder.sourceKey,
-              expectedEpoch,
-            )) {
-              Log.error('Follow updates random list refresh', e, s);
-              cache.recordFavoriteUpdateScanFailure(folder);
-              errors++;
-            } else {
-              // Session invalidation is a neutral skip; do not back off.
-            }
-          } finally {
-            cache.releaseFullCacheLock(folder);
-          }
-          completed++;
-          if (folderToken.canCommit) {
-            baselineStatus.value = BaselineStatus(
-              isRunning: true,
-              total: total,
-              completed: completed,
-              errors: errors,
-              updated: updated,
-              isBatchWork: true,
-              currentLabel: '${folder.sourceKey}/${folder.folderId}',
-              containsBatchWork: true,
-            );
-          }
-        }
-        for (final item in comics.take(count)) {
-          final itemToken = token;
-          if (!itemToken.canCommit) return;
-          final fresh = cache.getComicUpdateInfo(
-            item.sourceKey,
-            item.comicId,
-            item.folderId,
-          );
-          if (fresh != null) {
-            final result = await updateComic(
-              fresh,
-              NetworkFavoriteFolderRef(
-                sourceKey: item.sourceKey,
-                folderId: item.folderId,
-              ),
-              cache: cache,
-              cancellationToken: itemToken,
-            );
-            if (!itemToken.canCommit) return;
-            if (result.errorMessage != null) {
-              errors++;
-            } else {
-              updated++;
-            }
-          }
-          completed++;
-          if (itemToken.canCommit) {
-            baselineStatus.value = BaselineStatus(
-              isRunning: true,
-              total: total,
-              completed: completed,
-              errors: errors,
-              updated: updated,
-              currentComic: fresh?.title,
-              containsBatchWork: listFolders.isNotEmpty,
-            );
-          }
-        }
-        if (!token.canCommit) return;
-        baselineStatus.value = null;
-        Log.info(
-          'Follow updates',
-          'Random refresh: $updated ok, $errors failed',
-        );
-      },
-      cancelExisting: true,
-      waitForCancelled: false,
-    );
-  }
-
-  static Future<void> _startTask(
-    Future<void> Function(ScanCancellationToken token) task, {
-    required bool cancelExisting,
-    bool waitForCancelled = true,
-  }) async {
-    if (_taskRunning) {
-      if (!cancelExisting) return;
-      _cancelCurrent?.call();
-      // The cancelled task may be stuck inside a detail request that only
-      // finishes later; only wait when the caller needs strict serialization.
-      if (waitForCancelled) await _activeTask;
-    }
-    late final _FollowUpdatesTaskToken token;
-    token = _FollowUpdatesTaskToken(
-      ++_generation,
-      () => identical(_activeToken, token),
-    );
-    _activeToken = token;
-    _taskRunning = true;
-    taskRunning.value = true;
-    final current = task(token);
-    _activeTask = current;
-    // Clearing the status here (instead of inside the cancelled task) keeps a
-    // replacement task's fresh status from being wiped by a late frame of the
-    // cancelled one.
-    _cancelCurrent = () {
-      token.cancel();
-      baselineStatus.value = null;
-    };
-    var completedSuccessfully = false;
-    try {
-      await current;
-      completedSuccessfully = true;
-    } catch (e, s) {
-      Log.error('Follow updates task', e, s);
-    } finally {
-      if (identical(_activeTask, current)) {
-        final canRecordCompletion = completedSuccessfully && token.canCommit;
-        _activeTask = null;
-        _activeToken = null;
-        _taskRunning = false;
-        taskRunning.value = false;
-        _cancelCurrent = null;
-        if (canRecordCompletion) _lastScanCompletedAt = DateTime.now();
-        // The cache may have changed while this task was running (for example a
-        // sync batch or folder refresh), so re-check for remaining gaps once the
-        // task has fully finished instead of waiting for a manual Retry.
-        if (!_resumeCheckPending) _scheduleAutoScan();
-        // With the queue idle again, keep cached list metadata fresh (once per
-        // staleness window) without ever delaying the scan itself.
-        _maybeRefreshSummaries();
-        // Rebuild the page so the baseline card and lists reflect the settled
-        // scan state (incomplete gap or fully checked).
-        updateFollowUpdatesUI();
-        if (_resumeCheckPending) _scheduleResumeCheck();
-      }
-    }
-  }
-
-  /// Debounces a background missing-only scan after cache changes.
-  ///
-  /// The scan only fills check gaps and never overrides the regular periodic
-  /// check or manual checks. It is skipped while another task is running or a
-  /// full-cache operation is in progress; in the latter case it retries after
-  /// a short delay so freshly cached folders get scanned right after.
-  static void _scheduleAutoScan() {
-    _autoScanTimer?.cancel();
-    _autoScanTimer = Timer(const Duration(seconds: 2), _tryStartAutoScan);
-  }
-
-  static void _tryStartAutoScan() {
-    if (!_isInitialized) return;
-    if (!followUpdatesEnabled) return;
-    if (_taskRunning) {
-      // A scan is still consuming. Re-check shortly after it ends so cache
-      // changes that arrived mid-run are picked up even if the task itself
-      // did not schedule the follow-up.
-      _autoScanTimer = Timer(const Duration(seconds: 5), _tryStartAutoScan);
-      return;
-    }
-    final cache = NetworkFavoriteCacheManager();
-    final folders = _effectiveLocalFolders(getFollowUpdateFolders());
-    if (folders.any(cache.isFullCacheRunning)) {
-      _autoScanTimer = Timer(const Duration(seconds: 5), _tryStartAutoScan);
-      return;
-    }
-    if (!hasPendingFollowUpdateWork(
-      mode: FollowUpdateMode.missing,
-      folders: folders,
-    )) {
-      return;
-    }
-    unawaited(_startTask(_runMissingOnly, cancelExisting: false));
-  }
-
-  static void startBaseline() {
-    unawaited(
-      _startTask(
-        (token) => _runScanWithStatus(
-          token,
-          mode: FollowUpdateMode.missing,
-          ignoreRetryAfter: true,
-        ),
-        cancelExisting: true,
-      ),
-    );
-  }
-
-  static Future<void> runCheckNow() {
-    return _startTask(
-      (token) => _runScanWithStatus(
-        token,
-        mode: FollowUpdateMode.regular,
-        ignoreRetryAfter: true,
-        forceListSnapshots: true,
-      ),
-      cancelExisting: true,
-    );
-  }
-
-  /// Debug-only: force every cached comic into the queue, ignoring cooldowns,
-  /// the 24h window and the suspected-removed skip.
-  static Future<void> forceScanAll() {
-    return _startTask(
-      (token) => _runScanWithStatus(
-        token,
-        mode: FollowUpdateMode.force,
-        ignoreRetryAfter: true,
-        includeSuspect: true,
-      ),
-      cancelExisting: true,
-    );
-  }
-
-  /// Runs [scanFollowUpdates] and publishes its progress to [baselineStatus].
-  /// The UI stays untouched when the queue is empty (first frame total == 0).
-  /// After the run the status settles to null when every comic was attempted,
-  /// or to a finished-but-incomplete state when unchecked comics remain.
-  static Future<void> _runScanWithStatus(
-    ScanCancellationToken token, {
-    required FollowUpdateMode mode,
-    bool ignoreRetryAfter = false,
-    bool includeSuspect = false,
-    bool forceListSnapshots = false,
-    List<NetworkFavoriteFolderRef>? folders,
-  }) async {
-    final effectiveFolders = _effectiveLocalFolders(
-      folders ?? getFollowUpdateFolders(),
-    );
-    var errors = 0;
-    var updated = 0;
-    var plannedTotal = 0;
-    var completed = 0;
-    try {
-      await for (final progress in scanFollowUpdates(
-        effectiveFolders,
-        mode,
-        cancellationToken: token,
-        ignoreRetryAfter: ignoreRetryAfter,
-        includeSuspect: includeSuspect,
-        forceListSnapshots: forceListSnapshots,
-      )) {
-        // Empty queue: no plan, keep any previous UI state untouched.
-        if (progress.total == 0) continue;
-        plannedTotal = progress.total;
-        completed = progress.current;
-        errors = progress.errors;
-        updated = progress.updated;
-        // Cancellation stops publishing; the status is released by
-        // [_startTask]'s cancel callback, never by a late frame here (it may
-        // belong to a replacement task already).
-        if (!token.canCommit) return;
-        baselineStatus.value = BaselineStatus(
-          isRunning: true,
-          total: progress.total,
-          completed: progress.current,
-          errors: errors,
-          updated: updated,
-          currentComic: progress.comic?.title,
-          isBatchWork: progress.isBatchWork,
-          currentLabel: progress.currentLabel,
-          containsBatchWork: progress.containsBatchWork,
-        );
-      }
-      if (!token.canCommit) return;
-      final remaining = mode == FollowUpdateMode.force
-          ? plannedTotal > 0 && completed < plannedTotal
-          : hasPendingFollowUpdateWork(mode: mode, folders: effectiveFolders);
-      if (remaining) {
-        final last = baselineStatus.value;
-        baselineStatus.value = BaselineStatus(
-          isRunning: false,
-          total: last?.total ?? 0,
-          completed: last?.completed ?? 0,
-          errors: last?.errors ?? errors,
-          updated: last?.updated ?? updated,
-        );
-        Log.warning(
-          'Follow updates',
-          'Scan incomplete: $remaining unchecked, $errors errors',
-        );
-      } else {
-        baselineStatus.value = null;
-      }
-    } catch (e, s) {
-      Log.error('Follow updates scan', e, s);
-      if (!token.isCurrent || token.isCanceled) return;
-      final last = baselineStatus.value;
-      baselineStatus.value = BaselineStatus(
-        isRunning: false,
-        total: last?.total ?? 0,
-        completed: last?.completed ?? 0,
-        errors: last?.errors ?? errors,
-        updated: last?.updated ?? updated,
-      );
-    }
-  }
-
-  /// Fills only the check gaps that are neither checked nor in cooldown.
-  ///
-  /// Runs after cache changes (new sync batches, folder refresh, full-cache
-  /// completion). Cooldowns are respected; manual Retry / Check Now keep their
-  /// force-check semantics.
-  static Future<void> _runMissingOnly(ScanCancellationToken token) async {
-    final folders = _effectiveLocalFolders(getFollowUpdateFolders());
-    if (!token.canCommit ||
-        !hasPendingFollowUpdateWork(
-          mode: FollowUpdateMode.missing,
-          folders: folders,
-        )) {
-      return;
-    }
-    await _runScanWithStatus(token, mode: FollowUpdateMode.missing);
-  }
-
-  static Future<void> _check(ScanCancellationToken token) async {
-    if (!followUpdatesEnabled) return;
-    // While "cache all pages" is running for a folder, its pages churn
-    // constantly; the periodic scan must not fight the full-cache worker
-    // over the same comics.
-    final cache = NetworkFavoriteCacheManager();
-    final folders = _effectiveLocalFolders(
-      getFollowUpdateFolders(),
-    ).where((f) => !cache.isFullCacheRunning(f)).toList();
-    await _runScanWithStatus(
-      token,
-      mode: FollowUpdateMode.regular,
-      folders: folders,
-    );
-  }
-
-  /// Last time a summary-refresh round started, so the refresh can never run
-  /// more often than [NetworkFavoriteCacheManager.backgroundSummaryRefreshAfter]
-  /// even when scan tasks finish in quick succession.
-  static DateTime? _lastSummaryRefreshAt;
-
-  /// Per-source time budget for one summary-refresh round. Generous enough
-  /// to make progress on large folders, short enough to never hog the
-  /// network for long; the sweep stops at a page boundary and the next round
-  /// continues with the stale remainder.
-  static const _summaryRefreshBudget = Duration(seconds: 30);
-
-  /// Refreshes cached favorite-list summaries (titles, authors, tags)
-  /// outside the scan task queue: a slow source must never delay the update
-  /// check or keep the task indicator spinning. Sources run concurrently,
-  /// each capped by its own budget. Skipped while a scan task is active so
-  /// the refresh never stacks list requests on top of a running scan.
-  static Future<void> _refreshSummaries() async {
-    if (!followUpdatesEnabled) return;
-    final enabled = appdata.settings['favorites'];
-    if (enabled is! List) return;
-    final cache = NetworkFavoriteCacheManager();
-    final sources = <String>[];
-    for (final key in enabled.whereType<String>()) {
-      if (_taskRunning) return;
-      final source = ComicSource.find(key);
-      if (source?.favoriteData == null ||
-          source!.favoriteData!.updateCheck != null ||
-          !source.isLogged) {
-        continue;
-      }
-      sources.add(key);
-    }
-    await Future.wait([
-      for (final key in sources)
-        () async {
-          if (_taskRunning) return;
-          final source = ComicSource.find(key);
-          final data = source?.favoriteData;
-          if (data == null) return;
-          try {
-            await cache.refreshCachedSummaries(
-              data,
-              timeBudget: _summaryRefreshBudget,
-            );
-          } catch (e, s) {
-            Log.error('Refresh favorite cache', e, s);
-          }
-        }(),
-    ]);
-  }
-
-  /// Starts one summary-refresh round unless one already started within the
-  /// staleness window; the timestamp is claimed up front so a second trigger
-  /// while the round is running is a no-op.
-  static void _maybeRefreshSummaries() {
-    final now = DateTime.now();
-    final last = _lastSummaryRefreshAt;
-    if (last != null &&
-        now.difference(last) <
-            NetworkFavoriteCacheManager.backgroundSummaryRefreshAfter) {
-      return;
-    }
-    _lastSummaryRefreshAt = now;
-    unawaited(_refreshSummaries());
-  }
-
-  static void _scheduleResumeCheck() {
-    _resumeTimer?.cancel();
-    _resumeTimer = Timer(_resumeDebounce, _tryStartResumeCheck);
-  }
-
-  static void _tryStartResumeCheck() {
-    _resumeTimer = null;
-    if (!_resumeCheckPending) return;
-    if (!_isInitialized || !followUpdatesEnabled) {
-      _resumeCheckPending = false;
-      _resumeCheckAfterTask = false;
-      return;
-    }
-    if (_taskRunning) {
-      // Keep the request pending. The current task's finalizer schedules this
-      // callback again, so resume never silently loses its regular scan.
-      _resumeCheckAfterTask = true;
-      return;
-    }
-    final forceRegularCheck = _resumeCheckAfterTask;
-    _resumeCheckPending = false;
-    _resumeCheckAfterTask = false;
-    final last = _lastScanCompletedAt;
-    if (!forceRegularCheck &&
-        last != null &&
-        DateTime.now().difference(last) < _resumeStaleAfter) {
-      return;
-    }
-    unawaited(_startTask(_check, cancelExisting: false));
-  }
-
-  /// Schedules one debounced regular check after the app returns to the
-  /// foreground. A recent completed scan is already fresh enough, while a
-  /// resume observed during another task is retained until that task settles.
-  static void onAppResumed() {
-    if (!_isInitialized || !followUpdatesEnabled) return;
-    _resumeCheckPending = true;
-    _resumeCheckAfterTask = _resumeCheckAfterTask || _taskRunning;
-    _scheduleResumeCheck();
-  }
-
-  static void initChecker() {
-    if (_isInitialized) return;
-    _isInitialized = true;
-    if (appdata.settings['followUpdatesFolder'] != null &&
-        appdata.settings['followUpdatesEnabled'] != true) {
-      appdata.settings['followUpdatesEnabled'] = true;
-      appdata.settings['followUpdatesFolder'] = null;
-      appdata.saveData();
-    }
-    unawaited(_startTask(_check, cancelExisting: false));
-    NetworkFavoriteCacheManager().addListener(_onCacheChanged);
-    _cacheListenerAttached = true;
-    _checkTimer = Timer.periodic(
-      const Duration(minutes: 10),
-      (_) => unawaited(_startTask(_check, cancelExisting: false)),
-    );
-    // Metadata stays fresh independently of the scan schedule; the first
-    // round runs after the startup scan task settles (see _startTask).
-    _summaryTimer = Timer.periodic(
-      NetworkFavoriteCacheManager.backgroundSummaryRefreshAfter,
-      (_) => _maybeRefreshSummaries(),
-    );
-  }
-
-  /// Releases the service-owned timers/listener and invalidates the active
-  /// generation. The in-flight network request is not forcefully interrupted
-  /// here, but its result can no longer commit after disposal.
-  static void disposeChecker() {
-    _checkTimer?.cancel();
-    _checkTimer = null;
-    _summaryTimer?.cancel();
-    _summaryTimer = null;
-    _resumeTimer?.cancel();
-    _resumeTimer = null;
-    _autoScanTimer?.cancel();
-    _autoScanTimer = null;
-    _cancelCurrent?.call();
-    _activeToken?.cancel();
-    _activeToken = null;
-    _activeTask = null;
-    _cancelCurrent = null;
-    _taskRunning = false;
-    taskRunning.value = false;
-    baselineStatus.value = null;
-    _resumeCheckPending = false;
-    _resumeCheckAfterTask = false;
-    if (_cacheListenerAttached) {
-      NetworkFavoriteCacheManager().removeListener(_onCacheChanged);
-      _cacheListenerAttached = false;
-    }
-    _isInitialized = false;
-    _lastScanCompletedAt = null;
-  }
-
-  static void _onCacheChanged() {
-    updateFollowUpdatesUI();
-    _scheduleAutoScan();
-  }
-}
+/// The one wording for "how far along the round is".
+///
+/// Shared by the progress area and the app-bar entry so the two cannot
+/// disagree, and so that "0 / 0" cannot be shown for a round that has not
+/// finished finding out what it has to do: before target enumeration completes
+/// there is no denominator, only an unknown one, and reporting that as zero is
+/// what made a running check look stuck at zero (Contract F5.4).
+String followUpdateProgressLabel(FollowUpdateProgress progress) =>
+    progress.discovered > 0 || progress.isComplete
+    ? '@done/@total tasks'.tlParams({
+        'done': progress.finished,
+        'total': progress.discovered,
+      })
+    : 'Finding what to check'.tl;
 
 void updateFollowUpdatesUI() {
   GlobalState.findOrNull<_FollowUpdatesWidgetState>()?.updateCount();
-  GlobalState.findOrNull<_FollowUpdatesPageState>()?.updateComics();
+  // `updateComics` is asynchronous now, so `unawaited` makes the intent
+  // explicit rather than leaving a discarded future for the linter to find.
+  final page = GlobalState.findOrNull<FollowUpdatesPageState>();
+  if (page != null) unawaited(page.updateComics());
 }

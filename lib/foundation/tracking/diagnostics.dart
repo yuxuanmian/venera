@@ -90,7 +90,6 @@ class TrackingDiagnostics {
         rawObservation: {
           'origin': observation.origin.name,
           'sourceUnread': observation.sourceUnread,
-          'marker': observation.marker,
           'metadata': observation.metadata,
         },
         normalization: {
@@ -232,7 +231,6 @@ class ComparisonDecisionView {
 
   Map<String, dynamic> toJson(TrackingBaseline? previous) => {
     'previousState': previous?.state?.toJson(),
-    'previousMarker': previous?.marker,
     'currentValue': currentValue,
     'selectedEvidence': selectedEvidence,
     'result': contentChange,

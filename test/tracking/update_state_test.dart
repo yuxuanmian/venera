@@ -42,9 +42,7 @@ void main() {
       final currentState = _state(current['state']);
       final decision = compareTrackingEvidence(
         previousState: previousState,
-        previousMarker: previous['marker'] as String?,
         currentState: currentState,
-        currentMarker: current['marker'] as String?,
       );
       final expected = Map<String, dynamic>.from(testCase['expected'] as Map);
       expect(
@@ -57,7 +55,7 @@ void main() {
         expected['selectedEvidence'],
         reason: testCase['id'],
       );
-      expect(decision.reason, expected['reason'], reason: testCase['id']);
+      expect(decision.reason.value, expected['reason'], reason: testCase['id']);
     }
   });
 }

@@ -37,7 +37,7 @@ class _Transaction implements TrackingApplyTransaction {
 }
 
 TrackingObservation _observation(bool? sourceUnread) => TrackingObservation(
-  origin: TrackingObservationOrigin.localOptimized,
+  origin: TrackingObservationOrigin.localDetail,
   revision: 'local',
   artifact: const TrackingArtifactIdentity(
     sourceKey: 'source',

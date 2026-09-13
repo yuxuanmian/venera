@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'tracking_time_guard.dart';
+
 const Duration kFollowUpdateHotWindow = Duration(days: 14);
 const Duration kFollowUpdateHotInterval = Duration(hours: 12);
 
@@ -189,9 +191,9 @@ DateTime? parseFollowUpdateActivityTime(
       }
     }
     if (parsed == null) return null;
-    final earliest = DateTime(2000);
-    final latest = now.add(const Duration(hours: 24));
-    if (parsed.isBefore(earliest) || parsed.isAfter(latest)) return null;
+    // The plausibility window is shared with the judgment engine so the two
+    // cannot drift apart (research R-08).
+    if (!isWithinTimestampWindow(parsed, now)) return null;
     return parsed;
   } on Object {
     // DateTime.fromMillisecondsSinceEpoch and DateTime constructors can throw

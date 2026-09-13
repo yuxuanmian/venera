@@ -62,10 +62,9 @@ TrackingObservation _observation({
   String comicId = 'comic-1',
   UpdateState? state,
   bool? sourceUnread,
-  String? marker,
   Map<String, dynamic>? metadata,
 }) => TrackingObservation(
-  origin: TrackingObservationOrigin.localOptimized,
+  origin: TrackingObservationOrigin.localDetail,
   revision: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
   artifact: const TrackingArtifactIdentity(
     sourceKey: 'test-source',
@@ -76,7 +75,6 @@ TrackingObservation _observation({
   validUntil: DateTime.utc(2026, 9, 2, 9),
   state: state,
   sourceUnread: sourceUnread,
-  marker: marker,
   metadata: metadata,
 );
 
@@ -88,16 +86,12 @@ void main() {
       final service = TrackingApplyService(store);
       final initial = TrackingBaseline(
         state: UpdateState(latestChapterId: 'chapter-1'),
-        marker: 'marker-1',
         hasNewUpdate: false,
       );
       store.values['test-source\u0000comic-1'] = initial;
 
       final changed = service.apply(
-        _observation(
-          state: UpdateState(latestChapterId: 'chapter-2'),
-          marker: 'marker-2',
-        ),
+        _observation(state: UpdateState(latestChapterId: 'chapter-2')),
       );
       expect(changed.decision.contentChange.name, 'changed');
       expect(changed.hasNewUpdate, isTrue);
@@ -107,7 +101,6 @@ void main() {
       final unchanged = service.apply(
         _observation(
           state: UpdateState(latestChapterId: 'chapter-2'),
-          marker: 'marker-other',
           metadata: {'diagnostic': 'changed'},
         ),
       );

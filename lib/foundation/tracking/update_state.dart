@@ -62,7 +62,11 @@ class UpdateState {
         final id = rawId.trim();
         if (id.isEmpty || id.length > 1024 || !seen.add(id)) continue;
         normalized.add(id);
-        if (normalized.length == 10) break;
+        // Authoritative cap: the observation contract's independent
+        // normalization table (specs/004-minimal-scan-kernel/contracts/
+        // observation-v1.md line 28).  The scan side already truncates to 5 in
+        // observation_codec.dart; this layer must match it.
+        if (normalized.length == 5) break;
       }
       if (normalized.isNotEmpty) {
         recentChapterIds = List.unmodifiable(normalized);

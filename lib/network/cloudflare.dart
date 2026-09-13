@@ -72,6 +72,12 @@ class CloudflareInterceptor extends Interceptor {
 
   @override
   void onError(DioException err, ErrorInterceptorHandler handler) async {
+    if (err.requestOptions.extra['veneraScan'] == true) {
+      // A scan records the original HTTP fact.  It never opens the challenge
+      // UI or replaces a 403 with an exception that loses the response.
+      handler.next(err);
+      return;
+    }
     if (err.response?.statusCode == 403) {
       handler.next(_check(err.response!) ?? err);
     } else {
@@ -81,6 +87,10 @@ class CloudflareInterceptor extends Interceptor {
 
   @override
   void onResponse(Response response, ResponseInterceptorHandler handler) {
+    if (response.requestOptions.extra['veneraScan'] == true) {
+      handler.next(response);
+      return;
+    }
     if (response.statusCode == 403) {
       var err = _check(response);
       if (err != null) {

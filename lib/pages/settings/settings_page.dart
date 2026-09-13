@@ -27,7 +27,6 @@ part 'reader.dart';
 part 'explore_settings.dart';
 part 'setting_components.dart';
 part 'appearance.dart';
-part 'local_favorites.dart';
 part 'app.dart';
 part 'about.dart';
 part 'network.dart';
@@ -51,11 +50,18 @@ class _SettingsPageState extends State<SettingsPage> {
 
   bool get enableTwoViews => context.width > 720;
 
+  /// The settings categories, in order.
+  ///
+  /// 007 removed the `Favorites` entry together with its page: two of that
+  /// page's three controls had no consumer left, and one switch did not justify
+  /// a page of its own.  The surviving switch moved to `APP` (see `app.dart`),
+  /// and the list is renumbered so the indices stay contiguous — both parallel
+  /// lists and both switches below MUST be edited together, and the `icons` list
+  /// MUST stay the same length.
   final categories = <String>[
     "Explore",
     "Reading",
     "Appearance",
-    "Favorites",
     "APP",
     "Network",
     "About",
@@ -66,7 +72,6 @@ class _SettingsPageState extends State<SettingsPage> {
     Icons.explore,
     Icons.book,
     Icons.color_lens,
-    Icons.collections_bookmark_rounded,
     Icons.apps,
     Icons.public,
     Icons.info,
@@ -244,11 +249,10 @@ class _SettingsPageState extends State<SettingsPage> {
       0 => const ExploreSettings(),
       1 => const ReaderSettings(),
       2 => const AppearanceSettings(),
-      3 => const FavoriteSettings(),
-      4 => const AppSettings(),
-      5 => const NetworkSettings(),
-      6 => const AboutSettings(),
-      7 => const DebugPage(),
+      3 => const AppSettings(),
+      4 => const NetworkSettings(),
+      5 => const AboutSettings(),
+      6 => const DebugPage(),
       _ => throw UnimplementedError(),
     };
   }
@@ -269,11 +273,10 @@ class _SettingsDetailPage extends StatelessWidget {
       0 => const ExploreSettings(),
       1 => const ReaderSettings(),
       2 => const AppearanceSettings(),
-      3 => const FavoriteSettings(),
-      4 => const AppSettings(),
-      5 => const NetworkSettings(),
-      6 => const AboutSettings(),
-      7 => const DebugPage(),
+      3 => const AppSettings(),
+      4 => const NetworkSettings(),
+      5 => const AboutSettings(),
+      6 => const DebugPage(),
       _ => throw UnimplementedError(),
     };
   }

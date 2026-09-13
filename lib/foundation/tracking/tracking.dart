@@ -1,7 +1,13 @@
 export 'apply_service.dart';
+export 'comparability.dart';
 export 'comparator.dart';
 export 'diagnostics.dart';
-export 'observation.dart';
+export 'judgment.dart';
+export 'judgment_repository.dart';
+export 'judgment_service.dart';
+export 'judgment_state.dart';
 export 'normalizer.dart';
+export 'observation.dart';
 export 'presentation.dart';
+export 'sqlite_judgment_repository.dart';
 export 'update_state.dart';

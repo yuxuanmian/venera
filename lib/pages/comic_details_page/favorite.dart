@@ -200,10 +200,99 @@ class _FavoriteToggleButton extends StatelessWidget {
   }
 }
 
-/// Favorite and manual hot-window actions presented as one split button.
+/// What the details-page indicator needs to know about one comic's schedule.
+///
+/// Deliberately tiny, and deliberately **not** `FavoriteItemWithUpdateInfo`:
+/// the indicator is a read-only projection of the **automatic** hot window
+/// (007 Contract W3), so carrying the retired marker-store type here would keep
+/// that store referenced from this file and would invite the widget to re-derive
+/// schedule rules of its own.
+///
+/// The value is produced by `ScheduleService.readIdentity`, which reads the
+/// stored value and never recomputes it.
+@immutable
+class FavoriteHotWindowIndicator {
+  const FavoriteHotWindowIndicator({required this.autoHotUntil});
+
+  /// Stored automatic hot-window deadline, or null when there is none.
+  ///
+  /// Null means "this comic has not been detected as changed recently".  It is
+  /// a normal value, not a missing one: the schedule store only sets this field
+  /// when a judgment concludes "content changed" (Contract S6.1).
+  final DateTime? autoHotUntil;
+
+  /// Whether the automatic hot window is still open at [now].
+  bool isActiveAt(DateTime now) {
+    final until = autoHotUntil;
+    return until != null && until.isAfter(now);
+  }
+
+  /// When the change was detected: `autoHotUntil − hot window length`.
+  ///
+  /// **Auxiliary information only.**  Contract W5 makes the stored deadline
+  /// authoritative, because a row carrying a deadline written by the one-time
+  /// migration does not necessarily satisfy this derivation.  Callers MUST
+  /// therefore show [autoHotUntil] as well.  The hot-window length is reused
+  /// from the existing algorithm; no constant is copied and nothing is stored.
+  DateTime? recentlyChangedAt() =>
+      autoHotUntil?.subtract(kFollowUpdateHotWindow);
+}
+
+/// "Recently updated" indicator segment: an icon plus an explanatory tooltip.
+///
+/// Rendered when the split button has no hot-window action (007 FR-003 / W6):
+/// it is **not** an `InkWell`, so it has no tap, no long-press and no semantics
+/// action, and it never enters the keyboard focus order.  It reports state, not
+/// an offer to change it.
+class _FavoriteHotWindowIndicatorSegment extends StatelessWidget {
+  const _FavoriteHotWindowIndicatorSegment({
+    super.key,
+    required this.label,
+    required this.message,
+    required this.icon,
+    required this.color,
+  });
+
+  final String label;
+  final String message;
+  final IconData icon;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      // No `button: true`: a screen reader must report a status, not a control.
+      label: label,
+      child: Tooltip(
+        message: message,
+        child: SizedBox(
+          width: _favoriteHotWindowSegmentWidth,
+          height: 36,
+          child: Center(
+            child: Icon(
+              key: const ValueKey('favorite-hot-window-fire-icon'),
+              icon,
+              size: 20,
+              color: color,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Favorite and (optionally) a hot-window action presented as one split button.
 ///
 /// The two segments intentionally use separate [InkWell]s so their pointer,
 /// keyboard, splash, tooltip and semantics behavior cannot cross-trigger.
+///
+/// Since 007 the right segment is a **read-only indicator** in production: the
+/// manual hot window has been retired, so [onToggleHotWindow] is null at every
+/// call site and the segment renders as state only.  The parameter is kept
+/// nullable rather than removed so the read-only shape is the widget's
+/// documented contract, and a null callback is what makes the segment
+/// non-interactive.
 const double _favoriteHotWindowButtonWidth = 128;
 const double _favoriteHotWindowSegmentWidth = 38;
 const double _favoriteHotWindowDividerWidth = 0.8;
@@ -214,35 +303,40 @@ class FavoriteHotWindowActionButton extends StatelessWidget {
     required this.isLoading,
     required this.onFavorite,
     required this.onFavoriteLongPress,
-    required this.info,
-    required this.onToggleHotWindow,
+    required this.indicator,
+    this.onToggleHotWindow,
     this.clock,
   });
 
   final bool isLoading;
   final VoidCallback onFavorite;
   final VoidCallback onFavoriteLongPress;
-  final FavoriteItemWithUpdateInfo info;
-  final VoidCallback onToggleHotWindow;
+  final FavoriteHotWindowIndicator indicator;
+
+  /// The hot-window action, or null for a read-only indicator.
+  ///
+  /// 007 retired the manual hot window, so nothing passes a callback any more;
+  /// a test asserts that no call site does.
+  final VoidCallback? onToggleHotWindow;
   final DateTime Function()? clock;
 
   @override
   Widget build(BuildContext context) {
     final now = clock?.call() ?? DateTime.now();
-    final manual = info.isManualHotActiveAt(now);
-    final active = info.isHotActiveAt(now);
-    final hotLabel = manual
-        ? 'Disable 14-day hot window'.tl
-        : 'Enable 14-day hot window'.tl;
+    final active = indicator.isActiveAt(now);
+    final hotLabel = active ? 'Recently updated'.tl : 'No recent update'.tl;
+    final hotMessage = _hotWindowMessage(active);
     final fireBase = context.isDarkMode
         ? Colors.deepOrange.shade300
         : Colors.deepOrange.shade700;
     final fireColor = active
-        ? manual
-              ? fireBase
-              : fireBase.withValues(alpha: 0.68)
+        ? fireBase.withValues(alpha: 0.68)
         : context.colorScheme.onSurfaceVariant;
+    final fireIcon = active
+        ? Icons.local_fire_department
+        : Icons.local_fire_department_outlined;
     final favoriteLabel = 'Favorite'.tl;
+    final onToggle = onToggleHotWindow;
     return SizedBox(
       height: 48,
       child: Container(
@@ -323,38 +417,45 @@ class FavoriteHotWindowActionButton extends StatelessWidget {
                     ),
                   ),
                 ),
-                Semantics(
-                  button: true,
-                  enabled: !isLoading,
-                  label: hotLabel,
-                  child: Tooltip(
-                    message: hotLabel,
-                    child: InkWell(
-                      key: const ValueKey('favorite-hot-window-hot-segment'),
-                      onTap: isLoading ? null : onToggleHotWindow,
-                      borderRadius: const BorderRadius.only(
-                        topRight: Radius.circular(18),
-                        bottomRight: Radius.circular(18),
-                      ),
-                      child: SizedBox(
-                        width: _favoriteHotWindowSegmentWidth,
-                        height: 36,
-                        child: Center(
-                          child: Icon(
-                            key: const ValueKey(
-                              'favorite-hot-window-fire-icon',
+                if (onToggle == null)
+                  _FavoriteHotWindowIndicatorSegment(
+                    key: const ValueKey('favorite-hot-window-hot-segment'),
+                    label: hotLabel,
+                    message: hotMessage,
+                    icon: fireIcon,
+                    color: fireColor,
+                  )
+                else
+                  Semantics(
+                    button: true,
+                    enabled: !isLoading,
+                    label: hotLabel,
+                    child: Tooltip(
+                      message: hotMessage,
+                      child: InkWell(
+                        key: const ValueKey('favorite-hot-window-hot-segment'),
+                        onTap: isLoading ? null : onToggle,
+                        borderRadius: const BorderRadius.only(
+                          topRight: Radius.circular(18),
+                          bottomRight: Radius.circular(18),
+                        ),
+                        child: SizedBox(
+                          width: _favoriteHotWindowSegmentWidth,
+                          height: 36,
+                          child: Center(
+                            child: Icon(
+                              key: const ValueKey(
+                                'favorite-hot-window-fire-icon',
+                              ),
+                              fireIcon,
+                              size: 20,
+                              color: fireColor,
                             ),
-                            manual
-                                ? Icons.local_fire_department
-                                : Icons.local_fire_department_outlined,
-                            size: 20,
-                            color: fireColor,
                           ),
                         ),
                       ),
                     ),
                   ),
-                ),
               ],
             ),
           ),
@@ -362,4 +463,27 @@ class FavoriteHotWindowActionButton extends StatelessWidget {
       ),
     );
   }
+
+  /// The explanatory text behind the indicator (Contract W5).
+  ///
+  /// The stored deadline is always shown: it is the one value that is accurate
+  /// by construction.  The derived "changed at" moment is additional context
+  /// only.  Neither string contains an action verb — this is not a switch.
+  String _hotWindowMessage(bool active) {
+    final until = indicator.autoHotUntil;
+    if (!active || until == null) return 'No recent update'.tl;
+    final changedAt = indicator.recentlyChangedAt();
+    final lines = <String>[
+      'Recently updated'.tl,
+      if (changedAt != null)
+        'Recently changed at @time'.tlParams({
+          'time': _indicatorTime(changedAt),
+        }),
+      'Auto hot window until @time'.tlParams({'time': _indicatorTime(until)}),
+    ];
+    return lines.join('\n');
+  }
+
+  static String _indicatorTime(DateTime time) =>
+      time.toLocal().toString().substring(0, 19);
 }

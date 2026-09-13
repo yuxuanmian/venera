@@ -1,6 +1,11 @@
 import 'update_state.dart';
 
-enum TrackingObservationOrigin { localDetail, localOptimized, cloud }
+/// Where a tracking observation came from.
+///
+/// Values with no remaining producer were retired alongside `marker` in
+/// feature 005; only the local detail path still constructs observations in
+/// this build.
+enum TrackingObservationOrigin { localDetail }
 
 class TrackingArtifactIdentity {
   const TrackingArtifactIdentity({
@@ -52,7 +57,6 @@ class TrackingObservation {
     required this.validUntil,
     this.state,
     this.sourceUnread,
-    this.marker,
     this.metadata,
     this.normalizationDrops = const [],
     this.compatibilityNotes = const [],
@@ -66,8 +70,10 @@ class TrackingObservation {
   final DateTime validUntil;
   final UpdateState? state;
   final bool? sourceUnread;
-  final String? marker;
+
+  /// Extra source-provided diagnostics.  Carried verbatim, never compared.
   final Map<String, dynamic>? metadata;
+
   final List<Map<String, String>> normalizationDrops;
   final List<String> compatibilityNotes;
 
@@ -76,10 +82,14 @@ class TrackingObservation {
   String get sourceKey => artifact.sourceKey;
 }
 
+/// The comparison watermark kept by the retired tracking path.
+///
+/// The live judgment domain stores its fact in `judgment_state` instead
+/// (see `judgment_state.dart`); this type survives only for the dormant
+/// local tracking service and its tests.
 class TrackingBaseline {
   const TrackingBaseline({
     this.state,
-    this.marker,
     this.metadata,
     this.hasNewUpdate = false,
     this.baselineAt,
@@ -87,7 +97,6 @@ class TrackingBaseline {
   });
 
   final UpdateState? state;
-  final String? marker;
   final Map<String, dynamic>? metadata;
   final bool hasNewUpdate;
   final DateTime? baselineAt;

@@ -1,0 +1,4 @@
+{
+  "first": {"items": [{"comicId":"book-1","observation":{"update":{"latestChapterId":"chapter-1"},"sourceUnread":false}}],"next":{"phase":"verify","headIds":["book-1"]}},
+  "verify": {"items":[],"next":null}
+}

@@ -33,6 +33,13 @@ abstract mixin class _ComicPageActions {
   /// true while a one-tap favorite toggle is in flight
   bool isFavoriting = false;
 
+  /// Re-reads this comic's schedule record after its favorite state changed.
+  ///
+  /// Implemented by the details page state.  Only a favorite can show the
+  /// indicator, so a comic that was just favorited needs one read to find out
+  /// whether it already has a check record (007 Contract W2).
+  void reloadScheduleIndicator();
+
   void openFavPanel() {
     showSideBar(
       App.rootContext,
@@ -43,6 +50,7 @@ abstract mixin class _ComicPageActions {
         onFavorite: (network) {
           isFavorite = network;
           update();
+          reloadScheduleIndicator();
         },
       ),
     );
@@ -87,6 +95,7 @@ abstract mixin class _ComicPageActions {
           isFavorite = false;
         }
         update();
+        reloadScheduleIndicator();
         return;
       }
       // Adding to a multi-folder source (or ambiguous membership) requires
@@ -109,6 +118,7 @@ abstract mixin class _ComicPageActions {
       isFavorite = !isFavorite;
     }
     update();
+    reloadScheduleIndicator();
   }
 
   void share() {

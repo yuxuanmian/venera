@@ -40,7 +40,20 @@ void main() {
     expect(() => context.requirePublished(), returnsNormally);
     await context.writeData('x', {'n': 3});
     expect(persisted, 1);
+    var revokedCallbacks = 0;
+    final removeListener = context.addRevokeListener(() {
+      revokedCallbacks++;
+    });
+    removeListener();
+    expect(context.revokeListenerCount, 0);
     context.revoke();
+    expect(revokedCallbacks, 0);
+    var immediateCallbacks = 0;
+    final removeImmediate = context.addRevokeListener(() {
+      immediateCallbacks++;
+    });
+    expect(immediateCallbacks, 1);
+    removeImmediate();
     expect(() => context.readData('x'), throwsStateError);
   });
 }

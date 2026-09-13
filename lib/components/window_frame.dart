@@ -4,8 +4,14 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
-import 'package:venera/pages/follow_updates_page.dart';
+import 'package:venera/foundation/follow_update_availability.dart';
+import 'package:venera/foundation/log.dart';
+import 'package:venera/foundation/scan/models.dart';
+import 'package:venera/foundation/scan/failure_sanitizer.dart';
+import 'package:venera/foundation/scan/scan_service.dart';
+import 'package:venera/foundation/tracking/judgment_service.dart';
 import 'package:venera/utils/translations.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -221,11 +227,15 @@ Future<void> showDebugMenu(GlobalKey buttonKey) async {
         value: 'clearFavorites',
         child: Text('Clear Favorites Cache'.tl),
       ),
-      PopupMenuItem(value: 'clearBaselines', child: Text('Clear Baselines'.tl)),
+      PopupMenuItem(
+        value: 'clearJudgmentState',
+        child: Text('Clear All Judgment Data'.tl),
+      ),
       PopupMenuItem(
         value: 'forceScanAll',
         child: Text('Force Scan All Comics'.tl),
       ),
+      PopupMenuItem(value: 'rerunJudgment', child: Text('Rerun Judgment'.tl)),
       PopupMenuItem(
         value: 'refreshRandomComics',
         child: Text('Random Refresh Comics'.tl),
@@ -252,13 +262,18 @@ Future<void> showDebugMenuSheet() async {
           ),
           ListTile(
             leading: const Icon(Icons.delete_outline),
-            title: Text('Clear Baselines'.tl),
-            onTap: () => context.pop('clearBaselines'),
+            title: Text('Clear All Judgment Data'.tl),
+            onTap: () => context.pop('clearJudgmentState'),
           ),
           ListTile(
             leading: const Icon(Icons.playlist_add_check),
             title: Text('Force Scan All Comics'.tl),
             onTap: () => context.pop('forceScanAll'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.rule),
+            title: Text('Rerun Judgment'.tl),
+            onTap: () => context.pop('rerunJudgment'),
           ),
           ListTile(
             leading: const Icon(Icons.shuffle),
@@ -277,24 +292,208 @@ Future<void> showDebugMenuSheet() async {
 void handleDebugMenuSelected(String value) {
   switch (value) {
     case 'clearFavorites':
+      scanService.cancel(ScanControlReason.cacheInvalidated);
       App.favorites.clearAllCache();
-      App.rootContext.showMessage(message: 'Favorites cache cleared'.tl);
+      _debugResult('Favorites cache cleared'.tl);
       break;
-    case 'clearBaselines':
-      FollowUpdatesService.cancelChecking();
-      FollowUpdatesService.baselineStatus.value = null;
-      App.favorites.clearAllBaselines();
-      App.rootContext.showMessage(message: 'Baselines cleared'.tl);
+    case 'clearJudgmentState':
+      unawaited(_clearJudgmentState());
       break;
     case 'forceScanAll':
-      FollowUpdatesService.forceScanAll();
-      App.rootContext.showMessage(message: 'Force scan started'.tl);
+      unawaited(_runDebugFullScan());
+      break;
+    case 'rerunJudgment':
+      unawaited(_rerunJudgment());
       break;
     case 'refreshRandomComics':
-      unawaited(FollowUpdatesService.refreshRandomComics());
-      App.rootContext.showMessage(message: 'Random refresh started'.tl);
+      _debugResult(followUpdateScannerUnavailableMessage.tl);
       break;
   }
+}
+
+/// Reports the result of one Debug entry point.
+///
+/// The transient bubble stays the primary feedback, but it is gone long before
+/// a multi-line scan or judgment summary can be read.  Mirroring the same text
+/// into the persistent log is what makes those summaries reviewable after the
+/// fact, so every Debug entry point reports through here rather than calling
+/// `showMessage` directly.
+void _debugResult(String message) {
+  App.rootContext.showMessage(message: message);
+  Log.info('Debug', message);
+}
+
+Future<void> _runDebugFullScan() async {
+  final service = scanService;
+  if (service.isRunning) {
+    _debugResult('Scan already running'.tl);
+    return;
+  }
+
+  final scanFuture = service.startFullScan();
+  final controller = showLoadingDialog(
+    App.rootContext,
+    message: _scanProgressMessage(service.progress.value),
+    barrierDismissible: false,
+    allowCancel: true,
+    closeOnCancel: false,
+    onCancel: service.cancel,
+  );
+  void onProgress() {
+    controller.setMessage(_scanProgressMessage(service.progress.value));
+  }
+
+  service.progress.addListener(onProgress);
+  try {
+    final summary = await scanFuture;
+    controller.close();
+    _debugResult(_scanSummaryMessage(summary));
+    await _runJudgmentAfterScan(summary);
+  } catch (error) {
+    controller.close();
+    _debugResult('${'Scan failed'.tl}: ${_safeScanError(error)}');
+    // A scan failure is reported on its own; judgment is not run and its
+    // outcome must not be folded into the scan message.
+  } finally {
+    service.progress.removeListener(onProgress);
+  }
+}
+
+/// Runs judgment once after a completed full scan.
+///
+/// This is the only trigger in the normal flow.  Judgment only reads persisted
+/// evidence, so without it the Debug page would stay empty until someone
+/// reran judgment by hand.
+Future<void> _runJudgmentAfterScan(FullScanSummary summary) async {
+  if (summary.disposition != FullScanDisposition.completed) return;
+  try {
+    final judgment = await judgmentService.run();
+    _debugResult(_judgmentSummaryMessage(judgment));
+  } catch (error) {
+    // Judgment failures never mask the scan result: the two are reported
+    // separately.
+    _debugResult('${'Judgment summary'.tl}: ${_safeScanError(error)}');
+  }
+}
+
+/// Contract U4.2: rerun judgment only.
+///
+/// One invocation always does exactly one thing — run judgment once.  It must
+/// never clear state, never issue a source request, and never implicitly chain
+/// a `clear()` in front of the run: FR-034 forbids that, and a button called
+/// "rerun" must not silently discard every comparison baseline.  "Complete
+/// rerun" is the user-driven two-step combination of
+/// [clearJudgmentState] followed by this entry.
+///
+/// A rule change does not need a special branch here: judgment stamps each row
+/// with the algorithm version that produced it and recomputes rows written by a
+/// different one, so this entry covers that case while still obeying the four
+/// rules above.
+Future<void> _rerunJudgment() async {
+  if (judgmentService.isRunning) {
+    _debugResult('Judgment already running'.tl);
+    return;
+  }
+  try {
+    final summary = await judgmentService.run();
+    _debugResult(_judgmentSummaryMessage(summary));
+  } catch (error) {
+    _debugResult('${'Judgment summary'.tl}: ${_safeScanError(error)}');
+  }
+}
+
+/// Contract U4.1: cancel an in-flight scan first, then clear every judgment row.
+///
+/// Scan evidence survives, which is what makes this a debugging entry point
+/// rather than a reset button: the same evidence can be judged again from
+/// scratch, which is how "build state from zero" is observed.
+///
+/// The entry sits where the retired "Clear Baselines" item used to be. That item
+/// was never wired to anything — it only reported that the retired follow-up
+/// scanner is unavailable — and "baseline" no longer names a live concept, so
+/// the slot now carries the entry that actually does something. Its label also
+/// replaces "Clear Observation Facts", which described the **preserved** side of
+/// the operation and so read as a different, dangerous action (wiping the
+/// evidence) than the one it performed.
+///
+/// What it does **not** touch: scan evidence, the schedule store, the favorites
+/// cache, user preferences (ADR-0016 keeps the schedule out of the judgment
+/// clear on purpose).
+Future<void> _clearJudgmentState() async {
+  try {
+    await judgmentService.clear();
+    _debugResult(
+      '${'Judgment data cleared'.tl} · ${'Scan evidence is kept'.tl}',
+    );
+  } catch (error) {
+    _debugResult('${'Judgment State Unreadable'.tl}: ${_safeScanError(error)}');
+  }
+}
+
+String _judgmentSummaryMessage(JudgmentSummary summary) {
+  if (summary.rejectedAsRunning) return 'Judgment already running'.tl;
+  final details = [
+    'Judgment summary'.tl,
+    '${'Judgment processed'.tl}: ${summary.processed}',
+    '${'Judgment changed'.tl}: ${summary.changed}',
+    '${'Judgment failed items'.tl}: ${summary.failed}',
+    '${'Judgment written rows'.tl}: ${summary.writtenRows}',
+  ];
+  // "No pending observations" is reported honestly rather than as a silent
+  // success (Contract U4.2).
+  if (summary.writtenRows == 0) {
+    details.add('No pending observations, no rows written'.tl);
+  }
+  return details.join(' · ');
+}
+
+String _scanProgressMessage(ScanProgress progress) => [
+  '${'Scan works found'.tl}: ${progress.discoveredWorks}',
+  '${'Scan works active'.tl}: ${progress.activeWorks}',
+  '${'Persisted items'.tl}: ${progress.persistedItems}',
+  '${'Scan works failed'.tl}: ${progress.failedWorks}',
+  if (progress.canceledWorks > 0)
+    '${'Scan works canceled'.tl}: ${progress.canceledWorks}',
+  if (progress.skippedSources.isNotEmpty)
+    '${'Skipped sources'.tl}: ${progress.skippedSources.map(_scanSkipText).join(', ')}',
+].join('\n');
+
+String _scanSummaryMessage(FullScanSummary summary) {
+  final progress = summary.progress;
+  final disposition = switch (summary.disposition) {
+    FullScanDisposition.completed => 'Scan completed'.tl,
+    FullScanDisposition.canceled => 'Scan canceled'.tl,
+    FullScanDisposition.failed => 'Scan failed'.tl,
+    FullScanDisposition.alreadyRunning => 'Scan already running'.tl,
+  };
+  final details = [
+    disposition,
+    '${'Scan works found'.tl}: ${progress.discoveredWorks}',
+    '${'Persisted items'.tl}: ${progress.persistedItems}',
+    '${'Scan works failed'.tl}: ${progress.failedWorks}',
+    '${'Scan works canceled'.tl}: ${progress.canceledWorks}',
+    '${'Skipped sources'.tl}: ${progress.skippedSources.isEmpty ? 0 : progress.skippedSources.map(_scanSkipText).join(', ')}',
+    if (summary.errorMessage != null) summary.errorMessage!,
+  ];
+  return details.join(' · ');
+}
+
+String _scanSkipText(ScanSourceSkip skip) {
+  final reason = switch (skip.reason) {
+    ScanSourceSkipReason.absent => 'Source capability absent'.tl,
+    ScanSourceSkipReason.invalid => 'Source capability invalid'.tl,
+    ScanSourceSkipReason.disabled => 'Source disabled'.tl,
+    ScanSourceSkipReason.notLoggedIn => 'Source not logged in'.tl,
+  };
+  return '${skip.sourceKey} ($reason)';
+}
+
+String _safeScanError(Object error) {
+  final raw = error is ScanStorageException
+      ? error.message
+      : 'Scan operation failed (${error.runtimeType})';
+  return FailureSanitizer.sanitize({'message': raw}).message ??
+      'Scan failed'.tl;
 }
 
 class _WindowButtons extends StatefulWidget {

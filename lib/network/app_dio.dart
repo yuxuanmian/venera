@@ -24,8 +24,35 @@ class ResponseSizeLimitException implements Exception {
 }
 
 class MyLogInterceptor implements Interceptor {
+  final Map<RequestOptions, Stopwatch> _scanTimers =
+      <RequestOptions, Stopwatch>{};
+
+  /// The scan log's identity prefix, or an empty string when there is none.
+  ///
+  /// 007 Contract L4: every scan request line carries "which source, which comic
+  /// / which page".  The value is host-owned metadata written into `extra` by the
+  /// JS engine, never a header, so it is not transmitted (L7).  A request without
+  /// one keeps the original, unprefixed format — the change is additive (L8).
+  static String _scanPrefix(RequestOptions options) {
+    final label = options.extra['veneraScanContext'];
+    if (label is! String || label.isEmpty) return '';
+    return ' $label';
+  }
+
   @override
   void onError(DioException err, ErrorInterceptorHandler handler) {
+    if (err.requestOptions.extra['veneraScan'] == true) {
+      final timer = _scanTimers.remove(err.requestOptions);
+      final elapsed = timer?.elapsedMilliseconds;
+      final status = err.response?.statusCode;
+      Log.error(
+        "Network",
+        "Scan${_scanPrefix(err.requestOptions)} ${err.requestOptions.method} ${status == null ? 'transport-failure' : 'status=$status'}"
+            "${elapsed == null ? '' : ' ${elapsed}ms'} ${err.type.name}",
+      );
+      handler.next(err);
+      return;
+    }
     Log.error(
       "Network",
       "${err.requestOptions.method} ${err.requestOptions.path}\n$err\n${err.response?.data.toString()}",
@@ -91,6 +118,17 @@ class MyLogInterceptor implements Interceptor {
     Response<dynamic> response,
     ResponseInterceptorHandler handler,
   ) {
+    if (response.requestOptions.extra['veneraScan'] == true) {
+      final timer = _scanTimers.remove(response.requestOptions);
+      final elapsed = timer?.elapsedMilliseconds;
+      Log.info(
+        "Network",
+        "Scan${_scanPrefix(response.requestOptions)} ${response.requestOptions.method} status=${response.statusCode ?? 'unknown'}"
+            "${elapsed == null ? '' : ' ${elapsed}ms'}",
+      );
+      handler.next(response);
+      return;
+    }
     if (response.requestOptions.extra["veneraImage"] == true) {
       // See [onRequest]: image requests skip the verbose response log.
       handler.next(response);
@@ -131,6 +169,15 @@ class MyLogInterceptor implements Interceptor {
     options.connectTimeout = const Duration(seconds: 15);
     options.receiveTimeout = const Duration(seconds: 15);
     options.sendTimeout = const Duration(seconds: 15);
+    if (options.extra['veneraScan'] == true) {
+      _scanTimers[options] = Stopwatch()..start();
+      Log.info(
+        "Network",
+        "Scan${_scanPrefix(options)} ${options.method} started",
+      );
+      handler.next(options);
+      return;
+    }
     if (options.extra["veneraImage"] == true) {
       // Comic images are the highest-frequency requests. Logging their
       // headers/data here floods the log file and adds string construction
