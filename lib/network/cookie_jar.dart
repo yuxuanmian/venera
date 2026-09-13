@@ -26,9 +26,7 @@ class CookieJarSql {
   }
 
   void init() {
-    if (_connection != null) {
-      dispose();
-    }
+    closeConnection();
     final connection = sqlite3.open(path);
     _connection = connection;
     try {
@@ -240,7 +238,16 @@ class CookieJarSql {
     ''');
   }
 
-  void dispose() {
+  /// Closes the native connection while keeping this object usable.
+  ///
+  /// Deliberately distinct from [dispose]: `SingleInstanceCookieJar.dispose`
+  /// also clears the static instance, and holders that captured the jar object
+  /// — `AppDio`'s cookie interceptor (`network/app_dio.dart`) and the JS
+  /// engine's `Network` bridge — would then keep using a closed database for
+  /// the rest of the session (`Bad state: cookie database is not initialized`).
+  /// A data import closes the connection only to swap the file underneath it,
+  /// so it must keep the identity and reopen through [init] / [reopen].
+  void closeConnection() {
     final connection = _connection;
     _connection = null;
     if (connection != null) {
@@ -250,6 +257,14 @@ class CookieJarSql {
         Log.error('Network', 'Failed to close cookie database: $error', stack);
       }
     }
+  }
+
+  /// Reopens [path] in place, so every existing holder of this object keeps
+  /// working against the replaced file. See [closeConnection].
+  void reopen() => init();
+
+  void dispose() {
+    closeConnection();
   }
 }
 

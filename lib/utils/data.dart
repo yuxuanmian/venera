@@ -289,7 +289,13 @@ Future<AppDataImportResult> importAppData(
     final replaced = <_OriginalImportFile>[];
     final historyManager = HistoryManager();
     final historyWasOpen = historyManager.hasOpenConnection;
-    final cookieWasOpen = SingleInstanceCookieJar.instance != null;
+    // Captured before the swap: a data import must NOT replace the singleton
+    // with a fresh object. `AppDio` captures the jar in its cookie interceptor
+    // (`network/app_dio.dart`) and the JS engine caches it for the `Network`
+    // bridge, so a replacement would leave those holders pointing at a closed
+    // database (`Bad state: cookie database is not initialized`) — login,
+    // favorites, search and scan would all fail until the app was restarted.
+    final cookieJar = SingleInstanceCookieJar.instance;
     var historyClosed = false;
     var historyReplaced = false;
     var cookieClosed = false;
@@ -311,9 +317,8 @@ Future<AppDataImportResult> importAppData(
         }
       }
       if (staged.any((item) => p.basename(item.target.path) == 'cookie.db')) {
-        final cookie = SingleInstanceCookieJar.instance;
-        if (cookie != null) {
-          cookie.dispose();
+        if (cookieJar != null) {
+          cookieJar.closeConnection();
           cookieClosed = true;
         }
       }
@@ -328,8 +333,8 @@ Future<AppDataImportResult> importAppData(
         await historyManager.init();
       }
       if (cookieClosed) {
-        final cookiePath = FilePath.join(App.dataPath, 'cookie.db');
-        SingleInstanceCookieJar.instance = SingleInstanceCookieJar(cookiePath);
+        // Same object, replaced file: every captured reference keeps working.
+        cookieJar!.reopen();
       }
       if (importedDocument != null) {
         // The document was validated and prepared before any target file was
@@ -360,10 +365,6 @@ Future<AppDataImportResult> importAppData(
       if ((historyClosed || historyReplaced) &&
           historyManager.hasOpenConnection) {
         historyManager.close();
-      }
-      if (cookieClosed) {
-        SingleInstanceCookieJar.instance?.dispose();
-        SingleInstanceCookieJar.instance = null;
       }
       if (userCommit != null && !userCommit.isReleased) {
         try {
@@ -399,16 +400,12 @@ Future<AppDataImportResult> importAppData(
           Log.error('Import Data', 'Failed to reopen history: $error', stack);
         }
       }
-      if (cookieWasOpen && cookieClosed) {
+      if (cookieClosed) {
         try {
-          SingleInstanceCookieJar.instance = SingleInstanceCookieJar(
-            FilePath.join(App.dataPath, 'cookie.db'),
-          );
+          cookieJar!.reopen();
         } catch (error, stack) {
           Log.error('Import Data', 'Failed to reopen cookies: $error', stack);
         }
-      } else if (cookieClosed) {
-        SingleInstanceCookieJar.instance = null;
       }
       rethrow;
     } finally {
