@@ -52,6 +52,80 @@ void main() {
     );
   });
 
+  test('the legacy follow-up migration is gone, not merely unused', () {
+    // The upgrade path is "legacy scan/tracking/schedule state is ignored; the
+    // first successful observation rebaselines".  The migration is **deleted**
+    // rather than left callable, so no later startup path can re-adopt old rows
+    // as the update flag's authority by accident.
+    expect(
+      File('lib/foundation/tracking/follow_up_migration.dart').existsSync(),
+      isFalse,
+    );
+
+    final production = Directory('lib')
+        .listSync(recursive: true)
+        .whereType<File>()
+        .where((file) => file.path.endsWith('.dart'));
+    for (final file in production) {
+      final source = file.readAsStringSync();
+      for (final residue in const [
+        'FollowUpMigration',
+        'LegacyFollowUpRow',
+        'readLegacyFollowUpRows',
+        'follow_up_006_migration',
+      ]) {
+        expect(
+          source,
+          isNot(contains(residue)),
+          reason: '${file.path} still names $residue',
+        );
+      }
+    }
+  });
+
+  test('the scan coordinator and its cancel wiring use the product name', () {
+    expect(
+      File('lib/foundation/scan/scan_debug_service.dart').existsSync(),
+      isFalse,
+    );
+    final production = Directory('lib')
+        .listSync(recursive: true)
+        .whereType<File>()
+        .where((file) => file.path.endsWith('.dart'));
+    for (final file in production) {
+      final source = file.readAsStringSync();
+      for (final residue in const [
+        'ScanDebugService',
+        'scanDebugService',
+        'scan_debug_service',
+      ]) {
+        expect(
+          source,
+          isNot(contains(residue)),
+          reason: '${file.path} still names $residue',
+        );
+      }
+    }
+    final service = _read('lib/foundation/scan/scan_service.dart');
+    expect(service, contains('class ScanService'));
+    expect(service, contains('ScanService scanService = ScanService();'));
+
+    // The production coordinator depends on the product service, not on a
+    // debug-only one.
+    final coordinator = _read('lib/foundation/follow_updates_service.dart');
+    expect(coordinator, contains('ScanService'));
+    expect(coordinator, isNot(contains('ScanDebugService')));
+
+    // Judgment stops an in-flight acquisition through the same singleton, which
+    // is what makes a user-initiated clear actually stop the scan.
+    final judgment = _read('lib/foundation/tracking/judgment_service.dart');
+    expect(judgment, contains("import '../scan/scan_service.dart';"));
+    expect(
+      judgment,
+      contains('scanService.cancel(ScanControlReason.userCanceled)'),
+    );
+  });
+
   test('retired source-declaration fields leave no app-side residue', () {
     final favorites = _read('lib/foundation/favorites.dart');
     final comicSourceFavorites = _read(

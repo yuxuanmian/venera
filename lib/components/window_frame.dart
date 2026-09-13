@@ -10,7 +10,7 @@ import 'package:venera/foundation/follow_update_availability.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/scan/models.dart';
 import 'package:venera/foundation/scan/failure_sanitizer.dart';
-import 'package:venera/foundation/scan/scan_debug_service.dart';
+import 'package:venera/foundation/scan/scan_service.dart';
 import 'package:venera/foundation/tracking/judgment_service.dart';
 import 'package:venera/utils/translations.dart';
 import 'package:window_manager/window_manager.dart';
@@ -292,7 +292,7 @@ Future<void> showDebugMenuSheet() async {
 void handleDebugMenuSelected(String value) {
   switch (value) {
     case 'clearFavorites':
-      scanDebugService.cancel(ScanControlReason.cacheInvalidated);
+      scanService.cancel(ScanControlReason.cacheInvalidated);
       App.favorites.clearAllCache();
       _debugResult('Favorites cache cleared'.tl);
       break;
@@ -324,7 +324,7 @@ void _debugResult(String message) {
 }
 
 Future<void> _runDebugFullScan() async {
-  final service = scanDebugService;
+  final service = scanService;
   if (service.isRunning) {
     _debugResult('Scan already running'.tl);
     return;

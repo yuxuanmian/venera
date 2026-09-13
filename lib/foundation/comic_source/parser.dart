@@ -1525,7 +1525,7 @@ class ComicSourceParser {
     }
 
     // The list-level `favorites.updateCheck` channel was retired on the
-    // application side by feature 005 (FR-044/FR-045): the debug full scan and
+    // application side by feature 005 (FR-044/FR-045): the full scan and
     // the judgment domain replaced it, and `FavoriteUpdateHint` is no longer
     // produced from a favorites-list snapshot.
     //

@@ -4,8 +4,8 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../scan/models.dart';
-import '../scan/scan_debug_service.dart';
 import '../scan/scan_result_repository.dart';
+import '../scan/scan_service.dart';
 import '../scan/sqlite_scan_result_repository.dart';
 import 'judgment.dart';
 import 'judgment_event.dart';
@@ -372,5 +372,5 @@ class _PendingJudgment {
 /// being initialised.
 JudgmentService judgmentService = JudgmentService(
   cancelInFlightScan: () async =>
-      scanDebugService.cancel(ScanControlReason.userCanceled),
+      scanService.cancel(ScanControlReason.userCanceled),
 );

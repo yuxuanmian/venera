@@ -5,8 +5,8 @@ import 'package:venera/foundation/follow_updates_service.dart';
 import 'package:venera/foundation/schedule/schedule_service.dart';
 import 'package:venera/foundation/schedule/sqlite_schedule_repository.dart';
 import 'package:venera/foundation/scan/models.dart';
-import 'package:venera/foundation/scan/scan_debug_service.dart';
 import 'package:venera/foundation/scan/scan_result_repository.dart';
+import 'package:venera/foundation/scan/scan_service.dart';
 import 'package:venera/foundation/tracking/judgment.dart';
 import 'package:venera/foundation/tracking/judgment_service.dart';
 
@@ -214,6 +214,40 @@ void main() {
     );
   });
 
+  group('an acquisition failure advances nothing (F1.3)', () {
+    test('it produces no judgment row and no schedule row', () async {
+      // The acquisition side stores failures in the same per-comic store as
+      // observations, so "recorded" must not be confused with "evidence".
+      final item = ObservationSpec.failureItem(
+        sourceKey: 'src',
+        comicId: 'broken',
+      );
+      scanItems.replace(item);
+      scanItems.emit(ScanRepositoryEvent(item: item));
+      await pumpEventQueue();
+
+      await buildCoordinator().runRound(FollowUpdateTrigger.manual);
+
+      expect(
+        await judgmentRepository.readSnapshot(),
+        isEmpty,
+        reason: 'a failure is not evidence: it must not create a baseline',
+      );
+      expect(
+        await scheduleRepository.readAll(),
+        isEmpty,
+        reason: 'no judgment batch means no schedule recompute',
+      );
+      final stored = await scanItems.readAllItems();
+      expect(stored, hasLength(1));
+      expect(
+        stored.single.result.isSuccess,
+        isFalse,
+        reason: 'the failure stays a failure; it is never rewritten as a fact',
+      );
+    });
+  });
+
   group('events are runtime notifications (E4)', () {
     test(
       'a missed batch is recoverable because the settle pass exists',
@@ -258,7 +292,7 @@ class _EmittingScanStore extends InMemoryScanItemStore {
 }
 
 /// Acquisition that acquires nothing: these tests are about consumption.
-class _CountingScanService extends ScanDebugService {
+class _CountingScanService extends ScanService {
   _CountingScanService() : super(repository: InMemoryScanItemStore());
 
   @override

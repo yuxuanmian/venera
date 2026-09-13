@@ -10,7 +10,7 @@ import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/scan/models.dart';
 import 'package:venera/foundation/scan/full_scan_planner.dart';
-import 'package:venera/foundation/scan/scan_debug_service.dart';
+import 'package:venera/foundation/scan/scan_service.dart';
 import 'package:venera/foundation/scan/target_provider.dart';
 import 'package:venera/foundation/tracking/judgment.dart';
 import 'package:venera/foundation/tracking/judgment_service.dart';
@@ -96,7 +96,7 @@ void main() {
     final source = makeScanTestSource('menu-source');
     final adapter = FakeScanAdapter(sourceKey: source.key);
     final repository = FakeScanResultRepository();
-    final service = ScanDebugService(
+    final service = ScanService(
       repository: repository,
       targetProvider: FakeTargetProvider(
         ScanTargetSnapshot(
@@ -117,10 +117,10 @@ void main() {
         ),
       ),
     );
-    final previousService = scanDebugService;
-    scanDebugService = service;
+    final previousService = scanService;
+    scanService = service;
     addTearDown(() async {
-      scanDebugService = previousService;
+      scanService = previousService;
       await repository.close();
     });
 
@@ -190,7 +190,7 @@ void main() {
       },
     );
     final repository = FakeScanResultRepository();
-    final service = ScanDebugService(
+    final service = ScanService(
       repository: repository,
       targetProvider: FakeTargetProvider(
         ScanTargetSnapshot(
@@ -205,11 +205,11 @@ void main() {
         ),
       ),
     );
-    final previousService = scanDebugService;
-    scanDebugService = service;
+    final previousService = scanService;
+    scanService = service;
     addTearDown(() async {
       if (service.isRunning) service.cancel();
-      scanDebugService = previousService;
+      scanService = previousService;
       await repository.close();
     });
 

@@ -14,11 +14,11 @@ import 'package:venera/foundation/scan/execution_guard.dart';
 import 'package:venera/foundation/scan/full_scan_planner.dart';
 import 'package:venera/foundation/scan/models.dart';
 import 'package:venera/foundation/scan/scan_call_lease.dart';
-import 'package:venera/foundation/scan/scan_debug_service.dart';
 import 'package:venera/foundation/scan/scan_emission.dart';
 import 'package:venera/foundation/scan/scan_executor.dart';
 import 'package:venera/foundation/scan/scan_limits.dart';
 import 'package:venera/foundation/scan/scan_log.dart';
+import 'package:venera/foundation/scan/scan_service.dart';
 import 'package:venera/foundation/scan/source_adapter.dart';
 import 'package:venera/foundation/scan/target_provider.dart';
 import 'package:venera/foundation/tracking/judgment_service.dart';
@@ -796,7 +796,7 @@ class _LabelCache extends NetworkFavoriteCacheManager {
 ///
 /// The point is the **close-out**, which is where the settlement overview is
 /// emitted; the acquisition itself is covered by the scan kernel's own tests.
-class _StubScanService extends ScanDebugService {
+class _StubScanService extends ScanService {
   _StubScanService()
     : super(repository: tracking_fakes.InMemoryScanItemStore());
 

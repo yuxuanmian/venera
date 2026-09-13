@@ -322,7 +322,7 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
     }
   }
 
-  /// Host-only request entry used by the optional Debug scan capability.
+  /// Host-only request entry used by the optional scan capability.
   /// Source code can provide request facts, but not cancellation, context,
   /// logging, cache or database controls.
   Future<Map<String, dynamic>> requestForScan(

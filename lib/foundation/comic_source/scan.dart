@@ -1,4 +1,4 @@
-/// Public bridge types for the optional debug scan capability.
+/// Public bridge types for the optional scan capability.
 ///
 /// The implementation lives with the scan kernel.  This forwarding library
 /// keeps the source package's API discoverable without creating a second

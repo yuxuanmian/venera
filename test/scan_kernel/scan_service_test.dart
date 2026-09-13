@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/scan/models.dart';
-import 'package:venera/foundation/scan/scan_debug_service.dart';
+import 'package:venera/foundation/scan/scan_service.dart';
 import 'package:venera/foundation/scan/scan_limits.dart';
 import 'package:venera/foundation/scan/scan_result_repository.dart';
 import 'package:venera/foundation/scan/full_scan_planner.dart';
@@ -46,7 +46,7 @@ void main() {
         ),
       );
       final repository = FakeScanResultRepository();
-      final service = ScanDebugService(
+      final service = ScanService(
         repository: repository,
         targetProvider: provider,
         limits: const ScanLimits(maxWorkers: 2, maxWorksPerSource: 1),
@@ -105,7 +105,7 @@ void main() {
         ),
       );
       final repository = FakeScanResultRepository();
-      final service = ScanDebugService(
+      final service = ScanService(
         repository: repository,
         targetProvider: provider,
       );
@@ -142,7 +142,7 @@ void main() {
         cacheGeneration: 0,
       ),
     );
-    final service = ScanDebugService(
+    final service = ScanService(
       repository: _StorageFailingRepository(),
       targetProvider: provider,
     );
@@ -185,7 +185,7 @@ void main() {
         ),
       );
       final repository = FakeScanResultRepository();
-      final summary = await ScanDebugService(
+      final summary = await ScanService(
         repository: repository,
         targetProvider: provider,
       ).startFullScan();
@@ -221,7 +221,7 @@ void main() {
     manager.add(replacement);
 
     final repository = FakeScanResultRepository();
-    final summary = await ScanDebugService(
+    final summary = await ScanService(
       repository: repository,
       targetProvider: provider,
     ).startFullScan();

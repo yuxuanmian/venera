@@ -2,7 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/scan/execution_guard.dart';
 import 'package:venera/foundation/scan/models.dart';
-import 'package:venera/foundation/scan/scan_debug_service.dart';
+import 'package:venera/foundation/scan/scan_service.dart';
 import 'package:venera/foundation/scan/full_scan_planner.dart';
 import 'package:venera/foundation/scan/target_provider.dart';
 
@@ -72,7 +72,7 @@ void main() {
         },
       );
       final repository = FakeScanResultRepository();
-      final service = ScanDebugService(
+      final service = ScanService(
         repository: repository,
         targetProvider: FakeTargetProvider(
           ScanTargetSnapshot(

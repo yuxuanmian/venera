@@ -1,4 +1,4 @@
-/// All resource limits for the debug scan kernel live here.
+/// All resource limits for the scan kernel live here.
 ///
 /// Keeping the limits in one value object makes the production defaults
 /// auditable and lets unit tests exercise the same code with deliberately

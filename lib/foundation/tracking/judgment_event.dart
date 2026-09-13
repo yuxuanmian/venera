@@ -1,34 +1,5 @@
 import 'judgment.dart';
 
-/// One legacy `comic_check_state` row, as the 006 migration needs it.
-///
-/// Lives here rather than beside the migration because the favorites store must
-/// be able to *produce* it while the migration *consumes* it, and favorites
-/// cannot import the migration without a cycle.  This module is the neutral one
-/// both can reach.
-///
-/// **Narrowed by 007 (FR-009)**: it used to carry the retired scheduler's
-/// columns (`nextCheckAtMs`, `autoHotUntilMs`, `manualHotEnabled`,
-/// `manualHotUntilMs`) because the migration copied the manual preference into
-/// the schedule store.  That half of the migration is gone — the manual hot
-/// window is retired, and copying schedule columns is what made a re-run able to
-/// blind-overwrite live schedule rows — so the projection is now exactly the
-/// user-visible flag the migration still has a reason to move.
-///
-/// Deliberately narrower than the table: the migration must not be able to start
-/// depending on a column that has no bearing on it.
-class LegacyFollowUpRow {
-  const LegacyFollowUpRow({
-    required this.sourceKey,
-    required this.comicId,
-    required this.hasNewUpdate,
-  });
-
-  final String sourceKey;
-  final String comicId;
-  final bool hasNewUpdate;
-}
-
 /// One judged identity, as published to incremental consumers.
 ///
 /// Contract: `specs/006-local-follow-up-loop/contracts/judgment-event-v1.md` E3.

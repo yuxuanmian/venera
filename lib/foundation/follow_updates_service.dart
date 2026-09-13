@@ -10,17 +10,16 @@ import 'schedule/schedule_service.dart';
 import 'schedule/sqlite_schedule_repository.dart';
 import 'scan/due_filter.dart';
 import 'scan/models.dart';
-import 'scan/scan_debug_service.dart';
 import 'scan/scan_log.dart';
 import 'scan/scan_result_repository.dart';
+import 'scan/scan_service.dart' as scan_kernel;
 import 'scan/sqlite_scan_result_repository.dart';
 import 'tracking/judgment_event.dart';
-import 'tracking/follow_up_migration.dart';
 import 'tracking/judgment_service.dart' as tracking;
 
 /// The prefix marking the app-owned scan scope used for follow-up work.
 ///
-/// Follow-up checks share the acquisition kernel with the Debug full scan; the
+/// Follow-up checks share the acquisition kernel with the full scan; the
 /// distinction is which targets are handed to it, not a second scanner.
 const String kFollowUpdateScopePrefix = 'follow-up';
 
@@ -218,7 +217,12 @@ class FollowUpdateCoordinator {
   FollowUpdateCoordinator({
     required tracking.JudgmentService judgmentService,
     required bool Function() followUpdatesEnabledReader,
-    ScanDebugService? scanService,
+    // The parameter keeps the plain name — callers inject "the scan service" —
+    // so the product singleton it falls back to is reached through a library
+    // prefix, exactly as `tracking.judgmentService` is above.  Without the
+    // prefix the parameter would shadow the global and the fallback would
+    // silently become the parameter itself.
+    scan_kernel.ScanService? scanService,
     ScheduleService? scheduleService,
     ScanResultRepository? scanRepository,
     NetworkFavoriteCacheManager? favoriteCache,
@@ -227,7 +231,7 @@ class FollowUpdateCoordinator {
     DateTime Function()? clock,
     this.batchThreshold = 50,
     this.cacheChangeDebounce = const Duration(seconds: 2),
-  }) : _scanService = scanService ?? scanDebugService,
+  }) : _scanService = scanService ?? scan_kernel.scanService,
        _scheduleService = scheduleService,
        _scanRepository = scanRepository ?? scanResultRepository,
        _favoriteCacheReader = _favoriteCacheReaderFor(favoriteCache),
@@ -258,7 +262,7 @@ class FollowUpdateCoordinator {
     _scanService.progress.addListener(_onScanProgressChanged);
   }
 
-  final ScanDebugService _scanService;
+  final scan_kernel.ScanService _scanService;
 
   /// Null until [attachScheduleService] runs, which needs the judgment service
   /// to exist first.  Kept nullable rather than constructed here so importing
@@ -1004,28 +1008,12 @@ abstract class FollowUpdatesService {
     );
     followUpdateCoordinator.attachScheduleService(schedule);
     followUpdateCoordinator.attachObservationConsumer();
-    // The upgrade path runs before the first round, so a round never judges
-    // evidence while the user's existing flags are still in the old store
-    // (FR-035).  A failure is logged and retried on the next startup: the marker
-    // is written inside the migrating transaction, so a partial run cannot leave
-    // the migration half-applied.
-    //
-    // 007 (FR-009 / FR-010): the migration no longer receives the schedule
-    // repository.  It moves the user-visible flag and nothing else — it MUST NOT
-    // touch schedule storage, so it is not given the ability to.
-    unawaited(
-      FollowUpMigration(
-        judgmentRepository: tracking.judgmentService.repository,
-        source: () async =>
-            NetworkFavoriteCacheManager().readLegacyFollowUpRows(),
-      ).run().catchError((Object error) {
-        Log.warning(
-          'FollowUpMigration',
-          'Legacy follow-up migration failed: $error',
-        );
-        return const FollowUpMigrationReport.skipped();
-      }),
-    );
+    // There is deliberately no upgrade migration before the first round.  The
+    // legacy scan/tracking/schedule state is **ignored**, not moved: the first
+    // successful observation of an identity rebaselines it
+    // (`JudgmentConclusion.rebaseline` / `JudgmentReason.noPreviousEvidence`)
+    // with the visible flag down, so old data may still exist on disk without
+    // this system ever treating it as authority.
     return _startup = followUpdateCoordinator.onProcessStart();
   }
 

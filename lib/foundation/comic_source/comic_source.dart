@@ -206,7 +206,7 @@ class ComicSource {
 
   final ArchiveDownloader? archiveDownloader;
 
-  /// Optional debug-only scan capability. A missing value is intentionally
+  /// Optional scan capability. A missing value is intentionally
   /// different from an invalid declaration; both leave ordinary source
   /// browsing available.
   final ScanCapabilities? scan;

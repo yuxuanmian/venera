@@ -11,8 +11,8 @@ import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_update_availability.dart';
 import 'package:venera/foundation/follow_updates_service.dart';
 import 'package:venera/foundation/scan/models.dart';
-import 'package:venera/foundation/scan/scan_debug_service.dart';
 import 'package:venera/foundation/scan/scan_result_repository.dart';
+import 'package:venera/foundation/scan/scan_service.dart';
 import 'package:venera/foundation/scan/target_provider.dart';
 import 'package:venera/foundation/schedule/sqlite_schedule_repository.dart';
 import 'package:venera/foundation/tracking/diagnostics.dart';
@@ -261,15 +261,15 @@ void main() {
     );
 
     final provider = _CacheBlockingTargetProvider(fixture.cache);
-    final service = ScanDebugService(
+    final service = ScanService(
       repository: repository,
       targetProvider: provider,
     );
-    final previousService = scanDebugService;
-    scanDebugService = service;
+    final previousService = scanService;
+    scanService = service;
     addTearDown(() async {
       if (service.isRunning) service.cancel();
-      scanDebugService = previousService;
+      scanService = previousService;
       await repository.close();
     });
 

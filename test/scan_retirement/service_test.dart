@@ -8,6 +8,7 @@ import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/follow_updates_service.dart';
+import 'package:venera/foundation/tracking/sqlite_judgment_repository.dart';
 import 'package:venera/pages/follow_updates_page.dart';
 import 'package:venera/utils/translations.dart';
 
@@ -212,6 +213,32 @@ void main() {
         reason: 'the legacy has_new_update flag is no longer a list source',
       );
       expect(fake.counters.detailCalls, 0);
+
+      // Startup runs no upgrade migration any more.  The legacy flag stays in
+      // its own table and is **not** copied into judgment state, and the 006
+      // marker is not written: old data may exist, but nothing treats it as the
+      // new baseline's authority.
+      await judgmentStateRepository.ensureOpen();
+      expect(
+        await judgmentStateRepository.readFor(
+          serviceSourceKey,
+          'service-retire-a',
+        ),
+        isNull,
+        reason: 'legacy state is ignored, not migrated',
+      );
+      final database = sqlite3.open(fixture.databasePath);
+      try {
+        expect(
+          database.select(
+            "SELECT value FROM metadata WHERE key = 'follow_up_006_migration'",
+          ),
+          isEmpty,
+          reason: 'the legacy migration no longer exists',
+        );
+      } finally {
+        database.dispose();
+      }
 
       // A cache notification refreshes the page but cannot conjure a judgment
       // row, so the list stays empty and no source request is made.

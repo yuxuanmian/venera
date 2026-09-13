@@ -8,7 +8,7 @@ import 'package:venera/foundation/schedule/schedule_state.dart';
 import 'package:venera/foundation/schedule/sqlite_schedule_repository.dart';
 import 'package:venera/foundation/scan/full_scan_planner.dart';
 import 'package:venera/foundation/scan/models.dart';
-import 'package:venera/foundation/scan/scan_debug_service.dart';
+import 'package:venera/foundation/scan/scan_service.dart';
 import 'package:venera/foundation/scan/target_provider.dart';
 import 'package:venera/foundation/tracking/judgment.dart';
 import 'package:venera/foundation/tracking/judgment_event.dart';
@@ -456,7 +456,7 @@ void main() {
   group('the round mirrors the scan, not just its endpoints (F5.4)', () {
     test('the numerator moves as each task settles', () async {
       // The scan service reports live; the coordinator must forward it.  A
-      // real `ScanDebugService` is used with only its target provider replaced,
+      // real `ScanService` is used with only its target provider replaced,
       // so the progress pipeline under test is the production one.
       final release = Completer<void>();
       final started = Completer<void>();
@@ -474,7 +474,7 @@ void main() {
         },
       );
       final scanRepository = FakeScanResultRepository();
-      final service = ScanDebugService(
+      final service = ScanService(
         repository: scanRepository,
         targetProvider: FakeTargetProvider(
           ScanTargetSnapshot(
@@ -715,8 +715,8 @@ void main() {
   });
 }
 
-/// A `ScanDebugService` that records the due set instead of acquiring.
-class _RecordingScanService extends ScanDebugService {
+/// A `ScanService` that records the due set instead of acquiring.
+class _RecordingScanService extends ScanService {
   _RecordingScanService() : super(repository: InMemoryScanItemStore());
 
   /// One entry per `startFullScan` call: the due set the coordinator computed.

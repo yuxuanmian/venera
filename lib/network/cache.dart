@@ -79,7 +79,7 @@ class NetworkCacheManager implements Interceptor {
     RequestOptions options,
     RequestInterceptorHandler handler,
   ) async {
-    // Debug scans must observe the remote source and must not turn a stale
+    // Scans must observe the remote source and must not turn a stale
     // cached page (or a HEAD probe) into a scan result.
     if (options.extra['veneraScan'] == true) {
       return handler.next(options);

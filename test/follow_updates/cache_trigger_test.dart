@@ -9,7 +9,7 @@ import 'package:venera/foundation/schedule/schedule_service.dart';
 import 'package:venera/foundation/schedule/schedule_state.dart';
 import 'package:venera/foundation/schedule/sqlite_schedule_repository.dart';
 import 'package:venera/foundation/scan/models.dart';
-import 'package:venera/foundation/scan/scan_debug_service.dart';
+import 'package:venera/foundation/scan/scan_service.dart';
 import 'package:venera/foundation/tracking/judgment_service.dart';
 
 import '../tracking/fakes.dart';
@@ -432,7 +432,7 @@ void main() {
 }
 
 /// Acquisition that records the due set instead of acquiring.
-class _CountingScanService extends ScanDebugService {
+class _CountingScanService extends ScanService {
   _CountingScanService() : super(repository: InMemoryScanItemStore());
 
   /// One entry per `startFullScan` call: the due set the coordinator computed.

@@ -18,13 +18,13 @@ import 'scan_result_repository.dart';
 import 'sqlite_scan_result_repository.dart';
 import 'target_provider.dart';
 
-/// The single product-facing coordinator for the Debug full scan.
+/// The single product-facing coordinator for the full scan.
 ///
 /// It owns the one-run lock, the bounded queue and the only persistent event
 /// consumer.  Nothing in this service is registered with startup, timers,
 /// foreground callbacks or the retired follow-up scanner.
-class ScanDebugService {
-  ScanDebugService({
+class ScanService {
+  ScanService({
     ScanResultRepository? repository,
     ScanTargetProvider? targetProvider,
     FullScanPlanner? planner,
@@ -490,7 +490,7 @@ class _PendingEmission {
   final ScanIngestionContext context;
 }
 
-/// The product-owned Debug scan coordinator.  Tests may replace this single
+/// The product-owned scan coordinator.  Tests may replace this single
 /// entry point to exercise the real menu wiring with an isolated repository;
 /// production code never installs a second coordinator.
-ScanDebugService scanDebugService = ScanDebugService();
+ScanService scanService = ScanService();

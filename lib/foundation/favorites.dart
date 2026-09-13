@@ -10,7 +10,6 @@ import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/follow_updates.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';
-import 'package:venera/foundation/tracking/judgment_event.dart';
 import 'package:venera/foundation/tracking/judgment_service.dart';
 import 'package:venera/foundation/tracking/update_state.dart';
 import 'package:venera/utils/io.dart';
@@ -2745,26 +2744,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       value,
     ]);
   }
-
-  /// The legacy follow-up state the 006 migration copies from.
-  ///
-  /// Read-only and unfiltered: the caller decides which identities are in
-  /// scope.  **Nothing is deleted from this table** — it is inside 003's
-  /// retirement boundary, and emptying it needs its own storage migration.
-  ///
-  /// 007 narrowed the projection to the three columns the migration still uses
-  /// (FR-009): the retired scheduler columns and the manual hot-window
-  /// preference are no longer read, because the migration no longer carries
-  /// them into the schedule store.
-  List<LegacyFollowUpRow> readLegacyFollowUpRows() => [
-    for (final row in _db.select('''SELECT source_key, comic_id, has_new_update
-         FROM comic_check_state'''))
-      LegacyFollowUpRow(
-        sourceKey: row['source_key'] as String,
-        comicId: row['comic_id'] as String,
-        hasNewUpdate: (row['has_new_update'] as int? ?? 0) != 0,
-      ),
-  ];
 
   int countUpdates(NetworkFavoriteFolderRef folder) {
     final row = _db
