@@ -7,6 +7,7 @@ import 'package:sqlite3/sqlite3.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
+import 'package:venera/foundation/follow_updates_service.dart';
 import 'package:venera/pages/follow_updates_page.dart';
 import 'package:venera/utils/translations.dart';
 
@@ -66,19 +67,6 @@ void main() {
     final manager = ComicSourceManager();
     manager.remove(fake.sourceKey);
     manager.add(source);
-  }
-
-  void setHasNewUpdate(int value, String sourceKey, String comicId) {
-    final database = sqlite3.open(fixture.databasePath);
-    try {
-      database.execute(
-        '''UPDATE comic_check_state SET has_new_update = ?
-           WHERE source_key = ? AND comic_id = ?''',
-        [value, sourceKey, comicId],
-      );
-    } finally {
-      database.dispose();
-    }
   }
 
   void seedServiceHistory(String sourceKey) {
@@ -170,34 +158,39 @@ void main() {
     await tester.pump();
   }
 
-  test('init, cancel, and retired scan methods remain idle', () async {
-    FollowUpdatesService.initChecker();
-    FollowUpdatesService.initChecker();
+  test('foreground resume leaves no round running', () async {
+    // `initChecker` legitimately starts the startup round, so it is not part of
+    // this assertion; the subject is the lifecycle callback.
     FollowUpdatesService.cancelChecking();
     FollowUpdatesService.onAppResumed();
-    FollowUpdatesService.startBaseline();
-    await FollowUpdatesService.runCheckNow();
-    await FollowUpdatesService.forceScanAll();
-    await FollowUpdatesService.refreshRandomComics();
+    FollowUpdatesService.onAppResumed();
 
-    expect(FollowUpdatesService.taskRunning.value, isFalse);
-    expect(FollowUpdatesService.baselineStatus.value, isNull);
+    expect(FollowUpdatesService.taskRunning, isFalse);
   });
 
-  test('dispose twice and reinit do not leave a duplicate listener', () {
-    FollowUpdatesService.initChecker();
-    FollowUpdatesService.initChecker();
+  test('dispose twice and reinit do not leave a duplicate listener', () async {
+    await FollowUpdatesService.initChecker();
+    await FollowUpdatesService.initChecker();
     FollowUpdatesService.disposeChecker();
     FollowUpdatesService.disposeChecker();
-    FollowUpdatesService.initChecker();
+    await FollowUpdatesService.initChecker();
     fixture.cache.notifyListeners();
 
-    expect(FollowUpdatesService.taskRunning.value, isFalse);
-    expect(FollowUpdatesService.baselineStatus.value, isNull);
+    expect(FollowUpdatesService.taskRunning, isFalse);
+  });
+
+  test('the retired scan entry points are gone, not stubbed', () async {
+    // `startBaseline`, `forceScanAll`, `refreshRandomComics` and the
+    // `baselineStatus` notifier belonged to the scanner retired by 003.  A
+    // manual check is now the coordinator's schedule-respecting round, and
+    // progress is task-counted.  Removing them rather than keeping no-op stubs
+    // is what makes their return a compile error instead of silent dead code.
+    expect(FollowUpdatesService.progress.value.discovered, 0);
+    expect(FollowUpdatesService.taskRunning, isFalse);
   });
 
   testWidgets(
-    'the real historical page refreshes through one reusable cache listener',
+    'the page no longer derives its list from the retired marker store',
     (tester) async {
       const serviceSourceKey = 'retire_source_a';
       final fake = RetirementFakeSource(sourceKey: serviceSourceKey);
@@ -206,37 +199,33 @@ void main() {
       appdata.settings['favorites'] = <String>[serviceSourceKey];
       seedServiceHistory(serviceSourceKey);
 
-      FollowUpdatesService.initChecker();
-      FollowUpdatesService.initChecker();
+      await FollowUpdatesService.initChecker();
+      await FollowUpdatesService.initChecker();
       await pumpPage(tester);
-      expect(find.text('service-retire-a'), findsWidgets);
 
-      // A cache notification with the service attached refreshes the actual
-      // FollowUpdatesPage against the same singleton database.
-      setHasNewUpdate(0, serviceSourceKey, 'service-retire-a');
+      // `seedServiceHistory` sets `comic_check_state.has_new_update = 1` — the
+      // retired marker.  The page MUST NOT render from it: judgment state is the
+      // only source of the update flag now (Contract F3.1).
+      expect(
+        find.text('service-retire-a'),
+        findsNothing,
+        reason: 'the legacy has_new_update flag is no longer a list source',
+      );
+      expect(fake.counters.detailCalls, 0);
+
+      // A cache notification refreshes the page but cannot conjure a judgment
+      // row, so the list stays empty and no source request is made.
       final beforeNotification = snapshotRetirementState(fixture.databasePath);
       fixture.cache.notifyListeners();
       await tester.pump();
       expect(find.text('service-retire-a'), findsNothing);
       expect(fake.counters.detailCalls, 0);
-      expect(FollowUpdatesService.taskRunning.value, isFalse);
+      expect(FollowUpdatesService.taskRunning, isFalse);
       expect(snapshotRetirementState(fixture.databasePath), beforeNotification);
 
-      // After disposal the view must not refresh from cache notifications.
-      FollowUpdatesService.disposeChecker();
-      setHasNewUpdate(1, serviceSourceKey, 'service-retire-a');
-      fixture.cache.notifyListeners();
-      await tester.pump();
-      expect(find.text('service-retire-a'), findsNothing);
-      expect(fake.counters.detailCalls, 0);
-
-      // Reinitialization restores one listener and one subsequent refresh.
-      FollowUpdatesService.initChecker();
-      fixture.cache.notifyListeners();
-      await tester.pump();
-      expect(find.text('service-retire-a'), findsWidgets);
-      expect(fake.counters.detailCalls, 0);
-      expect(FollowUpdatesService.taskRunning.value, isFalse);
+      // Let the coalescing window elapse inside the test: the debounce timer is
+      // real, and a widget test fails if one outlives the tree.
+      await tester.pump(const Duration(seconds: 3));
     },
   );
 }

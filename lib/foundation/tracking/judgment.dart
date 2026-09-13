@@ -460,6 +460,10 @@ JudgmentOutcome decide({
     evidenceSchema: evidenceSchema,
     noCommonStreak: noCommonStreak,
     previousHasNewUpdate: previousHasNewUpdate,
+    // The activity anchor travels with every conclusion, including the ones
+    // that do not advance the fact: a consumer recomputing a schedule needs
+    // "when did the content move", not "did we store a new fact".
+    activityAt: current.updatedAt,
     hasNewUpdate: _resolveVisibleFlag(
       previousHasNewUpdate: previousHasNewUpdate,
       sourceUnread: current.sourceUnread,

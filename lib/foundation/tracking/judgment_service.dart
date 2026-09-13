@@ -8,6 +8,7 @@ import '../scan/scan_debug_service.dart';
 import '../scan/scan_result_repository.dart';
 import '../scan/sqlite_scan_result_repository.dart';
 import 'judgment.dart';
+import 'judgment_event.dart';
 import 'judgment_repository.dart';
 import 'judgment_state.dart';
 import 'sqlite_judgment_repository.dart';
@@ -93,6 +94,15 @@ class JudgmentService {
 
   bool _running = false;
   JudgmentSummary? _lastSummary;
+  final _eventController = StreamController<JudgmentBatchEvent>.broadcast();
+
+  /// Batch events for incremental consumers (Contract E7).
+  ///
+  /// This is the **only** publisher: allowing a second one would break the
+  /// correspondence between judgment state and the events describing it.
+  /// Broadcast, because the stream is a runtime notification with no replay and
+  /// more than one consumer may subscribe.
+  Stream<JudgmentBatchEvent> get events => _eventController.stream;
 
   /// Whether a run is currently in flight.  Debug reads this to report
   /// "already running" instead of silently starting a second run.
@@ -188,6 +198,9 @@ class JudgmentService {
         _PendingJudgment(
           state: _toState(result, stored, outcome),
           attemptId: result.attemptId,
+          observedAtMs: stored.observedAtMs,
+          conclusion: outcome.conclusion,
+          activityAt: outcome.activityAt,
         ),
       );
     }
@@ -195,6 +208,7 @@ class JudgmentService {
     // Write phase: one transaction, and each identity is re-checked against
     // the frozen snapshot first so a mid-run scan cannot be half-absorbed.
     final verified = <JudgmentState>[];
+    final published = <JudgmentRowResult>[];
     var skippedStale = 0;
     if (pending.isNotEmpty) {
       final current = await scanRepository.readAllItems();
@@ -209,10 +223,30 @@ class JudgmentService {
           continue;
         }
         verified.add(entry.state);
+        published.add(
+          JudgmentRowResult(
+            sourceKey: entry.state.sourceKey,
+            comicId: entry.state.comicId,
+            conclusion: entry.conclusion,
+            observedAtMs: entry.observedAtMs,
+            activityAt: entry.activityAt,
+          ),
+        );
       }
     }
 
     final written = await repository.applyBatch(verified);
+
+    // Publish only after the write committed, and only for rows that were
+    // actually written: a consumer must never see a judgment that is not in the
+    // store.  Nothing pending means no event at all — an empty batch is not a
+    // notification (Contract E2/E3).
+    if (published.isNotEmpty) {
+      _eventController.add(
+        JudgmentBatchEvent(rows: List.unmodifiable(published)),
+      );
+    }
+
     return JudgmentSummary(
       processed: processed,
       changed: changed,
@@ -249,6 +283,24 @@ class JudgmentService {
       rows.add(state.copyWith(hasNewUpdate: false));
     }
     return repository.applyBatch(rows);
+  }
+
+  /// Clears the visible flag of one comic (FR-021, Contract E6).
+  ///
+  /// One row, one statement.  Deliberately **not** routed through
+  /// [clearUnreadForSource]: that method reads the whole table, filters in
+  /// memory and rewrites the survivors, so its cost grows with the total state
+  /// count.  This call runs every time a comic is opened, which makes that
+  /// shape unacceptable here.
+  ///
+  /// Touches `has_new_update` only — the fact, decision and processed columns
+  /// are untouched — and issues no source request.  Returns the affected row
+  /// count, which is 0 when this comic had no flag to clear.
+  Future<int> clearVisibleFlag(String sourceKey, String comicId) async {
+    await repository.ensureOpen();
+    final cleared = await repository.clearVisibleFlag(sourceKey, comicId);
+    if (cleared > 0) _operationHook?.call('judgment.clearVisibleFlag');
+    return cleared;
   }
 
   /// Reads one state for display.  Read-only: no write capability is exposed.
@@ -292,10 +344,19 @@ class JudgmentService {
 }
 
 class _PendingJudgment {
-  const _PendingJudgment({required this.state, required this.attemptId});
+  const _PendingJudgment({
+    required this.state,
+    required this.attemptId,
+    required this.observedAtMs,
+    required this.conclusion,
+    required this.activityAt,
+  });
 
   final JudgmentState state;
   final String attemptId;
+  final int observedAtMs;
+  final JudgmentConclusion conclusion;
+  final DateTime? activityAt;
 }
 
 /// The product-owned judgment coordinator.

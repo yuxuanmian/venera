@@ -4,8 +4,10 @@ import 'dart:io';
 
 import 'package:sqlite3/sqlite3.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
+import 'package:venera/foundation/comic_source/scan.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/res.dart';
+import 'package:venera/foundation/scan/models.dart';
 
 const retirementSourceA = 'retire-source-a';
 const retirementSourceB = 'retire-source-b';
@@ -180,7 +182,17 @@ class RetirementFakeSource {
     return const Res(<String>[]);
   }
 
-  ComicSource buildComicSource({FavoriteData? favoriteData}) => ComicSource(
+  /// Builds the source as the manager would hold it.
+  ///
+  /// [declaresSourceUnread] is what the account-switch cleanup criterion reads
+  /// (Contract F8): a source-side unread declaration in the scan evidence
+  /// schema.  The retired `updateCheck` channel is deliberately **not** a
+  /// substitute — a source declaring only that channel produces an
+  /// account-independent update flag, so switching accounts must leave it alone.
+  ComicSource buildComicSource({
+    FavoriteData? favoriteData,
+    bool declaresSourceUnread = false,
+  }) => ComicSource(
     'Retirement fake $sourceKey',
     sourceKey,
     null,
@@ -214,6 +226,16 @@ class RetirementFakeSource {
     false,
     null,
     null,
+    scan: declaresSourceUnread
+        ? ScanCapabilities.supported(
+            primary: ScanProducer.comic,
+            comic: ScanCapability.comic(
+              (comicId, request) async => null,
+              evidenceSchema:
+                  '{"latestchapterid":"last_chapter.id","sourceunread":"is_new"}',
+            ),
+          )
+        : null,
   );
 }
 

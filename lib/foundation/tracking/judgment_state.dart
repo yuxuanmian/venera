@@ -130,6 +130,7 @@ class JudgmentOutcome {
     this.factJson,
     this.factObservedAtMs,
     this.evidenceSchema,
+    this.activityAt,
   });
 
   final JudgmentConclusion conclusion;
@@ -138,6 +139,14 @@ class JudgmentOutcome {
   final String? previousValue;
   final String? currentValue;
   final int decidedAtMs;
+
+  /// When the *content* moved, parsed from this observation's time field.
+  ///
+  /// Null means the source declared no usable time field — not "unknown yet".
+  /// Published on the judgment event so the schedule domain can use it as the
+  /// activity anchor (Contract E4 / Contract S5) without re-reading or
+  /// re-parsing the observation payload.
+  final DateTime? activityAt;
 
   /// Whether this decision replaced the stored fact (J4 "advance fact").
   final bool factAdvanced;

@@ -7,10 +7,10 @@ import 'package:sqlite3/sqlite3.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_type.dart';
-import 'package:venera/foundation/follow_update_schedule.dart';
-import 'package:venera/foundation/follow_update_availability.dart';
+import 'package:venera/foundation/follow_updates.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';
+import 'package:venera/foundation/tracking/judgment_event.dart';
 import 'package:venera/foundation/tracking/judgment_service.dart';
 import 'package:venera/foundation/tracking/update_state.dart';
 import 'package:venera/utils/io.dart';
@@ -149,7 +149,6 @@ class FavoriteItemWithUpdateInfo extends FavoriteItem {
     int? retryAfter, {
     this.checkFailures = 0,
     this.checkNotFoundCount = 0,
-    this.isSuspectGone = false,
     this.baselineAt,
     this.sourceActivityAt,
     this.nextCheckAt,
@@ -183,7 +182,6 @@ class FavoriteItemWithUpdateInfo extends FavoriteItem {
   final bool hasNewUpdate;
   final int checkFailures;
   final int checkNotFoundCount;
-  final bool isSuspectGone;
   final DateTime? baselineAt;
   final DateTime? sourceActivityAt;
   final DateTime? nextCheckAt;
@@ -411,6 +409,14 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   NetworkFavoriteCacheManager.forTesting();
 
   static NetworkFavoriteCacheManager? _instance;
+
+  /// The source key whose account-scoped cache was most recently cleared.
+  ///
+  /// A process-lifetime marker, not persisted state: it exists only so the
+  /// follow-up page can say **why** the cache it is looking at is empty
+  /// (FR-034) instead of silently showing "not cached yet".  Cleared by the
+  /// page once it has shown the explanation.
+  static String? accountSwitchClearedSourceKey;
 
   factory NetworkFavoriteCacheManager() =>
       _instance ??= NetworkFavoriteCacheManager._create();
@@ -2487,7 +2493,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       state?['retry_after'] as int?,
       checkFailures: state?['check_failures'] as int? ?? 0,
       checkNotFoundCount: state?['check_not_found_count'] as int? ?? 0,
-      isSuspectGone: (state?['check_suspect_gone'] as int? ?? 0) != 0,
       baselineAt: _dateTimeFromRow(state?['baseline_at']),
       sourceActivityAt: _dateTimeFromRow(state?['source_activity_at']),
       nextCheckAt: _dateTimeFromRow(state?['next_check_at']),
@@ -2565,90 +2570,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     }
   }
 
-  void clearComicSuspectGoneEverywhere(String sourceKey, String comicId) {
-    _db.execute(
-      '''UPDATE comic_check_state
-          SET check_suspect_gone = 0, check_failures = 0,
-              check_not_found_count = 0, retry_after = NULL
-          WHERE source_key = ? AND comic_id = ?''',
-      [sourceKey, comicId],
-    );
-    notifyListeners();
-  }
-
-  bool isComicSuspectGone(String sourceKey, String comicId) {
-    final rows = _db.select(
-      '''SELECT 1 FROM comic_check_state
-         WHERE source_key = ? AND comic_id = ? AND check_suspect_gone != 0
-         LIMIT 1''',
-      [sourceKey, comicId],
-    );
-    return rows.isNotEmpty;
-  }
-
-  List<FavoriteItemWithUpdateInfo> getSuspectGoneComicsInFolders(
-    Iterable<NetworkFavoriteFolderRef> folders,
-  ) {
-    final list = folders.toList();
-    if (list.isEmpty) return const [];
-    final rows = _db.select(
-      '''SELECT fi.* FROM favorite_items fi
-         WHERE ${_folderWhereClause(list)}
-           AND (fi.source_key, fi.comic_id) IN (
-             SELECT source_key, comic_id FROM comic_check_state
-             WHERE check_suspect_gone != 0
-           )
-         GROUP BY fi.source_key, fi.comic_id
-         ORDER BY fi.source_key, fi.comic_id''',
-      list.expand((f) => [f.sourceKey, f.folderId]).toList(),
-    );
-    final state = _checkStateForRows(rows);
-    return [
-      for (final row in rows)
-        _toFavoriteItemWithUpdateInfo(
-          row,
-          state['${row['source_key']}\u0000${row['comic_id']}'],
-        ),
-    ];
-  }
-
-  Future<Res<bool>> removeFavoriteEverywhere(
-    String sourceKey,
-    String comicId,
-  ) async {
-    final source = ComicSource.find(sourceKey);
-    final data = source?.favoriteData;
-    if (source == null || data == null) {
-      return const Res.error('Comic source not found');
-    }
-    if (!source.isLogged) return const Res.error('Not login');
-    if (data.addOrDelFavorite == null) {
-      return const Res.error('Favorites are not supported');
-    }
-    final folderIds = getKnownFolderIds(sourceKey, comicId);
-    var anySuccess = false;
-    String? lastError;
-    for (final folderId in folderIds) {
-      final folder = NetworkFavoriteFolderRef(
-        sourceKey: sourceKey,
-        folderId: folderId,
-      );
-      final result = await changeFavorite(
-        data: data,
-        folder: folder,
-        comicId: comicId,
-        isAdding: false,
-      );
-      if (result.error) {
-        lastError = result.errorMessage;
-      } else {
-        anySuccess = true;
-      }
-    }
-    if (anySuccess) return const Res(true);
-    return Res.error(lastError ?? 'No cached favorite folder found');
-  }
-
   void markReadInAllFolders(String sourceKey, String comicId) {
     _db.execute(
       '''UPDATE comic_check_state SET has_new_update = 0
@@ -2702,10 +2623,18 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   }
 
   void invalidateFavoriteSessionForSource(String sourceKey) {
-    final source = ComicSource.find(sourceKey);
-    if (source?.favoriteData?.updateCheck == null) return;
+    // Contract F8: the criterion is "does this source declare a source-side
+    // unread signal", NOT "does the retired observation channel exist".  The
+    // old test would have silently stopped clearing anything the moment that
+    // channel was removed, and the signal it guards is account-level.
+    if (!sourceDeclaresUnreadSignal(sourceKey)) return;
     _favoriteSessionEpochs[sourceKey] =
         captureFavoriteSessionEpoch(sourceKey) + 1;
+    // Recorded so the follow-up page can explain why its results disappeared
+    // (FR-034).  Five different account-change entry points funnel through this
+    // method, so recording it here covers all of them at once instead of
+    // requiring a prompt at each call site.
+    accountSwitchClearedSourceKey = sourceKey;
 
     // FR-027: `sourceUnread` is an account-level signal, so after an account
     // change the old value belongs to the previous account and showing
@@ -2754,6 +2683,11 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
            WHERE source_key = ?''',
         [sourceKey],
       );
+      // FR-034: an account change clears the favorite cache and its
+      // completeness mark, so the gate goes back to "incomplete" and the user
+      // is told a re-cache is needed.  Observations, judgment state and
+      // schedule state are untouched — none of them is in this database.
+      _clearAccountScopedFavoriteCache(sourceKey);
       _db.execute('COMMIT');
     } catch (_) {
       _db.execute('ROLLBACK');
@@ -2761,6 +2695,83 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     }
     notifyListeners();
   }
+
+  /// Clears the account-scoped favorite caches of one source (Contract F8).
+  ///
+  /// Called inside [invalidateFavoriteSessionForSource]'s transaction, so it
+  /// MUST NOT begin one of its own.
+  ///
+  /// Cleared: the cached favorite entries, their pages and membership rows, the
+  /// **completeness mark**, and the legacy scan-state rows.
+  ///
+  /// The folder rows are deliberately **kept** with their marker reset rather
+  /// than deleted.  Deleting them would take the folder out of
+  /// `getAllCachedFolders()` entirely, and then a criterion source with no
+  /// folder cannot be told apart from one that was never configured: the gate
+  /// would report "nothing to follow" instead of "the cache is incomplete", and
+  /// the re-cache entry point would have no folder to fill.
+  ///
+  /// Explicitly preserved: observations, judgment state and schedule state.
+  /// None of them lives in this database, which is the point of the three
+  /// separate stores — an account change is an account-scoped clear, not a
+  /// reset of what the app has learned about the content.
+  void _clearAccountScopedFavoriteCache(String sourceKey) {
+    _db.execute('DELETE FROM favorite_items WHERE source_key = ?', [sourceKey]);
+    _db.execute('DELETE FROM favorite_pages WHERE source_key = ?', [sourceKey]);
+    _db.execute('DELETE FROM favorite_membership WHERE source_key = ?', [
+      sourceKey,
+    ]);
+    _db.execute('DELETE FROM favorite_update_scan_state WHERE source_key = ?', [
+      sourceKey,
+    ]);
+    // The marker is the gate's input, so it must be clear for every folder of
+    // this source.
+    _db.execute(
+      '''UPDATE favorite_folders
+         SET full_cache_at = NULL, full_cache_pages = 0, full_cache_comics = 0
+         WHERE source_key = ?''',
+      [sourceKey],
+    );
+  }
+
+  /// Reads one `metadata` value, or null when the key is absent.
+  ///
+  /// Exposed for the 006 migration, whose one-time marker lives in this table
+  /// alongside the existing migration markers.
+  Object? readMetadataValue(String key) {
+    final rows = _db.select('SELECT value FROM metadata WHERE key = ?', [key]);
+    return rows.isEmpty ? null : rows.first['value'];
+  }
+
+  /// Writes one `metadata` value, replacing any previous one.
+  void writeMetadataValue(String key, String value) {
+    _db.execute('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)', [
+      key,
+      value,
+    ]);
+  }
+
+  /// The legacy follow-up state the 006 migration copies from.
+  ///
+  /// Read-only and unfiltered: the caller decides which identities are in
+  /// scope.  **Nothing is deleted from this table** — it is inside 003's
+  /// retirement boundary, and emptying it needs its own storage migration.
+  List<LegacyFollowUpRow> readLegacyFollowUpRows() => [
+    for (final row in _db.select(
+      '''SELECT source_key, comic_id, has_new_update, next_check_at,
+                auto_hot_until, manual_hot_enabled, manual_hot_until
+         FROM comic_check_state''',
+    ))
+      LegacyFollowUpRow(
+        sourceKey: row['source_key'] as String,
+        comicId: row['comic_id'] as String,
+        hasNewUpdate: (row['has_new_update'] as int? ?? 0) != 0,
+        nextCheckAtMs: row['next_check_at'] as int?,
+        autoHotUntilMs: row['auto_hot_until'] as int?,
+        manualHotEnabled: (row['manual_hot_enabled'] as int? ?? 0) != 0,
+        manualHotUntilMs: row['manual_hot_until'] as int?,
+      ),
+  ];
 
   int countUpdates(NetworkFavoriteFolderRef folder) {
     final row = _db
@@ -2826,12 +2837,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         ' OR (cs.retry_after IS NOT NULL AND cs.retry_after <= ${DateTime.now().millisecondsSinceEpoch})',
   );
 
-  int countUpdatesInFolders(Iterable<NetworkFavoriteFolderRef> folders) =>
-      _countDistinctComicsInFolders(
-        folders,
-        stateCondition: 'cs.has_new_update != 0',
-      );
-
   int countComicsWithUpdatesInfoInFolders(
     Iterable<NetworkFavoriteFolderRef> folders,
   ) => countCachedComicsInFolders(folders);
@@ -2865,27 +2870,40 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     ];
   }
 
-  List<FavoriteItemWithUpdateInfo> getUpdatedComicsInFolders(
-    Iterable<NetworkFavoriteFolderRef> folders,
-  ) {
-    final list = folders.toList();
-    if (list.isEmpty) return const [];
-    final rows = _db.select(
-      '''SELECT fi.* FROM favorite_items fi
-         JOIN comic_check_state cs
-           ON cs.source_key = fi.source_key AND cs.comic_id = fi.comic_id
-         WHERE ${_folderWhereClause(list)} AND cs.has_new_update != 0
-         GROUP BY fi.source_key, fi.comic_id
-         ORDER BY cs.last_update_time DESC, fi.source_key, fi.comic_id''',
-      list.expand((f) => [f.sourceKey, f.folderId]).toList(),
-    );
-    final state = _checkStateForRows(rows);
-    return [
-      for (final row in rows)
-        _toFavoriteItemWithUpdateInfo(
-          row,
-          state['${row['source_key']}\u0000${row['comic_id']}'],
-        ),
-    ];
+  Future<Res<bool>> removeFavoriteEverywhere(
+    String sourceKey,
+    String comicId,
+  ) async {
+    final source = ComicSource.find(sourceKey);
+    final data = source?.favoriteData;
+    if (source == null || data == null) {
+      return const Res.error('Comic source not found');
+    }
+    if (!source.isLogged) return const Res.error('Not login');
+    if (data.addOrDelFavorite == null) {
+      return const Res.error('Favorites are not supported');
+    }
+    final folderIds = getKnownFolderIds(sourceKey, comicId);
+    var anySuccess = false;
+    String? lastError;
+    for (final folderId in folderIds) {
+      final folder = NetworkFavoriteFolderRef(
+        sourceKey: sourceKey,
+        folderId: folderId,
+      );
+      final result = await changeFavorite(
+        data: data,
+        folder: folder,
+        comicId: comicId,
+        isAdding: false,
+      );
+      if (result.error) {
+        lastError = result.errorMessage;
+      } else {
+        anySuccess = true;
+      }
+    }
+    if (anySuccess) return const Res(true);
+    return Res.error(lastError ?? 'No cached favorite folder found');
   }
 }

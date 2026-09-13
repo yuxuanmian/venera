@@ -203,12 +203,6 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
   void _recheck() =>
       context.showMessage(message: followUpdateScannerUnavailableMessage.tl);
 
-  void _clearSuspect() {
-    _cache.clearComicSuspectGoneEverywhere(widget.sourceKey, widget.comicId);
-    setState(() {});
-    context.showMessage(message: "Cleared".tl);
-  }
-
   void _copyJson() {
     Clipboard.setData(ClipboardData(text: _rawJson()));
     context.showMessage(message: "Copied".tl);
@@ -277,11 +271,6 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
               onPressed: _recheck,
               child: Text("Recheck Now".tl),
             ),
-            if (!_usesListUpdateStrategy)
-              Button.outlined(
-                onPressed: _clearSuspect,
-                child: Text("Clear Suspected Removed".tl),
-              ),
             Button.outlined(onPressed: _copyJson, child: Text("Copy JSON".tl)),
             if (trackingDiagnostics.latest(widget.sourceKey, widget.comicId) !=
                 null)
@@ -327,7 +316,6 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
         _infoRow("Has New Update", _yesNo(info.hasNewUpdate)),
         _infoRow("Check Failures", '${info.checkFailures}'),
         _infoRow("Not Found Hits", '${info.checkNotFoundCount}'),
-        _infoRow("Suspected Removed", _yesNo(info.isSuspectGone)),
       ],
     ];
   }

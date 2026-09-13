@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:venera/components/components.dart';
@@ -10,6 +12,9 @@ import 'package:venera/foundation/scan/models.dart';
 import 'package:venera/foundation/scan/full_scan_planner.dart';
 import 'package:venera/foundation/scan/scan_debug_service.dart';
 import 'package:venera/foundation/scan/target_provider.dart';
+import 'package:venera/foundation/tracking/judgment.dart';
+import 'package:venera/foundation/tracking/judgment_service.dart';
+import 'package:venera/foundation/tracking/judgment_state.dart';
 import 'package:venera/pages/comic_details_page/comic_page.dart';
 import 'package:venera/utils/translations.dart';
 
@@ -31,6 +36,9 @@ void main() {
       'Scope Status',
       'Scan storage error',
       'Scan execution error',
+      'Clear All Judgment Data',
+      'Judgment data cleared',
+      'Scan evidence is kept',
     ];
     for (final locale in ['zh_CN', 'zh_TW']) {
       final values = AppTranslation.translations[locale]!;
@@ -117,7 +125,7 @@ void main() {
     await tester.pumpAndSettle();
     for (final label in [
       'Clear Favorites Cache',
-      'Clear Baselines',
+      'Clear All Judgment Data',
       'Force Scan All Comics',
       'Random Refresh Comics',
     ]) {
@@ -214,9 +222,9 @@ void main() {
     // second selection must only report re-entry and must not reset progress.
     final sheet = showDebugMenuSheet();
     await tester.pumpAndSettle();
-    // Clear favorites, clear baselines, force scan, rerun judgment,
-    // clear observation facts, random refresh.
-    expect(find.byType(ListTile), findsNWidgets(6));
+    // Clear favorites, clear judgment data, force scan, rerun judgment,
+    // random refresh.
+    expect(find.byType(ListTile), findsNWidgets(5));
     // The sheet is intentionally anchored at the bottom of the oversized
     // test viewport. Invoke the real tile callback so this assertion remains
     // about menu wiring rather than pixel hit-testing.
@@ -243,6 +251,78 @@ void main() {
       ScanScopeStatus.canceled,
     );
     await tester.pump(const Duration(seconds: 3));
+  });
+
+  testWidgets('the Debug menu clears judgment state and keeps the evidence', (
+    tester,
+  ) async {
+    addTearDown(tester.view.reset);
+    tester.view.physicalSize = const Size(800, 1200);
+    tester.view.devicePixelRatio = 1;
+
+    // The entry reaches the **product** judgment service, so this drives the
+    // real singleton against a temporary app data directory rather than a
+    // parallel store the menu would never touch.
+    //
+    // Everything filesystem-shaped here is the **synchronous** API on purpose:
+    // a `testWidgets` body runs inside fake async, where the real `dart:io`
+    // futures (`Directory.systemTemp.createTemp`, `Directory.delete`) never
+    // complete and the test simply hangs.  The repository's own calls are fine
+    // — it uses the synchronous `sqlite3` package, so its awaits are microtask
+    // hops.
+    final tempDirectory = Directory.systemTemp.createTempSync('venera-debug-');
+    // `App.dataPath` is `late` and this file never initialises it, so there is
+    // no previous value to restore.
+    App.dataPath = tempDirectory.path;
+    addTearDown(() async {
+      await judgmentService.repository.close();
+      try {
+        tempDirectory.deleteSync(recursive: true);
+      } on PathAccessException {
+        // Windows may release a native SQLite handle just after dispose.
+      } on PathNotFoundException {
+        // Already gone.
+      }
+    });
+
+    final repository = judgmentService.repository;
+    await repository.ensureOpen();
+    await repository.applyBatch([
+      JudgmentState(
+        sourceKey: 'menu-source',
+        comicId: 'menu-comic',
+        lastDecision: JudgmentConclusion.changed,
+        lastReason: JudgmentReason.later,
+        decidedAtMs: 1,
+        hasNewUpdate: true,
+        algorithmVersion: judgmentAlgorithmVersion,
+      ),
+    ]);
+    expect(
+      await repository.readSnapshot(),
+      isNotEmpty,
+      reason: 'the entry is only meaningful if there is something to clear',
+    );
+
+    await _pumpWindow(tester);
+    await tester.tap(find.text('Debug'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Clear All Judgment Data'.tl));
+    await tester.pump(const Duration(milliseconds: 1));
+
+    expect(
+      find.textContaining('Judgment data cleared'),
+      findsOneWidget,
+      reason: 'the entry reports what it did',
+    );
+    expect(
+      find.textContaining('Scan evidence is kept'),
+      findsOneWidget,
+      reason: 'U4.1: the evidence surviving is the point of the entry',
+    );
+    expect(await repository.readSnapshot(), isEmpty);
+
+    await tester.pump(const Duration(seconds: 2));
   });
 }
 

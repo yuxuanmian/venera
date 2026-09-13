@@ -238,6 +238,30 @@ class SqliteJudgmentRepository implements JudgmentStateRepository {
   }
 
   @override
+  Future<int> clearVisibleFlag(String sourceKey, String comicId) async {
+    await ensureOpen();
+    try {
+      // One statement, one row, one column.  Not `applyBatch` on a
+      // `copyWith(hasNewUpdate: false)` row: that would rewrite all thirteen
+      // owned columns and re-read the row first, and this runs on every comic
+      // open (Contract E6).
+      database.execute(
+        'UPDATE judgment_state SET has_new_update = 0 '
+        'WHERE source_key = ? AND comic_id = ? AND has_new_update != 0',
+        [sourceKey, comicId],
+      );
+      return database.updatedRows;
+    } on JudgmentStorageException {
+      rethrow;
+    } catch (error) {
+      throw JudgmentStorageException(
+        'Unable to clear the update flag of one comic',
+        error,
+      );
+    }
+  }
+
+  @override
   Future<void> clear() async {
     await ensureOpen();
     try {

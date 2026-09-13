@@ -24,6 +24,15 @@ abstract class JudgmentStateRepository {
   /// the explicit column ownership note.
   Future<int> applyBatch(List<JudgmentState> rows);
 
+  /// Clears the update flag of exactly one identity, returning the row count.
+  ///
+  /// Contract E6.  MUST be a single-row statement: the caller runs this every
+  /// time a comic is opened, so an implementation whose cost grows with the
+  /// total number of states (read-all, filter in memory, rewrite) is not
+  /// acceptable.  Only `has_new_update` may change; the fact, decision and
+  /// processed columns MUST survive.
+  Future<int> clearVisibleFlag(String sourceKey, String comicId);
+
   /// Deletes every judgment state row.  Scan evidence is untouched.
   Future<void> clear();
 

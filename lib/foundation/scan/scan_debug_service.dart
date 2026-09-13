@@ -57,7 +57,14 @@ class ScanDebugService {
 
   /// Returns immediately with [FullScanDisposition.alreadyRunning] on
   /// re-entry.  The running operation's progress and targets are untouched.
-  Future<FullScanSummary> startFullScan() {
+  ///
+  /// [dueComicIdsBySource] optionally narrows the round to the identities the
+  /// caller found due (Contract S4).  It is passed straight to the target
+  /// provider, which keeps this service unaware of both the schedule store and
+  /// the observation store.
+  Future<FullScanSummary> startFullScan({
+    Map<String, Set<String>>? dueComicIdsBySource,
+  }) {
     if (_running) {
       return Future<FullScanSummary>.value(
         FullScanSummary(
@@ -69,7 +76,7 @@ class ScanDebugService {
     _running = true;
     _cancelReason = null;
     _storageError = null;
-    return _runFullScan();
+    return _runFullScan(dueComicIdsBySource: dueComicIdsBySource);
   }
 
   /// Synchronously invalidates all current Work guards and call leases.
@@ -92,7 +99,9 @@ class ScanDebugService {
     _rejectQueuedEmissions(ScanControlException(reason));
   }
 
-  Future<FullScanSummary> _runFullScan() async {
+  Future<FullScanSummary> _runFullScan({
+    Map<String, Set<String>>? dueComicIdsBySource,
+  }) async {
     ScanProgress current = ScanProgress(phase: ScanProgressPhase.discovering);
     _setProgress(current);
     FullScanDisposition disposition = FullScanDisposition.completed;
@@ -103,7 +112,9 @@ class ScanDebugService {
         disposition = FullScanDisposition.canceled;
         return _finish(disposition);
       }
-      final snapshot = await targetProvider.snapshot();
+      final snapshot = await targetProvider.snapshot(
+        dueComicIdsBySource: dueComicIdsBySource,
+      );
       final snapshotCacheGeneration = snapshot.cacheGeneration;
       if (_cancelReason != null) {
         disposition = FullScanDisposition.canceled;

@@ -137,7 +137,13 @@ void main() {
     );
     final sources = ComicSourceManager();
     sources.remove(retirementSourceA);
-    sources.add(source.buildComicSource(favoriteData: data));
+    sources.add(
+      // Session invalidation is gated on the source declaring a source-side
+      // unread signal (Contract F8), so the fixture must declare one, or the
+      // invalidation below is a deliberate no-op and this test would be
+      // asserting about a source the product no longer invalidates.
+      source.buildComicSource(favoriteData: data, declaresSourceUnread: true),
+    );
     addTearDown(() => sources.remove(retirementSourceA));
 
     final pending = fixture.cache.refreshPage(data, folder, 1);

@@ -195,11 +195,10 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       ComicType.fromKey(widget.sourceKey),
     );
     final cache = NetworkFavoriteCacheManager();
-    final isSuspect = cache.isComicSuspectGone(widget.sourceKey, widget.id);
-    // Destructive actions are driven only by the persisted historical mark.
-    // A current network error is never interpreted as new delist evidence.
-    final notFound = isSuspect;
     final isFavorite = cache.isFavoriteKnown(widget.sourceKey, widget.id);
+    // FR-023: the "suspected removed" verdict and its two buttons are gone.
+    // The only destructive action left is removing a favorite the user still
+    // has, which needs no delist evidence to justify it.
     final buttons = <Widget>[
       if (isDownloaded)
         FilledButton.tonalIcon(
@@ -217,17 +216,11 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
             localComic.read();
           },
         ),
-      if (notFound && isFavorite)
+      if (isFavorite)
         FilledButton.tonalIcon(
           icon: const Icon(Icons.delete_outline),
           onPressed: removeFavorite,
           label: Text('Remove Favorite'.tl),
-        ),
-      if (notFound && isFavorite && isSuspect)
-        OutlinedButton.icon(
-          icon: const Icon(Icons.restart_alt),
-          onPressed: clearSuspect,
-          label: Text('Clear Suspected Removed'.tl),
         ),
     ];
     return NetworkError(
@@ -248,15 +241,6 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       return;
     }
     context.pop();
-  }
-
-  void clearSuspect() {
-    NetworkFavoriteCacheManager().clearComicSuspectGoneEverywhere(
-      widget.sourceKey,
-      widget.id,
-    );
-    update();
-    context.showMessage(message: 'Cleared'.tl);
   }
 
   @override

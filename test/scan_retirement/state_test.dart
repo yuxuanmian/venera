@@ -1,19 +1,35 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite3/sqlite3.dart';
+import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/favorites.dart';
-import 'package:venera/pages/follow_updates_page.dart';
+import 'package:venera/foundation/follow_updates_service.dart';
 
 import 'fixtures.dart';
 
 void main() {
   late RetirementFixture fixture;
+  late Directory appDirectory;
 
   setUp(() async {
     fixture = await createRetirementFixture();
+    // `runCheckNow` reaches the coordinator, which resolves its store paths
+    // from `App.dataPath`.  This is a separate directory rather than the
+    // fixture's, so the round's own databases never hold the fixture open and
+    // deletion at teardown still succeeds.
+    appDirectory = await Directory.systemTemp.createTemp('venera-state-app-');
+    App.dataPath = appDirectory.path;
+    App.cachePath = appDirectory.path;
   });
 
   tearDown(() async {
     await fixture.dispose();
+    try {
+      await appDirectory.delete(recursive: true);
+    } on PathAccessException {
+      // Windows may release a native SQLite handle just after dispose.
+    }
   });
 
   test(
@@ -33,7 +49,9 @@ void main() {
         migrateLegacy: false,
       );
       await FollowUpdatesService.runCheckNow();
-      await FollowUpdatesService.forceScanAll();
+      // The retired scanner's forced entry point is gone: a manual check now
+      // goes through the coordinator and respects the schedule, so there is no
+      // second "ignore everything and scan" call to make.
 
       expect(snapshotRetirementState(fixture.databasePath), before);
       expect(

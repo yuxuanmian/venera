@@ -3,6 +3,7 @@ import '../catalog/source_preferences.dart';
 import '../comic_source/comic_source.dart';
 import '../favorites.dart';
 import '../js_engine.dart';
+import 'due_filter.dart';
 import 'js_source_adapter.dart';
 import 'models.dart';
 import 'full_scan_planner.dart';
@@ -54,7 +55,17 @@ class ScanTargetProvider {
   final bool Function(ComicSource source) _sourceIsManaged;
   final int pageSize;
 
-  Future<ScanTargetSnapshot> snapshot() async {
+  /// Builds the round's frozen work list.
+  ///
+  /// [dueComicIdsBySource] narrows per-comic work to the identities that are
+  /// actually due (Contract S4).  It is a plain map rather than a callback so
+  /// this class stays free of both stores: the composition layer merges them
+  /// and hands the answer down.  A source missing from the map contributes no
+  /// per-comic work; collection work is unaffected, because a `(source, comic)`
+  /// schedule cannot express it in the first place.
+  Future<ScanTargetSnapshot> snapshot({
+    Map<String, Set<String>>? dueComicIdsBySource,
+  }) async {
     final startGeneration = cache.cacheGeneration;
     final folders = cache.getAllCachedFolders();
     final bySource = <String, List<NetworkFavoriteFolderRef>>{};
@@ -169,10 +180,15 @@ class ScanTargetProvider {
     if (cache.cacheGeneration != startGeneration) {
       throw const ScanControlException(ScanControlReason.cacheInvalidated);
     }
-    return ScanTargetSnapshot(
+    final unfiltered = ScanTargetSnapshot(
       works: works,
       cacheGeneration: startGeneration,
       skippedSources: skipped,
+    );
+    if (dueComicIdsBySource == null) return unfiltered;
+    return filterTargetsByDue(
+      snapshot: unfiltered,
+      dueComicIdsBySource: dueComicIdsBySource,
     );
   }
 

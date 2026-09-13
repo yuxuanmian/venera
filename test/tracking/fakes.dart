@@ -19,6 +19,13 @@ class InMemoryJudgmentRepository implements JudgmentStateRepository {
   bool opened = false;
   bool closed = false;
 
+  /// How many times a run has read the whole table.
+  ///
+  /// One per judgment run, so this is the cheapest detector of "a judgment pass
+  /// actually happened" — used to prove the incremental threshold does and does
+  /// not fire.
+  int readSnapshotCalls = 0;
+
   /// When set, [applyBatch] throws before touching [rows], simulating a
   /// storage failure that must leave state consistent.
   Object? failNextBatch;
@@ -29,7 +36,10 @@ class InMemoryJudgmentRepository implements JudgmentStateRepository {
   }
 
   @override
-  Future<Map<String, JudgmentState>> readSnapshot() async => {...rows};
+  Future<Map<String, JudgmentState>> readSnapshot() async {
+    readSnapshotCalls++;
+    return {...rows};
+  }
 
   @override
   Future<JudgmentState?> readFor(String sourceKey, String comicId) async =>
@@ -49,6 +59,17 @@ class InMemoryJudgmentRepository implements JudgmentStateRepository {
       rows[row.identity] = row;
     }
     return batch.length;
+  }
+
+  @override
+  Future<int> clearVisibleFlag(String sourceKey, String comicId) async {
+    // Mirrors the SQLite implementation: one identity, one column, and only
+    // when there was actually a flag to clear (so the row count matches).
+    final key = '$sourceKey\u0000$comicId';
+    final existing = rows[key];
+    if (existing == null || !existing.hasNewUpdate) return 0;
+    rows[key] = existing.copyWith(hasNewUpdate: false);
+    return 1;
   }
 
   @override

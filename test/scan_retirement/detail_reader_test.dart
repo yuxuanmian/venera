@@ -90,7 +90,7 @@ void main() {
   );
 
   testWidgets(
-    'ComicPage keeps ordinary retry and does not infer a suspect from 404 text',
+    'ComicPage keeps ordinary retry and offers only favorite removal on a 404',
     (tester) async {
       final source = RetirementFakeSource(
         sourceKey: retirementSourceA,
@@ -106,8 +106,15 @@ void main() {
       await settleLoading(tester);
 
       expect(find.text('404 Not Found'), findsOneWidget);
-      expect(find.text('Remove Favorite'.tl), findsNothing);
-      expect(find.text('Clear Suspected Removed'.tl), findsNothing);
+      // `retire-c` is a cached favorite, so removal is offered — and that is
+      // the point: the action is justified by the user's own favorite, not by a
+      // delist verdict the app can no longer form (FR-023).
+      expect(find.text('Remove Favorite'.tl), findsOneWidget);
+      expect(
+        find.text('Clear Suspected Removed'.tl),
+        findsNothing,
+        reason: 'the control was removed from the build, not merely hidden',
+      );
       final callsBeforeRetry = source.counters.detailCalls;
 
       await tester.tap(find.text('Retry'.tl));
@@ -119,7 +126,7 @@ void main() {
   );
 
   testWidgets(
-    'ComicPage exposes destructive actions only for persisted suspect history',
+    'ComicPage offers only Remove Favorite, and never a suspected-removed control',
     (tester) async {
       final source = RetirementFakeSource(
         sourceKey: retirementSourceA,
@@ -136,7 +143,10 @@ void main() {
 
       expect(find.text('comic removed (404)'), findsOneWidget);
       expect(find.text('Remove Favorite'.tl), findsOneWidget);
-      expect(find.text('Clear Suspected Removed'.tl), findsOneWidget);
+      // The removed control, its handler and its backing verdict are all gone
+      // (FR-023).  Its absence is the assertion: a returning button would mean
+      // the retired verdict came back with it.
+      expect(find.text('Clear Suspected Removed'.tl), findsNothing);
       expect(snapshotRetirementState(fixture.databasePath), before);
     },
   );

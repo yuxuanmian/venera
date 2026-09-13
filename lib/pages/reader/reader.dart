@@ -23,7 +23,7 @@ import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/consts.dart';
-import 'package:venera/foundation/favorites.dart';
+import 'package:venera/foundation/tracking/judgment_service.dart';
 import 'package:venera/foundation/global_state.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/image_provider/cached_image.dart';
@@ -228,7 +228,23 @@ class _ReaderState extends State<Reader>
     }
     setImageCacheSize();
     Future.delayed(const Duration(milliseconds: 200), () {
-      NetworkFavoriteCacheManager().markReadInAllFolders(type.sourceKey, cid);
+      // Opening the reader is when a comic counts as read (Contract F4).  The
+      // clear is a single-row update against judgment state, which is the only
+      // store the update flag lives in now.
+      //
+      // The legacy `markReadInAllFolders` call that used to be here is gone: it
+      // wrote `comic_check_state.has_new_update`, a column nothing raises any
+      // more, so it cleared a flag that was already always clear.
+      unawaited(
+        judgmentService.clearVisibleFlag(type.sourceKey, cid).catchError((
+          Object _,
+        ) {
+          // A read must never be blocked by, or fail because of, a storage
+          // problem in the tracking store: the reader is the user's actual
+          // goal and the flag is a decoration on top of it.
+          return 0;
+        }),
+      );
     });
     super.initState();
   }

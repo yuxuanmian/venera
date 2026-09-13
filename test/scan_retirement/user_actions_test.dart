@@ -3,7 +3,6 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqlite3/sqlite3.dart';
 import 'package:venera/components/window_frame.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
@@ -11,6 +10,9 @@ import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/local.dart';
+import 'package:venera/foundation/tracking/judgment.dart';
+import 'package:venera/foundation/tracking/judgment_state.dart';
+import 'package:venera/foundation/tracking/sqlite_judgment_repository.dart';
 import 'package:venera/pages/comic_details_page/comic_page.dart';
 import 'package:venera/pages/reader/reader.dart';
 import 'package:venera/utils/translations.dart';
@@ -122,53 +124,6 @@ void main() {
     return changes;
   }
 
-  void seedRetireDState() {
-    final database = sqlite3.open(fixture.databasePath);
-    try {
-      final state = jsonEncode({
-        'updatedAt': fixtureLegacyUpdate.toIso8601String(),
-        'latestChapterId': 'chapter-d-10',
-        'chapterCount': 10,
-      });
-      final yesterday = fixtureYesterday.millisecondsSinceEpoch;
-      final nextWeek = fixtureNextWeek.millisecondsSinceEpoch;
-      database.execute(
-        '''
-        INSERT OR REPLACE INTO comic_check_state
-          (source_key, comic_id, last_update_time, update_marker, update_state,
-           last_check_time, has_new_update, retry_after, check_failures,
-           check_not_found_count, check_suspect_gone, baseline_at,
-           source_activity_at, next_check_at, auto_hot_until, manual_hot_until,
-           manual_hot_enabled, old_schedule_jitter_applied, source_update_metadata)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ''',
-        [
-          retirementSourceA,
-          'retire-d',
-          fixtureLegacyUpdate.toIso8601String(),
-          'legacy-test|chapter-d-10',
-          state,
-          yesterday,
-          1,
-          nextWeek,
-          3,
-          4,
-          1,
-          yesterday,
-          yesterday,
-          nextWeek,
-          nextWeek,
-          nextWeek,
-          1,
-          1,
-          jsonEncode({'source': 'retirement-d'}),
-        ],
-      );
-    } finally {
-      database.dispose();
-    }
-  }
-
   test('mark-read changes only the target comic update flag', () {
     const folder = NetworkFavoriteFolderRef(
       sourceKey: retirementSourceA,
@@ -194,7 +149,6 @@ void main() {
     expect(after.retryAfter, before.retryAfter);
     expect(after.checkFailures, before.checkFailures);
     expect(after.checkNotFoundCount, before.checkNotFoundCount);
-    expect(after.isSuspectGone, before.isSuspectGone);
     expect(after.baselineAt, before.baselineAt);
     expect(after.sourceActivityAt, before.sourceActivityAt);
     expect(after.nextCheckAt, before.nextCheckAt);
@@ -210,74 +164,8 @@ void main() {
     expect(snapshotRetirementCacheState(fixture.databasePath), beforeCache);
   });
 
-  test(
-    'explicit clear is scoped across folders and only clears its four fields',
-    () {
-      seedRetireDState();
-      const folderOne = NetworkFavoriteFolderRef(
-        sourceKey: retirementSourceA,
-        folderId: retirementFolderOne,
-      );
-      const folderTwo = NetworkFavoriteFolderRef(
-        sourceKey: retirementSourceA,
-        folderId: retirementFolderTwo,
-      );
-      expect(
-        fixture.cache
-            .getComicsWithUpdatesInfo(folderOne)
-            .firstWhere((item) => item.id == 'retire-d')
-            .isSuspectGone,
-        isTrue,
-      );
-      expect(
-        fixture.cache
-            .getComicsWithUpdatesInfo(folderTwo)
-            .firstWhere((item) => item.id == 'retire-d')
-            .isSuspectGone,
-        isTrue,
-      );
-      final beforeScan = snapshotRetirementState(fixture.databasePath);
-      final beforeCache = snapshotRetirementCacheState(fixture.databasePath);
-
-      fixture.cache.clearComicSuspectGoneEverywhere(
-        retirementSourceA,
-        'retire-d',
-      );
-
-      for (final folder in [folderOne, folderTwo]) {
-        final item = fixture.cache
-            .getComicsWithUpdatesInfo(folder)
-            .firstWhere((item) => item.id == 'retire-d');
-        expect(item.isSuspectGone, isFalse);
-        expect(item.checkFailures, 0);
-        expect(item.checkNotFoundCount, 0);
-        expect(item.retryAfter, isNull);
-        expect(item.updateMarker, 'legacy-test|chapter-d-10');
-        expect(item.updateState?.latestChapterId, 'chapter-d-10');
-        expect(item.lastCheckTime, isNotNull);
-        expect(item.baselineAt, isNotNull);
-        expect(item.sourceActivityAt, isNotNull);
-        expect(item.nextCheckAt, isNotNull);
-        expect(item.manualHotEnabled, isTrue);
-      }
-
-      final changed = changedFields(
-        beforeScan,
-        snapshotRetirementState(fixture.databasePath),
-      );
-      final dKey = jsonEncode([retirementSourceA, 'retire-d']);
-      expect(changed, {
-        'comic_check_state:$dKey:retry_after',
-        'comic_check_state:$dKey:check_failures',
-        'comic_check_state:$dKey:check_not_found_count',
-        'comic_check_state:$dKey:check_suspect_gone',
-      });
-      expect(snapshotRetirementCacheState(fixture.databasePath), beforeCache);
-    },
-  );
-
   testWidgets(
-    'the real reader start chain marks read without touching evidence',
+    'the real reader start chain clears the judgment flag, not the legacy column',
     (tester) async {
       final source = RetirementFakeSource(
         sourceKey: retirementSourceA,
@@ -291,6 +179,21 @@ void main() {
       final beforeScan = snapshotRetirementState(fixture.databasePath);
       final beforeCache = snapshotRetirementCacheState(fixture.databasePath);
 
+      // The update flag lives in judgment state now, so that is where the
+      // reader's mark-read has to land (Contract F4).
+      await judgmentStateRepository.ensureOpen();
+      await judgmentStateRepository.applyBatch([
+        JudgmentState(
+          sourceKey: retirementSourceA,
+          comicId: 'retire-a',
+          lastDecision: JudgmentConclusion.changed,
+          lastReason: JudgmentReason.later,
+          decidedAtMs: 1,
+          hasNewUpdate: true,
+          algorithmVersion: judgmentAlgorithmVersion,
+        ),
+      ]);
+
       await pumpPage(
         tester,
         const ReaderWithLoading(id: 'retire-a', sourceKey: retirementSourceA),
@@ -300,15 +203,23 @@ void main() {
       expect(find.byType(Reader), findsOneWidget);
       expect(source.counters.detailCalls, 1);
       expect(source.counters.readerPageCalls, 1);
-      final afterScan = snapshotRetirementState(fixture.databasePath);
-      final changed = changedFields(beforeScan, afterScan);
-      final readKey = jsonEncode([retirementSourceA, 'retire-a']);
-      expect(changed, {'comic_check_state:$readKey:has_new_update'});
       expect(
-        afterScan['comic_check_state']!.firstWhere(
-          (row) => row['comic_id'] == 'retire-a',
-        )['has_new_update'],
-        0,
+        (await judgmentStateRepository.readFor(
+          retirementSourceA,
+          'retire-a',
+        ))!.hasNewUpdate,
+        isFalse,
+        reason: 'opening the reader is what marks a comic read',
+      );
+
+      // The legacy marker store is no longer written: its flag is raised by
+      // nothing in this build, so clearing it would be clearing a fossil.
+      expect(
+        changedFields(
+          beforeScan,
+          snapshotRetirementState(fixture.databasePath),
+        ),
+        isEmpty,
       );
       expect(snapshotRetirementCacheState(fixture.databasePath), beforeCache);
       expect(
@@ -317,6 +228,8 @@ void main() {
           isA<FavoriteItem>().having((item) => item.id, 'id', 'retire-a'),
         ),
       );
+
+      await judgmentStateRepository.clear();
 
       await tester.pumpWidget(
         MaterialApp(
@@ -330,9 +243,13 @@ void main() {
     },
   );
 
-  testWidgets('the real detail clear handler changes only clear fields', (
+  testWidgets('the removed suspected-removed handler is gone, not hidden', (
     tester,
   ) async {
+    // FR-023: this test used to drive the "Clear Suspected Removed" button and
+    // assert it cleared four `comic_check_state` columns.  Both the button and
+    // the verdict behind it were retired, so the assertion that remains is that
+    // neither the control nor the fields it wrote come back.
     final source = RetirementFakeSource(
       sourceKey: retirementSourceA,
       detailError: 'removed by source (404)',
@@ -346,25 +263,12 @@ void main() {
       const ComicPage(id: 'retire-b', sourceKey: retirementSourceA),
     );
     await tester.pumpAndSettle();
-    expect(find.text('Clear Suspected Removed'.tl), findsOneWidget);
 
-    await tester.tap(find.text('Clear Suspected Removed'.tl));
-    await tester.pump();
-    await tester.pump(const Duration(seconds: 2));
-
-    final changed = changedFields(
-      beforeScan,
-      snapshotRetirementState(fixture.databasePath),
-    );
-    final bKey = jsonEncode([retirementSourceA, 'retire-b']);
-    expect(changed, {
-      'comic_check_state:$bKey:retry_after',
-      'comic_check_state:$bKey:check_failures',
-      'comic_check_state:$bKey:check_not_found_count',
-      'comic_check_state:$bKey:check_suspect_gone',
-    });
+    expect(find.text('Clear Suspected Removed'.tl), findsNothing);
+    // Opening the page writes nothing: the retired handler was the only writer
+    // of those four fields, so a clean snapshot proves it did not run.
+    expect(snapshotRetirementState(fixture.databasePath), beforeScan);
     expect(snapshotRetirementCacheState(fixture.databasePath), beforeCache);
-    expect(source.counters.detailCalls, greaterThanOrEqualTo(4));
   });
 
   testWidgets('the real detail hot action preserves every non-hot field', (

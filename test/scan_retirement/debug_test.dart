@@ -9,13 +9,13 @@ import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_update_availability.dart';
+import 'package:venera/foundation/follow_updates_service.dart';
 import 'package:venera/foundation/scan/models.dart';
 import 'package:venera/foundation/scan/scan_debug_service.dart';
 import 'package:venera/foundation/scan/scan_result_repository.dart';
 import 'package:venera/foundation/scan/target_provider.dart';
 import 'package:venera/foundation/tracking/diagnostics.dart';
 import 'package:venera/pages/comic_details_page/comic_page.dart';
-import 'package:venera/pages/follow_updates_page.dart';
 import 'package:venera/utils/translations.dart';
 
 import 'fixtures.dart';
@@ -80,7 +80,7 @@ void main() {
     await trigger();
     await tester.pump(const Duration(milliseconds: 1));
     expect(unavailableMessageCount(tester), greaterThan(before));
-    expect(FollowUpdatesService.taskRunning.value, isFalse);
+    expect(FollowUpdatesService.taskRunning, isFalse);
     expect(find.byType(CircularProgressIndicator), findsNothing);
     await tester.pump(const Duration(seconds: 2));
   }
@@ -119,7 +119,7 @@ void main() {
       final beforeState = snapshotRetirementState(fixture.databasePath);
       await pumpWindow(tester);
       const forceScanLabel = 'Force Scan All Comics';
-      final retiredEntries = ['Clear Baselines'.tl, 'Random Refresh Comics'.tl];
+      final retiredEntries = ['Random Refresh Comics'.tl];
 
       for (final entry in retiredEntries) {
         for (var i = 0; i < 10; i++) {
@@ -142,7 +142,7 @@ void main() {
 
       // 004 deliberately authorizes only this existing menu item. Its full
       // execution path is covered by scan_kernel service/widget tests; this
-      // retirement regression only protects the other two handlers.
+      // retirement regression only protects the other handlers.
       await tester.tap(find.text('Debug'));
       await tester.pumpAndSettle();
       expect(find.text(forceScanLabel.tl), findsOneWidget);
@@ -150,9 +150,50 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(snapshotRetirementState(fixture.databasePath), beforeState);
-      expect(FollowUpdatesService.taskRunning.value, isFalse);
+      expect(FollowUpdatesService.taskRunning, isFalse);
     },
   );
+
+  testWidgets('the retired and mislabelled debug entries are gone', (
+    tester,
+  ) async {
+    // The retired "Clear Baselines" item is **gone**, not merely inert: its slot
+    // now carries the judgment-clear entry, which does something.  Its old label
+    // must not come back, and neither may the misleading "Clear Observation
+    // Facts" label, whose entry performed the same judgment clear under the name
+    // of the thing it preserves.  Both keys stay in the translation asset so
+    // these guards mean something: a missing key would make `.tl` fall back to
+    // the key itself and `findsNothing` would pass for the wrong reason.
+    const retired = ['Clear Baselines', 'Clear Observation Facts'];
+    const replacement = 'Clear All Judgment Data';
+
+    Future<void> expectMenuSurfaces(Future<void> Function() dismiss) async {
+      for (final label in retired) {
+        expect(find.text(label.tl), findsNothing, reason: label);
+      }
+      expect(find.text(replacement.tl), findsOneWidget);
+      await dismiss();
+      await tester.pumpAndSettle();
+    }
+
+    await pumpWindow(tester);
+
+    await tester.tap(find.text('Debug'));
+    await tester.pumpAndSettle();
+    await expectMenuSurfaces(() async {
+      await tester.binding.handlePopRoute();
+    });
+
+    final sheet = showDebugMenuSheet();
+    await tester.pumpAndSettle();
+    await expectMenuSurfaces(() async {
+      await tester.binding.handlePopRoute();
+    });
+    await sheet;
+
+    expect(FollowUpdatesService.taskRunning, isFalse);
+    expect(snapshotRetirementState(fixture.databasePath), isNotEmpty);
+  });
 
   testWidgets('clear favorites cancels scan before invalidating its cache', (
     tester,
@@ -379,7 +420,9 @@ class _CacheBlockingTargetProvider extends ScanTargetProvider {
   final release = Completer<void>();
 
   @override
-  Future<ScanTargetSnapshot> snapshot() async {
+  Future<ScanTargetSnapshot> snapshot({
+    Map<String, Set<String>>? dueComicIdsBySource,
+  }) async {
     if (!started.isCompleted) started.complete();
     await release.future;
     return ScanTargetSnapshot(

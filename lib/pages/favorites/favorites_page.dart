@@ -6,6 +6,8 @@ import 'package:venera/foundation/catalog/source_preferences.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/consts.dart';
 import 'package:venera/foundation/favorites.dart';
+import 'package:venera/foundation/follow_updates.dart';
+import 'package:venera/foundation/follow_updates_service.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/utils/translations.dart';
 
@@ -93,6 +95,80 @@ class _FavoritesPageState extends State<FavoritesPage> {
         ),
         Expanded(child: content),
       ],
+    );
+  }
+}
+
+/// One line urging the user to finish caching **this** source's favorites.
+///
+/// A source is followed once its own favorites have been cached in full: the
+/// per-comic work list is enumerated **from the cache**
+/// (`ScanTargetProvider`), so an incompletely cached source can only be covered
+/// partially and its entries stay off the follow-up list until the cache
+/// finishes (Contract F2.3).  The prompt therefore belongs on the page of the
+/// source it is about — the general follow-up page cannot say *which* source the
+/// user has to finish, and a source the user added but never opened would
+/// otherwise be silently absent from follow-up forever.
+///
+/// It reads the same gate the follow-up page reads, so the two can never name a
+/// different set of sources (the same reasoning as the entry badge, F3.2), and
+/// listens to the cache so that finishing the full cache removes it in place.
+class _FollowUpdateCacheHint extends StatefulWidget {
+  const _FollowUpdateCacheHint({required this.sourceKey});
+
+  final String sourceKey;
+
+  @override
+  State<_FollowUpdateCacheHint> createState() => _FollowUpdateCacheHintState();
+}
+
+class _FollowUpdateCacheHintState extends State<_FollowUpdateCacheHint> {
+  final NetworkFavoriteCacheManager _cache = NetworkFavoriteCacheManager();
+
+  @override
+  void initState() {
+    super.initState();
+    _cache.addListener(_onCacheChanged);
+  }
+
+  @override
+  void dispose() {
+    _cache.removeListener(_onCacheChanged);
+    super.dispose();
+  }
+
+  void _onCacheChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Nothing to explain while the feature is off, and nothing to say about a
+    // source that is not tracked or is already fully cached.
+    if (!followUpdatesEnabled) return const SizedBox.shrink();
+    final pending = followUpdateCoordinator.evaluateGate().pendingSourceKeys;
+    if (!pending.contains(widget.sourceKey)) return const SizedBox.shrink();
+    return Container(
+      width: double.infinity,
+      color: Theme.of(context).colorScheme.surfaceContainerHigh,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      child: Row(
+        children: [
+          Icon(
+            Icons.info_outline,
+            size: 14,
+            color: Theme.of(context).colorScheme.outline,
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              'This source is not followed yet: its favorites are not fully cached'
+                  .tl,
+              style: ts.s12,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -202,18 +278,25 @@ class NetworkFavoritePage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (!data.multiFolder) {
-      return _CachedFavoriteFolderPage(
-        key: ValueKey(data.key),
-        data: data,
-        folder: NetworkFavoriteFolderRef(
-          sourceKey: data.key,
-          folderId: '',
-          title: data.title,
-        ),
-      );
-    }
-    return _RemoteFolderList(key: ValueKey(data.key), data: data);
+    final content = !data.multiFolder
+        ? _CachedFavoriteFolderPage(
+            key: ValueKey(data.key),
+            data: data,
+            folder: NetworkFavoriteFolderRef(
+              sourceKey: data.key,
+              folderId: '',
+              title: data.title,
+            ),
+          )
+        : _RemoteFolderList(key: ValueKey(data.key), data: data);
+    // The prompt is about this source, so it belongs above this source's own
+    // content — whichever of its two views the user is looking at.
+    return Column(
+      children: [
+        _FollowUpdateCacheHint(sourceKey: data.key),
+        Expanded(child: content),
+      ],
+    );
   }
 }
 
@@ -673,12 +756,9 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
                     )
                   : Res.error(result.errorMessage!);
             },
-      badgeBuilder: (comic) =>
-          _cache.isComicSuspectGone(widget.data.key, comic.id)
-          ? 'Suspected removed'.tl
-          : null,
-      dimmedBuilder: (comic) =>
-          _cache.isComicSuspectGone(widget.data.key, comic.id),
+      // FR-023: the "suspected removed" badge and dimming are gone.  The
+      // verdict had no producer left, so every entry would have rendered as
+      // un-suspect; keeping the branch would have been dead presentation.
       menuBuilder: (comic) => [
         MenuEntry(
           icon: Icons.delete_outline,

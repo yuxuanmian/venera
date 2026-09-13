@@ -227,16 +227,15 @@ Future<void> showDebugMenu(GlobalKey buttonKey) async {
         value: 'clearFavorites',
         child: Text('Clear Favorites Cache'.tl),
       ),
-      PopupMenuItem(value: 'clearBaselines', child: Text('Clear Baselines'.tl)),
+      PopupMenuItem(
+        value: 'clearJudgmentState',
+        child: Text('Clear All Judgment Data'.tl),
+      ),
       PopupMenuItem(
         value: 'forceScanAll',
         child: Text('Force Scan All Comics'.tl),
       ),
       PopupMenuItem(value: 'rerunJudgment', child: Text('Rerun Judgment'.tl)),
-      PopupMenuItem(
-        value: 'clearObservationFacts',
-        child: Text('Clear Observation Facts'.tl),
-      ),
       PopupMenuItem(
         value: 'refreshRandomComics',
         child: Text('Random Refresh Comics'.tl),
@@ -263,8 +262,8 @@ Future<void> showDebugMenuSheet() async {
           ),
           ListTile(
             leading: const Icon(Icons.delete_outline),
-            title: Text('Clear Baselines'.tl),
-            onTap: () => context.pop('clearBaselines'),
+            title: Text('Clear All Judgment Data'.tl),
+            onTap: () => context.pop('clearJudgmentState'),
           ),
           ListTile(
             leading: const Icon(Icons.playlist_add_check),
@@ -275,11 +274,6 @@ Future<void> showDebugMenuSheet() async {
             leading: const Icon(Icons.rule),
             title: Text('Rerun Judgment'.tl),
             onTap: () => context.pop('rerunJudgment'),
-          ),
-          ListTile(
-            leading: const Icon(Icons.layers_clear_outlined),
-            title: Text('Clear Observation Facts'.tl),
-            onTap: () => context.pop('clearObservationFacts'),
           ),
           ListTile(
             leading: const Icon(Icons.shuffle),
@@ -302,17 +296,14 @@ void handleDebugMenuSelected(String value) {
       App.favorites.clearAllCache();
       _debugResult('Favorites cache cleared'.tl);
       break;
-    case 'clearBaselines':
-      _debugResult(followUpdateScannerUnavailableMessage.tl);
+    case 'clearJudgmentState':
+      unawaited(_clearJudgmentState());
       break;
     case 'forceScanAll':
       unawaited(_runDebugFullScan());
       break;
     case 'rerunJudgment':
       unawaited(_rerunJudgment());
-      break;
-    case 'clearObservationFacts':
-      unawaited(_clearObservationFacts());
       break;
     case 'refreshRandomComics':
       _debugResult(followUpdateScannerUnavailableMessage.tl);
@@ -392,7 +383,7 @@ Future<void> _runJudgmentAfterScan(FullScanSummary summary) async {
 /// a `clear()` in front of the run: FR-034 forbids that, and a button called
 /// "rerun" must not silently discard every comparison baseline.  "Complete
 /// rerun" is the user-driven two-step combination of
-/// [clearObservationFacts] followed by this entry.
+/// [clearJudgmentState] followed by this entry.
 ///
 /// A rule change does not need a special branch here: judgment stamps each row
 /// with the algorithm version that produced it and recomputes rows written by a
@@ -411,12 +402,29 @@ Future<void> _rerunJudgment() async {
   }
 }
 
-/// Contract U4.1: cancel an in-flight scan first, then clear judgment state.
-/// Scan evidence survives, which is what makes this a debugging entry point.
-Future<void> _clearObservationFacts() async {
+/// Contract U4.1: cancel an in-flight scan first, then clear every judgment row.
+///
+/// Scan evidence survives, which is what makes this a debugging entry point
+/// rather than a reset button: the same evidence can be judged again from
+/// scratch, which is how "build state from zero" is observed.
+///
+/// The entry sits where the retired "Clear Baselines" item used to be. That item
+/// was never wired to anything — it only reported that the retired follow-up
+/// scanner is unavailable — and "baseline" no longer names a live concept, so
+/// the slot now carries the entry that actually does something. Its label also
+/// replaces "Clear Observation Facts", which described the **preserved** side of
+/// the operation and so read as a different, dangerous action (wiping the
+/// evidence) than the one it performed.
+///
+/// What it does **not** touch: scan evidence, the schedule store, the favorites
+/// cache, user preferences (ADR-0016 keeps the schedule out of the judgment
+/// clear on purpose).
+Future<void> _clearJudgmentState() async {
   try {
     await judgmentService.clear();
-    _debugResult('Observation facts cleared'.tl);
+    _debugResult(
+      '${'Judgment data cleared'.tl} · ${'Scan evidence is kept'.tl}',
+    );
   } catch (error) {
     _debugResult('${'Judgment State Unreadable'.tl}: ${_safeScanError(error)}');
   }
