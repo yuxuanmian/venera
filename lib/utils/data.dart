@@ -23,6 +23,93 @@ class AppDataImportResult {
   final bool sourceImported;
 }
 
+/// How long one database copy may take before the export gives up.
+///
+/// The copy waits for a write transaction that is in flight, so a permanently
+/// stuck writer must fail the upload rather than hang it.
+const Duration _snapshotTimeout = Duration(minutes: 2);
+
+/// How long to wait before retrying a copy that a writer is blocking.
+const Duration _snapshotRetryDelay = Duration(milliseconds: 250);
+
+/// Writes an export-safe copy of the live SQLite database at [sourcePath] to
+/// [destinationPath], and reports whether it may go into a backup.
+///
+/// **A plain file copy of an open database is not a backup.**  `history.db` and
+/// `cookie.db` use the rollback journal, whose pages are rewritten **in place**
+/// while a transaction is open, so a copy taken during a write contains a
+/// half-applied transaction.  That is not a theoretical concern: such a copy
+/// fails `PRAGMA integrity_check` with `wrong # of entries in index …` / `row N
+/// missing from index …`, and the import then rejects the whole archive with
+/// `history.db failed SQLite integrity check` — one torn database costing the
+/// user every other file in the backup.
+///
+/// The copy is taken with `VACUUM INTO`, which reads the source as a single read
+/// transaction and writes a compacted database, so the result is one state the
+/// source really committed.  A writer holding the database is waited for, up to
+/// [timeout] with [retryDelay] between attempts; when the copy still cannot be
+/// taken the export fails loudly, because uploading something the import would
+/// reject is worse than not uploading at all.
+///
+/// [entryName] is the archive entry the copy will be stored under.  The copy is
+/// checked with the same rules the importer applies to that entry, so an
+/// unusable or empty database is reported as `false` (and left out of the
+/// archive) instead of poisoning it.  A missing [sourcePath] — a device that has
+/// never written history or cookies — is also reported as `false`.
+Future<bool> writeSqliteBackupSnapshot({
+  required String sourcePath,
+  required String destinationPath,
+  required String entryName,
+  Duration timeout = _snapshotTimeout,
+  Duration retryDelay = _snapshotRetryDelay,
+}) async {
+  if (!File(sourcePath).existsSync()) return false;
+  final watch = Stopwatch()..start();
+  while (true) {
+    // `VACUUM INTO` refuses to overwrite its output, and a blocked attempt may
+    // still have created one.
+    await File(destinationPath).deleteIgnoreError();
+    try {
+      _vacuumInto(sourcePath, destinationPath);
+      break;
+    } on SqliteException catch (error) {
+      if (error.resultCode != SqlError.SQLITE_BUSY &&
+          error.resultCode != SqlError.SQLITE_LOCKED) {
+        rethrow;
+      }
+      if (watch.elapsed > timeout) {
+        throw FileSystemException(
+          'timed out copying $entryName while it is being written',
+          sourcePath,
+        );
+      }
+      await Future<void>.delayed(retryDelay);
+    }
+  }
+  try {
+    _validateSqlite(File(destinationPath), entryName);
+    return true;
+  } on Object {
+    // An empty or unusable copy must not go into the archive: including it
+    // would make the import reject every other file in the backup too.
+    return false;
+  }
+}
+
+/// Reads one consistent, compacted snapshot of [sourcePath] into
+/// [destinationPath].
+void _vacuumInto(String sourcePath, String destinationPath) {
+  final db = sqlite3.open(sourcePath);
+  try {
+    // Deliberately short: [writeSqliteBackupSnapshot] paces the retries, so
+    // SQLite must hand the lock conflict back instead of blocking on it too.
+    db.execute('PRAGMA busy_timeout = 100');
+    db.execute('VACUUM INTO ?', [destinationPath]);
+  } finally {
+    db.dispose();
+  }
+}
+
 Future<File> exportAppData([bool sync = true]) async {
   var time = DateTime.now().millisecondsSinceEpoch ~/ 1000;
   var cacheFilePath = FilePath.join(App.cachePath, '$time.venera');
@@ -37,27 +124,58 @@ Future<File> exportAppData([bool sync = true]) async {
     jsonEncode(appdata.toUserDataJson()),
     flush: true,
   );
-  await Isolate.run(() {
-    var zipFile = ZipFile.open(cacheFilePath);
-    var historyFile = FilePath.join(dataPath, "history.db");
-    var cookies = FilePath.join(dataPath, "cookie.db");
-    zipFile.addFile("history.db", historyFile);
-    zipFile.addFile("appdata.json", projectedPath);
-    zipFile.addFile("cookie.db", cookies);
-    final sourceRoot = Directory(FilePath.join(dataPath, 'comic_source'));
-    if (sourceRoot.existsSync()) {
-      for (final entity in sourceRoot.listSync(followLinks: false)) {
-        if (entity is! File) continue;
-        final fileName = p.basename(entity.path);
-        if (!RegExp(r'^[A-Za-z_][A-Za-z0-9_]*\.data$').hasMatch(fileName)) {
-          continue;
+  // The databases are copied through `writeSqliteBackupSnapshot` rather than
+  // read as files: see there for why a plain copy of a live database can make
+  // the whole archive unimportable.
+  final snapshotRootPath = '$cacheFilePath-snapshots';
+  final snapshotRoot = Directory(snapshotRootPath);
+  await snapshotRoot.create(recursive: true);
+  final List<String> omittedDatabases;
+  try {
+    omittedDatabases = await Isolate.run(() async {
+      var zipFile = ZipFile.open(cacheFilePath);
+      final omitted = <String>[];
+      try {
+        for (final name in const ['history.db', 'cookie.db']) {
+          final snapshotPath = FilePath.join(snapshotRootPath, name);
+          final copied = await writeSqliteBackupSnapshot(
+            sourcePath: FilePath.join(dataPath, name),
+            destinationPath: snapshotPath,
+            entryName: name,
+          );
+          if (copied) {
+            zipFile.addFile(name, snapshotPath);
+          } else {
+            omitted.add(name);
+          }
         }
-        zipFile.addFile('comic_source/$fileName', entity.path);
+        zipFile.addFile("appdata.json", projectedPath);
+        final sourceRoot = Directory(FilePath.join(dataPath, 'comic_source'));
+        if (sourceRoot.existsSync()) {
+          for (final entity in sourceRoot.listSync(followLinks: false)) {
+            if (entity is! File) continue;
+            final fileName = p.basename(entity.path);
+            if (!RegExp(r'^[A-Za-z_][A-Za-z0-9_]*\.data$').hasMatch(fileName)) {
+              continue;
+            }
+            zipFile.addFile('comic_source/$fileName', entity.path);
+          }
+        }
+      } finally {
+        zipFile.close();
       }
-    }
-    zipFile.close();
-  });
-  await projected.deleteIgnoreError();
+      return omitted;
+    });
+  } finally {
+    await projected.deleteIgnoreError();
+    snapshotRoot.deleteIgnoreError(recursive: true);
+  }
+  for (final name in omittedDatabases) {
+    Log.warning(
+      "Export Data",
+      "$name is missing or unreadable and was left out of the backup",
+    );
+  }
   return cacheFile;
 }
 
