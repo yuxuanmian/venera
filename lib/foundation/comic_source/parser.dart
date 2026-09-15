@@ -62,6 +62,13 @@ class ComicSourceParser {
   String? _key;
   String? _sourceKey;
 
+  /// The evaluated source script and its class name, retained so a semantic
+  /// execution lane can instantiate the capability in its own runtime. They are
+  /// never exposed to a source and never travel through a bridge message.
+  String? _sourceScript;
+
+  String? _className;
+
   String? _name;
   static int _validationCounter = 0;
 
@@ -136,6 +143,8 @@ class ComicSourceParser {
     }
     var className = line1.split("class")[1].split("extends ComicSource").first;
     className = className.trim();
+    _sourceScript = js;
+    _className = className;
     requireCandidateAdmission?.call();
     _runCode("""(() => { $js
         this['temp'] = new $className()
@@ -224,6 +233,7 @@ class ComicSourceParser {
         _parseArchiveDownloader(),
         runtimeContext: executionContext,
         scan: _parseScanCapabilities(),
+        semanticSearchData: _loadSemanticSearchData(),
       );
 
       if (loadData) {
@@ -1318,6 +1328,150 @@ class ComicSourceParser {
       },
       rankingData: rankingData,
     );
+  }
+
+  /// Discovers the optional `search.tagSearch` capability without invoking it.
+  ///
+  /// A missing or invalid optional sub-object is isolated: it must never
+  /// prevent ordinary source parsing and it never changes the ordinary search
+  /// contract. `tagSearch.load` wins when both pagination forms are declared.
+  ///
+  /// The JS probe returns only plain booleans, so no JavaScript handle from the
+  /// optional sub-object survives into Dart. The loader bodies re-read the
+  /// current code path on every call, which keeps callback ownership with this
+  /// parser instance's runtime alias and never with a stale published source.
+  SemanticSearchData? _loadSemanticSearchData() {
+    dynamic shape;
+    try {
+      shape = _runCode('''
+        (() => {
+          try {
+            const search = ComicSource.sources.$_key?.search;
+            if (search === undefined || search === null) return {absent: true};
+            const tag = search.tagSearch;
+            if (tag === undefined || tag === null) return {absent: true};
+            if (typeof tag !== "object" || Array.isArray(tag)) {
+              return {invalid: "tagSearch must be an object"};
+            }
+            const hasLoad = typeof tag.load === "function";
+            const hasLoadNext = typeof tag.loadNext === "function";
+            if (!hasLoad && !hasLoadNext) {
+              return {invalid: "tagSearch requires load or loadNext"};
+            }
+            return {present: true, hasLoad: hasLoad, hasLoadNext: hasLoadNext};
+          } catch (error) {
+            return {invalid: "tagSearch could not be inspected"};
+          }
+        })()
+      ''');
+    } catch (e, s) {
+      Log.error(
+        "Semantic Search",
+        "Failed to inspect search.tagSearch\n$e\n$s",
+      );
+      return null;
+    }
+    if (shape is! Map) return null;
+    if (shape['absent'] == true) return null;
+    if (shape['invalid'] is String) {
+      Log.error("Semantic Search", shape['invalid'] as String);
+      return null;
+    }
+    if (shape['present'] != true) return null;
+
+    final script = _sourceScript;
+    final className = _className;
+    if (script == null || className == null) {
+      Log.error(
+        "Semantic Search",
+        "tagSearch was declared but the source script is unavailable",
+      );
+      return null;
+    }
+    final runtimeAlias = _key!;
+    final spec = SemanticLaneSpec(
+      sourceKey: _sourceKey!,
+      script: script,
+      className: className,
+      alias: runtimeAlias,
+      context: _executionContext,
+    );
+
+    if (shape['hasLoad'] == true) {
+      return SemanticSearchData(
+        (value, options, page, {required requestScope}) async {
+          try {
+            final result = await _invokeSemanticCapability(
+              requestScope,
+              spec,
+              """
+              ComicSource.sources.$runtimeAlias.search.tagSearch.load(
+                ${jsonEncode(value)}, ${jsonEncode(options)}, ${jsonEncode(page)})
+            """,
+            );
+            return Res(
+              List.generate(
+                result["comics"].length,
+                (index) => Comic.fromJson(result["comics"][index], _sourceKey!),
+              ),
+              subData: result["maxPage"],
+            );
+          } catch (e, s) {
+            Log.error("Network", "$e\n$s");
+            return Res.error(e.toString());
+          }
+        },
+        null,
+        releaseLane: _releaseSemanticLane,
+      );
+    }
+
+    return SemanticSearchData(null, (
+      value,
+      options,
+      next, {
+      required requestScope,
+    }) async {
+      try {
+        final result = await _invokeSemanticCapability(requestScope, spec, """
+              ComicSource.sources.$runtimeAlias.search.tagSearch.loadNext(
+                ${jsonEncode(value)}, ${jsonEncode(options)}, ${jsonEncode(next)})
+            """);
+        return Res(
+          List.generate(
+            result["comics"].length,
+            (index) => Comic.fromJson(result["comics"][index], _sourceKey!),
+          ),
+          subData: result["next"],
+        );
+      } catch (e, s) {
+        Log.error("Network", "$e\n$s");
+        return Res.error(e.toString());
+      }
+    }, releaseLane: _releaseSemanticLane);
+  }
+
+  /// Runs one semantic capability call on the lane bound to [scope].
+  ///
+  /// The lane owns the runtime, so the request scope is bound structurally at
+  /// runtime creation instead of being propagated through an asynchronous
+  /// context. Invocations on the same lane are serialized, which keeps a
+  /// leftover promise or timer job attributed to the query attempt that
+  /// created it.
+  Future<dynamic> _invokeSemanticCapability(
+    SemanticSearchRequestScope scope,
+    SemanticLaneSpec spec,
+    String call,
+  ) {
+    final lane = JsEngine().acquireSemanticLane(scope, spec);
+    return lane.serialize(() async {
+      final result = lane.evaluate(call);
+      return result is Future ? await result : result;
+    });
+  }
+
+  Future<void> _releaseSemanticLane(SemanticSearchRequestScope scope) async {
+    JsEngine().releaseSemanticLane(scope);
   }
 
   SearchPageData? _loadSearchData() {

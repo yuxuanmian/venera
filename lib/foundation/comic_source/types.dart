@@ -91,3 +91,26 @@ typedef TagSuggestionSelectFunc = String Function(String namespace, String tag);
 
 /// [rating] is the rating value, 0-10. 1 represents 0.5 star.
 typedef StarRatingFunc = Future<Res<bool>> Function(String comicId, int rating);
+
+/// Host-only adapter for the optional `search.tagSearch` page form.
+///
+/// [requestScope] is a named parameter and must stay last: the frozen Dart
+/// signature deliberately differs from the ordinary search typedef's parameter
+/// order. It is never serialized into the JavaScript call, and source code has
+/// no way to observe or cancel it.
+typedef SemanticPageLoader =
+    Future<Res<List<Comic>>> Function(
+      String value,
+      List<String> options,
+      int page, {
+      required SemanticSearchRequestScope requestScope,
+    });
+
+/// Host-only adapter for the optional `search.tagSearch` cursor form.
+typedef SemanticNextLoader =
+    Future<Res<List<Comic>>> Function(
+      String value,
+      List<String> options,
+      String? next, {
+      required SemanticSearchRequestScope requestScope,
+    });

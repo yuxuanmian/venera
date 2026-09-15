@@ -336,7 +336,15 @@ abstract mixin class _ComicPageActions {
     final context = App.mainNavigatorKey?.currentContext;
     if (context == null) return;
     final handleClickTagEvent = comicSource.handleClickTagEvent;
-    if (handleClickTagEvent == null) return;
+    if (handleClickTagEvent == null) {
+      // A missing handler is a compatibility fallback, not a no-op: the raw
+      // field value opens the current source's ordinary search. Using the raw
+      // value here keeps the author display-disambiguation syntax from being
+      // mistaken for source query grammar.
+      if (!context.mounted) return;
+      PageJumpTarget(comic.sourceKey, 'search', {'text': tag}).jump(context);
+      return;
+    }
 
     var searchTag = tag;
     if (_isAuthorNamespace(namespace)) {
@@ -355,8 +363,12 @@ abstract mixin class _ComicPageActions {
       }
     }
 
+    // An explicit null/undefined return is a deliberate no-op and must never
+    // fall back to ordinary search.
     final target = handleClickTagEvent(namespace, searchTag);
-    target?.jump(context);
+    if (target == null) return;
+    if (!context.mounted) return;
+    target.jump(context);
   }
 
   void showMoreActions() {

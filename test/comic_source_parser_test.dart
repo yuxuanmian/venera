@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -5,6 +6,7 @@ import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/js_engine.dart';
 import 'package:venera/foundation/scan/source_adapter.dart';
+import 'package:venera/foundation/semantic_search/request_scope.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -42,6 +44,7 @@ class ParserMissingSearchSource extends ComicSource {
 
     expect(source.key, key);
     expect(source.searchPageData, isNull);
+    expect(source.semanticSearchData, isNull);
     expect(source.onTagSuggestionSelected, isNull);
     expect(source.enableTagsSuggestions, isFalse);
     expect(source.loadComicInfo, isNotNull);
@@ -272,6 +275,525 @@ class ScanTwoBranchSource extends ComicSource {
         source.scan!.selectedEvidenceSchema,
         source.scan!.comic!.evidenceSchema,
       );
+    });
+  });
+
+  group('the optional tagSearch capability contract (T005)', () {
+    test(
+      'the page form parses into loadPage and leaves loadNext null',
+      () async {
+        const key = 'parser_tag_page_form';
+        final source = await ComicSourceParser().parse('''
+class ParserTagPageSource extends ComicSource {
+  name = "Parser tag page";
+  key = "$key";
+  version = "1.0.0";
+  minAppVersion = "1.0.0";
+  search = {
+    tagSearch: {
+      load: async (value, options, page) => ({comics: [], maxPage: 2}),
+    },
+  };
+}
+''', '$key.js');
+
+        expect(source.semanticSearchData, isNotNull);
+        expect(source.semanticSearchData!.loadPage, isNotNull);
+        expect(
+          source.semanticSearchData!.loadNext,
+          isNull,
+          reason: 'only the declared pagination form is exposed',
+        );
+      },
+    );
+
+    test(
+      'the cursor form parses into loadNext and leaves loadPage null',
+      () async {
+        const key = 'parser_tag_cursor_form';
+        final source = await ComicSourceParser().parse('''
+class ParserTagCursorSource extends ComicSource {
+  name = "Parser tag cursor";
+  key = "$key";
+  version = "1.0.0";
+  minAppVersion = "1.0.0";
+  search = {
+    tagSearch: {
+      loadNext: async (value, options, next) => ({comics: [], next: null}),
+    },
+  };
+}
+''', '$key.js');
+
+        expect(source.semanticSearchData, isNotNull);
+        expect(source.semanticSearchData!.loadNext, isNotNull);
+        expect(
+          source.semanticSearchData!.loadPage,
+          isNull,
+          reason: 'only the declared pagination form is exposed',
+        );
+      },
+    );
+
+    test('load wins when both pagination forms are declared', () async {
+      const key = 'parser_tag_load_wins';
+      final source = await ComicSourceParser().parse('''
+class ParserTagLoadWinsSource extends ComicSource {
+  name = "Parser tag load wins";
+  key = "$key";
+  version = "1.0.0";
+  minAppVersion = "1.0.0";
+  search = {
+    tagSearch: {
+      load: async (value, options, page) => ({
+        comics: [new Comic({id: "from-load-" + page, title: "load", cover: "", tags: [], description: ""})],
+        maxPage: 3,
+      }),
+      loadNext: async (value, options, next) => ({
+        comics: [new Comic({id: "from-loadNext", title: "next", cover: "", tags: [], description: ""})],
+        next: "cursor",
+      }),
+    },
+  };
+}
+''', '$key.js');
+
+      expect(source.semanticSearchData, isNotNull);
+      expect(source.semanticSearchData!.loadPage, isNotNull);
+      expect(
+        source.semanticSearchData!.loadNext,
+        isNull,
+        reason:
+            'tagSearch.load wins over tagSearch.loadNext, like ordinary search',
+      );
+
+      final scope = SemanticSearchRequestScope();
+      addTearDown(() => source.semanticSearchData!.releaseLane!(scope));
+
+      // The loader the Host is handed must be the one that is really called.
+      final res = await source.semanticSearchData!.loadPage!(
+        'value',
+        const <String>[],
+        1,
+        requestScope: scope,
+      );
+      expect(res.error, isFalse);
+      expect(res.data.single.id, 'from-load-1');
+      expect(res.subData, 3);
+    });
+
+    test(
+      'the page adapter passes value, options and page through unchanged',
+      () async {
+        const key = 'parser_tag_page_args';
+        final source = await ComicSourceParser().parse('''
+class ParserTagPageArgsSource extends ComicSource {
+  name = "Parser tag page args";
+  key = "$key";
+  version = "1.0.0";
+  minAppVersion = "1.0.0";
+  search = {
+    tagSearch: {
+      load: async (...args) => ({
+        comics: [new Comic({
+          id: JSON.stringify(args),
+          title: "record",
+          cover: "",
+          tags: [],
+          description: "",
+        })],
+        maxPage: 2,
+      }),
+    },
+  };
+}
+''', '$key.js');
+
+        final scope = SemanticSearchRequestScope();
+        addTearDown(() => source.semanticSearchData!.releaseLane!(scope));
+
+        const value = '  MiXeD Case  ';
+        final options = <String>['dd', 'zh'];
+        final res = await source.semanticSearchData!.loadPage!(
+          value,
+          options,
+          2,
+          requestScope: scope,
+        );
+        expect(res.error, isFalse);
+
+        final recorded = jsonDecode(res.data.single.id) as List<dynamic>;
+        expect(
+          recorded.length,
+          3,
+          reason:
+              'the Dart-only requestScope must never appear in the JavaScript '
+              'argument list',
+        );
+        expect(
+          recorded[0],
+          value,
+          reason: 'the opaque value is never trimmed or re-cased',
+        );
+        expect(
+          recorded[1],
+          isA<List<dynamic>>(),
+          reason: 'options must arrive as a JS array',
+        );
+        expect(recorded[1], options);
+        expect(recorded[2], 2);
+      },
+    );
+
+    test(
+      'the cursor adapter passes value, options and next through unchanged',
+      () async {
+        const key = 'parser_tag_cursor_args';
+        final source = await ComicSourceParser().parse('''
+class ParserTagCursorArgsSource extends ComicSource {
+  name = "Parser tag cursor args";
+  key = "$key";
+  version = "1.0.0";
+  minAppVersion = "1.0.0";
+  search = {
+    tagSearch: {
+      loadNext: async (...args) => ({
+        comics: [new Comic({
+          id: JSON.stringify(args),
+          title: "record",
+          cover: "",
+          tags: [],
+          description: "",
+        })],
+        next: "cursor-1",
+      }),
+    },
+  };
+}
+''', '$key.js');
+
+        final scope = SemanticSearchRequestScope();
+        addTearDown(() => source.semanticSearchData!.releaseLane!(scope));
+
+        const value = '  MiXeD Case  ';
+        final options = <String>['dd', 'zh'];
+        final res = await source.semanticSearchData!.loadNext!(
+          value,
+          options,
+          null,
+          requestScope: scope,
+        );
+        expect(res.error, isFalse);
+
+        final recorded = jsonDecode(res.data.single.id) as List<dynamic>;
+        expect(
+          recorded.length,
+          3,
+          reason:
+              'the Dart-only requestScope must never appear in the JavaScript '
+              'argument list',
+        );
+        expect(recorded[0], value);
+        expect(recorded[1], isA<List<dynamic>>());
+        expect(recorded[1], options);
+        expect(
+          recorded[2],
+          isNull,
+          reason: 'the initial cursor form invocation passes an explicit null',
+        );
+        expect(res.subData, 'cursor-1');
+      },
+    );
+
+    test('the page form preserves comics and maxPage', () async {
+      const key = 'parser_tag_page_results';
+      final source = await ComicSourceParser().parse('''
+class ParserTagPageResultsSource extends ComicSource {
+  name = "Parser tag page results";
+  key = "$key";
+  version = "1.0.0";
+  minAppVersion = "1.0.0";
+  search = {
+    tagSearch: {
+      load: async (value, options, page) => ({
+        comics: [new Comic({
+          id: "comic-1",
+          title: "Title 1",
+          subtitle: "Subtitle 1",
+          cover: "cover-1",
+          tags: ["tag-1", "tag-2"],
+          description: "Description 1",
+        })],
+        maxPage: 7,
+      }),
+    },
+  };
+}
+''', '$key.js');
+
+      final scope = SemanticSearchRequestScope();
+      addTearDown(() => source.semanticSearchData!.releaseLane!(scope));
+
+      final res = await source.semanticSearchData!.loadPage!(
+        'v',
+        const <String>[],
+        1,
+        requestScope: scope,
+      );
+      expect(res.error, isFalse);
+      final comic = res.data.single;
+      expect(comic.id, 'comic-1');
+      expect(comic.title, 'Title 1');
+      expect(comic.subtitle, 'Subtitle 1');
+      expect(comic.cover, 'cover-1');
+      expect(comic.tags, ['tag-1', 'tag-2']);
+      expect(comic.description, 'Description 1');
+      expect(comic.sourceKey, key);
+      expect(
+        res.subData,
+        7,
+        reason: 'Res.subData carries the source maxPage unchanged',
+      );
+    });
+
+    test('the cursor form preserves comics and next', () async {
+      const key = 'parser_tag_cursor_results';
+      final source = await ComicSourceParser().parse('''
+class ParserTagCursorResultsSource extends ComicSource {
+  name = "Parser tag cursor results";
+  key = "$key";
+  version = "1.0.0";
+  minAppVersion = "1.0.0";
+  search = {
+    tagSearch: {
+      loadNext: async (value, options, next) => ({
+        comics: [new Comic({id: "comic-2", title: "Title 2", cover: "c2", tags: [], description: ""})],
+        next: "opaque-next",
+      }),
+    },
+  };
+}
+''', '$key.js');
+
+      final scope = SemanticSearchRequestScope();
+      addTearDown(() => source.semanticSearchData!.releaseLane!(scope));
+
+      final res = await source.semanticSearchData!.loadNext!(
+        'v',
+        const <String>[],
+        null,
+        requestScope: scope,
+      );
+      expect(res.error, isFalse);
+      final comic = res.data.single;
+      expect(comic.id, 'comic-2');
+      expect(comic.title, 'Title 2');
+      expect(comic.sourceKey, key);
+      expect(
+        res.subData,
+        'opaque-next',
+        reason: 'Res.subData carries the source cursor unchanged',
+      );
+    });
+  });
+
+  group(
+    'an invalid optional capability cannot break ordinary search (T049)',
+    () {
+      /// Every case in this group must keep the ordinary loader working; the
+      /// assertions below therefore call it for real instead of only inspecting
+      /// the parsed shape.
+      Future<void> expectOrdinaryLoaderWorks(
+        ComicSource source,
+        String reason,
+      ) async {
+        expect(source.searchPageData, isNotNull, reason: reason);
+        final res = await source.searchPageData!.loadPage!(
+          'keyword',
+          1,
+          const <String>[],
+        );
+        expect(res.error, isFalse, reason: reason);
+        expect(res.data.single.id, 'ordinary-ok', reason: reason);
+      }
+
+      /// The optional capability is absent, and ordinary search is untouched.
+      Future<void> expectAbsentCapability(
+        ComicSource source,
+        String reason,
+      ) async {
+        expect(source.semanticSearchData, isNull, reason: reason);
+        await expectOrdinaryLoaderWorks(source, reason);
+      }
+
+      String ordinarySearchSource(String key, String tagSearchDeclaration) =>
+          '''
+class ParserTagCompatibilitySource extends ComicSource {
+  name = "Parser tag compatibility";
+  key = "$key";
+  version = "1.0.0";
+  minAppVersion = "1.0.0";
+  search = {
+    load: async (keyword, options, page) => ({
+      comics: [new Comic({id: "ordinary-ok", title: "ordinary", cover: "", tags: [], description: ""})],
+      maxPage: 1,
+    }),
+$tagSearchDeclaration
+  };
+}
+''';
+
+      test(
+        'an ordinary-only search leaves the semantic capability absent',
+        () async {
+          const key = 'parser_tag_ordinary_only';
+          final source = await ComicSourceParser().parse(
+            ordinarySearchSource(key, ''),
+            '$key.js',
+          );
+
+          expect(source.semanticSearchData, isNull);
+          await expectAbsentCapability(source, 'ordinary-only search');
+        },
+      );
+
+      test('a tagSearch without a function loader is ignored', () async {
+        const key = 'parser_tag_no_function_loader';
+        final source = await ComicSourceParser().parse(
+          ordinarySearchSource(key, '''
+    tagSearch: {
+      load: "not a function",
+      loadNext: 5,
+    },'''),
+          '$key.js',
+        );
+
+        await expectAbsentCapability(source, 'non-function loaders');
+      });
+
+      test('a non-object tagSearch is ignored', () async {
+        for (final declaration in const [
+          '"tagSearch"',
+          '[1, 2]',
+          '42',
+          'null',
+        ]) {
+          final key = 'parser_tag_shape_${declaration.hashCode.abs()}';
+          final source = await ComicSourceParser().parse(
+            ordinarySearchSource(key, '    tagSearch: $declaration,'),
+            '$key.js',
+          );
+
+          await expectAbsentCapability(source, declaration);
+        }
+      });
+
+      test(
+        'a tagSearch loader that throws degrades to an adapter error',
+        () async {
+          const key = 'parser_tag_loader_throws';
+          final source = await ComicSourceParser().parse('''
+class ParserTagThrowsSource extends ComicSource {
+  name = "Parser tag throws";
+  key = "$key";
+  version = "1.0.0";
+  minAppVersion = "1.0.0";
+  search = {
+    load: async (keyword, options, page) => ({
+      comics: [new Comic({id: "ordinary-ok", title: "ordinary", cover: "", tags: [], description: ""})],
+      maxPage: 1,
+    }),
+    tagSearch: {
+      load: async (value, options, page) => { throw new Error("semantic loader exploded"); },
+    },
+  };
+}
+''', '$key.js');
+
+          // The capability still parses; only its invocation fails.
+          expect(source.semanticSearchData, isNotNull);
+          expect(source.semanticSearchData!.loadPage, isNotNull);
+
+          final scope = SemanticSearchRequestScope();
+          addTearDown(() => source.semanticSearchData!.releaseLane!(scope));
+          final semantic = await source.semanticSearchData!.loadPage!(
+            'v',
+            const <String>[],
+            1,
+            requestScope: scope,
+          );
+          expect(semantic.error, isTrue);
+          expect(semantic.dataOrNull, isNull);
+          expect(semantic.errorMessage, isNotNull);
+
+          await expectOrdinaryLoaderWorks(source, 'throwing semantic loader');
+        },
+      );
+    },
+  );
+
+  group('tagSearch navigation targets (T024)', () {
+    const key = 'parser_tag_target_source';
+
+    test('legacy and modern shapes both keep the opaque keyword', () {
+      final legacy = PageJumpTarget.parse(key, {
+        'action': 'tagSearch',
+        'keyword': '  A B  ',
+      });
+      expect(legacy.page, 'tagSearch');
+      expect(legacy.tagSearchValue, '  A B  ');
+      expect(legacy.sourceKey, key);
+
+      final modern = PageJumpTarget.parse(key, {
+        'page': 'tagSearch',
+        'attributes': {'keyword': '  A B  '},
+      });
+      expect(modern.page, 'tagSearch');
+      expect(modern.tagSearchValue, '  A B  ');
+      expect(modern.sourceKey, key);
+    });
+
+    test('an unknown action still parses without guessing', () {
+      final unknown = PageJumpTarget.parse(key, {'action': 'mystery'});
+      expect(unknown.page, 'mystery');
+      expect(unknown.sourceKey, key);
+      expect(unknown.attributes, isNull);
+    });
+
+    test('ordinary search and category parsing is unchanged', () {
+      final legacySearch = PageJumpTarget.parse(key, {
+        'action': 'search',
+        'keyword': 'keyword',
+      });
+      expect(legacySearch.page, 'search');
+      expect(legacySearch.sourceKey, key);
+      expect(legacySearch.attributes, {'text': 'keyword'});
+
+      final legacyCategory = PageJumpTarget.parse(key, {
+        'action': 'category',
+        'keyword': 'category',
+        'param': 'param',
+      });
+      expect(legacyCategory.page, 'category');
+      expect(legacyCategory.attributes, {
+        'category': 'category',
+        'param': 'param',
+      });
+
+      final modernSearch = PageJumpTarget.parse(key, {
+        'page': 'search',
+        'attributes': {'text': 'keyword'},
+      });
+      expect(modernSearch.page, 'search');
+      expect(modernSearch.attributes, {'text': 'keyword'});
+
+      final stringSearch = PageJumpTarget.parse(key, 'search:keyword');
+      expect(stringSearch.page, 'search');
+      expect(stringSearch.attributes, {'text': 'keyword'});
+
+      final stringCategory = PageJumpTarget.parse(key, 'category:name@param');
+      expect(stringCategory.page, 'category');
+      expect(stringCategory.attributes, {'category': 'name', 'param': 'param'});
     });
   });
 }

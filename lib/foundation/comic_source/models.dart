@@ -593,6 +593,14 @@ class PageJumpTarget {
 
   const PageJumpTarget(this.sourceKey, this.page, this.attributes);
 
+  /// The opaque value a `tagSearch` target carries.
+  ///
+  /// It is never trimmed, re-cased, namespace-joined or decoded by the Host; a
+  /// `tagSearch` target always keeps the source that produced it so the
+  /// semantic page never re-queries a global "current source".
+  String get tagSearchValue =>
+      attributes?["keyword"] ?? attributes?["text"] ?? "";
+
   static PageJumpTarget parse(String sourceKey, dynamic value) {
     if (value is Map) {
       if (value['page'] != null) {
@@ -612,6 +620,12 @@ class PageJumpTarget {
           return PageJumpTarget(sourceKey, "category", {
             "category": value["keyword"],
             "param": value["param"],
+          });
+        } else if (page == "tagSearch") {
+          // The legacy action shape must keep its opaque keyword instead of
+          // being dropped like an unknown action.
+          return PageJumpTarget(sourceKey, "tagSearch", {
+            "keyword": value["keyword"],
           });
         } else {
           return PageJumpTarget(sourceKey, page, null);
@@ -661,6 +675,11 @@ class PageJumpTarget {
           options: List.from(attributes?["options"] ?? []),
           param: attributes?["param"],
         ),
+      );
+    } else if (page == "tagSearch") {
+      // Always the target's own source key; the semantic page fixes it.
+      context.to(
+        () => SemanticSearchPage(sourceKey: sourceKey, value: tagSearchValue),
       );
     } else {
       Log.error("Page Jump", "Unknown page: $page");

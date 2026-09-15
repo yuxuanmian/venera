@@ -1,0 +1,4561 @@
+{
+  "schemaVersion": 1,
+  "kind": "venera-configs ordinary capability shape",
+  "regeneratedBy": "VENERA_CONFIGS_BASELINE_WRITE=1 flutter test --no-pub test/comic_source_config_compatibility_test.dart",
+  "note": "Pre-change baseline for feature 008 (T003/T059). It records only ordinary capability shape: no semantic tagSearch data, no URLs, headers, cookies or account data.",
+  "entries": [
+    {
+      "fileName": "copy_manga.js",
+      "indexKey": "copy_manga",
+      "indexVersion": "1.4.1",
+      "indexName": "拷贝漫画",
+      "capability": {
+        "key": "copy_manga",
+        "version": "1.4.1",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": [
+            {
+              "label": "搜索选项",
+              "type": "select",
+              "defaultValue": "",
+              "choices": {
+                "": "全部",
+                "author": "作者",
+                "local": "汉化组",
+                "name": "名称"
+              }
+            }
+          ]
+        },
+        "category": {
+          "title": "拷贝漫画",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "拷贝漫画",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 1
+            },
+            {
+              "title": "主题",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 61
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "",
+              "choices": {
+                "": "全部",
+                "finish": "已完结",
+                "japan": "日漫",
+                "korea": "韩漫",
+                "west": "美漫"
+              },
+              "notShowWhen": [],
+              "showWhen": [
+                "全部",
+                "愛情",
+                "歡樂向",
+                "冒險",
+                "奇幻",
+                "百合",
+                "校园",
+                "科幻",
+                "東方",
+                "耽美",
+                "生活",
+                "格鬥",
+                "轻小说",
+                "悬疑",
+                "其他",
+                "神鬼",
+                "职场",
+                "TL",
+                "萌系",
+                "治愈",
+                "長條",
+                "四格",
+                "节操",
+                "舰娘",
+                "竞技",
+                "搞笑",
+                "伪娘",
+                "热血",
+                "励志",
+                "性转换",
+                "彩色",
+                "後宮",
+                "美食",
+                "侦探",
+                "AA",
+                "音乐舞蹈",
+                "魔幻",
+                "战争",
+                "历史",
+                "异世界",
+                "惊悚",
+                "机战",
+                "都市",
+                "穿越",
+                "恐怖",
+                "C100",
+                "重生",
+                "C99",
+                "C101",
+                "C97",
+                "C96",
+                "生存",
+                "宅系",
+                "武侠",
+                "C98",
+                "C95",
+                "FATE",
+                "转生",
+                "無修正",
+                "仙侠",
+                "LoveLive"
+              ]
+            },
+            {
+              "label": "",
+              "choices": {
+                "*datetime_updated": "时间倒序",
+                "*popular": "热度倒序",
+                "datetime_updated": "时间正序",
+                "popular": "热度正序"
+              },
+              "notShowWhen": [],
+              "showWhen": [
+                "全部",
+                "愛情",
+                "歡樂向",
+                "冒險",
+                "奇幻",
+                "百合",
+                "校园",
+                "科幻",
+                "東方",
+                "耽美",
+                "生活",
+                "格鬥",
+                "轻小说",
+                "悬疑",
+                "其他",
+                "神鬼",
+                "职场",
+                "TL",
+                "萌系",
+                "治愈",
+                "長條",
+                "四格",
+                "节操",
+                "舰娘",
+                "竞技",
+                "搞笑",
+                "伪娘",
+                "热血",
+                "励志",
+                "性转换",
+                "彩色",
+                "後宮",
+                "美食",
+                "侦探",
+                "AA",
+                "音乐舞蹈",
+                "魔幻",
+                "战争",
+                "历史",
+                "异世界",
+                "惊悚",
+                "机战",
+                "都市",
+                "穿越",
+                "恐怖",
+                "C100",
+                "重生",
+                "C99",
+                "C101",
+                "C97",
+                "C96",
+                "生存",
+                "宅系",
+                "武侠",
+                "C98",
+                "C95",
+                "FATE",
+                "转生",
+                "無修正",
+                "仙侠",
+                "LoveLive"
+              ]
+            },
+            {
+              "label": "",
+              "choices": {
+                "female": "女频",
+                "male": "男频"
+              },
+              "notShowWhen": [],
+              "showWhen": [
+                "排行"
+              ]
+            },
+            {
+              "label": "",
+              "choices": {
+                "day": "上升最快",
+                "month": "最近30天",
+                "total": "總榜單",
+                "week": "最近7天"
+              },
+              "notShowWhen": [],
+              "showWhen": [
+                "排行"
+              ]
+            }
+          ],
+          "optionLoader": false,
+          "ranking": null
+        },
+        "favorites": {
+          "title": "拷贝漫画",
+          "multiFolder": false,
+          "singleFolderForSingleComic": false,
+          "loadComic": true,
+          "loadNext": false,
+          "loadFolders": false,
+          "addFolder": false,
+          "deleteFolder": false,
+          "addOrDelFavorite": true,
+          "updateCheck": false
+        },
+        "explore": [
+          {
+            "title": "拷贝漫画",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": {
+          "login": true,
+          "checkLoginStatus": false,
+          "cookieFieldCount": 0,
+          "validateCookies": false
+        },
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": false,
+          "thumbnailLoadingConfig": false,
+          "commentsLoader": true,
+          "sendComment": true,
+          "chapterCommentsLoader": true,
+          "sendChapterComment": true,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [
+          "base_url",
+          "clear_device_info",
+          "favorites_ordering",
+          "image_quality",
+          "region",
+          "search_api"
+        ],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "copy_manga_multi_accounts.js",
+      "indexKey": "copy_manga_multi",
+      "indexVersion": "1.4.1",
+      "indexName": "拷贝漫画(多账号)",
+      "capability": {
+        "key": "copy_manga_multi",
+        "version": "1.4.1",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": [
+            {
+              "label": "搜索选项",
+              "type": "select",
+              "defaultValue": "",
+              "choices": {
+                "": "全部",
+                "author": "作者",
+                "local": "汉化组",
+                "name": "名称"
+              }
+            }
+          ]
+        },
+        "category": {
+          "title": "拷贝漫画M",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "拷贝漫画M",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 1
+            },
+            {
+              "title": "主题",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 61
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "",
+              "choices": {
+                "": "全部",
+                "finish": "已完结",
+                "japan": "日漫",
+                "korea": "韩漫",
+                "west": "美漫"
+              },
+              "notShowWhen": [],
+              "showWhen": [
+                "全部",
+                "愛情",
+                "歡樂向",
+                "冒險",
+                "奇幻",
+                "百合",
+                "校园",
+                "科幻",
+                "東方",
+                "耽美",
+                "生活",
+                "格鬥",
+                "轻小说",
+                "悬疑",
+                "其他",
+                "神鬼",
+                "职场",
+                "TL",
+                "萌系",
+                "治愈",
+                "長條",
+                "四格",
+                "节操",
+                "舰娘",
+                "竞技",
+                "搞笑",
+                "伪娘",
+                "热血",
+                "励志",
+                "性转换",
+                "彩色",
+                "後宮",
+                "美食",
+                "侦探",
+                "AA",
+                "音乐舞蹈",
+                "魔幻",
+                "战争",
+                "历史",
+                "异世界",
+                "惊悚",
+                "机战",
+                "都市",
+                "穿越",
+                "恐怖",
+                "C100",
+                "重生",
+                "C99",
+                "C101",
+                "C97",
+                "C96",
+                "生存",
+                "宅系",
+                "武侠",
+                "C98",
+                "C95",
+                "FATE",
+                "转生",
+                "無修正",
+                "仙侠",
+                "LoveLive"
+              ]
+            },
+            {
+              "label": "",
+              "choices": {
+                "*datetime_updated": "时间倒序",
+                "*popular": "热度倒序",
+                "datetime_updated": "时间正序",
+                "popular": "热度正序"
+              },
+              "notShowWhen": [],
+              "showWhen": [
+                "全部",
+                "愛情",
+                "歡樂向",
+                "冒險",
+                "奇幻",
+                "百合",
+                "校园",
+                "科幻",
+                "東方",
+                "耽美",
+                "生活",
+                "格鬥",
+                "轻小说",
+                "悬疑",
+                "其他",
+                "神鬼",
+                "职场",
+                "TL",
+                "萌系",
+                "治愈",
+                "長條",
+                "四格",
+                "节操",
+                "舰娘",
+                "竞技",
+                "搞笑",
+                "伪娘",
+                "热血",
+                "励志",
+                "性转换",
+                "彩色",
+                "後宮",
+                "美食",
+                "侦探",
+                "AA",
+                "音乐舞蹈",
+                "魔幻",
+                "战争",
+                "历史",
+                "异世界",
+                "惊悚",
+                "机战",
+                "都市",
+                "穿越",
+                "恐怖",
+                "C100",
+                "重生",
+                "C99",
+                "C101",
+                "C97",
+                "C96",
+                "生存",
+                "宅系",
+                "武侠",
+                "C98",
+                "C95",
+                "FATE",
+                "转生",
+                "無修正",
+                "仙侠",
+                "LoveLive"
+              ]
+            },
+            {
+              "label": "",
+              "choices": {
+                "female": "女频",
+                "male": "男频"
+              },
+              "notShowWhen": [],
+              "showWhen": [
+                "排行"
+              ]
+            },
+            {
+              "label": "",
+              "choices": {
+                "day": "上升最快",
+                "month": "最近30天",
+                "total": "總榜單",
+                "week": "最近7天"
+              },
+              "notShowWhen": [],
+              "showWhen": [
+                "排行"
+              ]
+            }
+          ],
+          "optionLoader": false,
+          "ranking": null
+        },
+        "favorites": {
+          "title": "拷贝漫画M",
+          "multiFolder": true,
+          "singleFolderForSingleComic": true,
+          "loadComic": true,
+          "loadNext": false,
+          "loadFolders": true,
+          "addFolder": false,
+          "deleteFolder": false,
+          "addOrDelFavorite": true,
+          "updateCheck": false
+        },
+        "explore": [
+          {
+            "title": "拷贝漫画M",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": {
+          "login": true,
+          "checkLoginStatus": false,
+          "cookieFieldCount": 0,
+          "validateCookies": false
+        },
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": false,
+          "thumbnailLoadingConfig": false,
+          "commentsLoader": true,
+          "sendComment": true,
+          "chapterCommentsLoader": true,
+          "sendChapterComment": true,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [
+          "base_url",
+          "clear_device_info",
+          "clear_sub_accounts",
+          "favorites_ordering",
+          "help",
+          "image_quality",
+          "login_sub_accounts",
+          "region",
+          "search_api",
+          "sub_accounts"
+        ],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "komiic.js",
+      "indexKey": "Komiic",
+      "indexVersion": "1.0.3",
+      "indexName": "Komiic",
+      "capability": {
+        "key": "Komiic",
+        "version": "1.0.3",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": []
+        },
+        "category": {
+          "title": "Komiic",
+          "enableRankingPage": true,
+          "parts": [
+            {
+              "title": "主题",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 38
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "",
+              "choices": {
+                "DATE_UPDATED": "更新",
+                "FAVORITE_COUNT": "喜愛數",
+                "VIEWS": "觀看數"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            },
+            {
+              "label": "",
+              "choices": {
+                "": "全部",
+                "END": "完結",
+                "ONGOING": "連載中"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            }
+          ],
+          "optionLoader": false,
+          "ranking": {
+            "choices": {
+              "MONTH_VIEWS": "月",
+              "VIEWS": "綜合"
+            },
+            "load": true,
+            "loadWithNext": false
+          }
+        },
+        "favorites": {
+          "title": "Komiic",
+          "multiFolder": true,
+          "singleFolderForSingleComic": false,
+          "loadComic": true,
+          "loadNext": false,
+          "loadFolders": true,
+          "addFolder": true,
+          "deleteFolder": true,
+          "addOrDelFavorite": true,
+          "updateCheck": false
+        },
+        "explore": [
+          {
+            "title": "Komiic",
+            "type": "multiPageComicList",
+            "loadPage": true,
+            "loadNext": false,
+            "loadMultiPart": false,
+            "loadMixed": false
+          }
+        ],
+        "account": {
+          "login": true,
+          "checkLoginStatus": false,
+          "cookieFieldCount": 0,
+          "validateCookies": false
+        },
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": true,
+          "thumbnailLoadingConfig": false,
+          "commentsLoader": true,
+          "sendComment": true,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": false,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "baozi.js",
+      "indexKey": "baozi",
+      "indexVersion": "1.1.6",
+      "indexName": "包子漫画",
+      "capability": {
+        "key": "baozi",
+        "version": "1.1.6",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": []
+        },
+        "category": {
+          "title": "包子漫画",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "类型",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 26
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "",
+              "choices": {
+                "all": "全部",
+                "cn": "国漫",
+                "en": "欧美",
+                "jp": "日本",
+                "kr": "韩国"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            },
+            {
+              "label": "",
+              "choices": {
+                "all": "全部",
+                "pub": "已完结",
+                "serial": "连载中"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            }
+          ],
+          "optionLoader": false,
+          "ranking": null
+        },
+        "favorites": {
+          "title": "包子漫画",
+          "multiFolder": false,
+          "singleFolderForSingleComic": false,
+          "loadComic": true,
+          "loadNext": false,
+          "loadFolders": false,
+          "addFolder": false,
+          "deleteFolder": false,
+          "addOrDelFavorite": true,
+          "updateCheck": false
+        },
+        "explore": [
+          {
+            "title": "包子漫画",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": {
+          "login": true,
+          "checkLoginStatus": false,
+          "cookieFieldCount": 0,
+          "validateCookies": false
+        },
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": false,
+          "thumbnailLoadingConfig": false,
+          "commentsLoader": false,
+          "sendComment": false,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": false,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [
+          "cdn_domains",
+          "domains",
+          "image_quality",
+          "language"
+        ],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "picacg.js",
+      "indexKey": "picacg",
+      "indexVersion": "1.0.8",
+      "indexName": "Picacg",
+      "capability": {
+        "key": "picacg",
+        "version": "1.0.8",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": [
+            {
+              "label": "Sort",
+              "type": "select",
+              "defaultValue": "dd",
+              "choices": {
+                "da": "Old to new",
+                "dd": "New to old",
+                "ld": "Most likes",
+                "vd": "Most nominated"
+              }
+            }
+          ]
+        },
+        "category": {
+          "title": "Picacg",
+          "enableRankingPage": true,
+          "parts": [
+            {
+              "title": "主题",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 40
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "",
+              "choices": {
+                "da": "Old to new",
+                "dd": "New to old",
+                "ld": "Most likes",
+                "vd": "Most nominated"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            }
+          ],
+          "optionLoader": false,
+          "ranking": {
+            "choices": {
+              "D30": "Month",
+              "D7": "Week",
+              "H24": "Day"
+            },
+            "load": true,
+            "loadWithNext": false
+          }
+        },
+        "favorites": {
+          "title": "Picacg",
+          "multiFolder": false,
+          "singleFolderForSingleComic": false,
+          "loadComic": true,
+          "loadNext": false,
+          "loadFolders": false,
+          "addFolder": false,
+          "deleteFolder": false,
+          "addOrDelFavorite": true,
+          "updateCheck": false
+        },
+        "explore": [
+          {
+            "title": "Picacg Random",
+            "type": "multiPageComicList",
+            "loadPage": true,
+            "loadNext": false,
+            "loadMultiPart": false,
+            "loadMixed": false
+          },
+          {
+            "title": "Picacg Latest",
+            "type": "multiPageComicList",
+            "loadPage": true,
+            "loadNext": false,
+            "loadMultiPart": false,
+            "loadMixed": false
+          },
+          {
+            "title": "Picacg H24",
+            "type": "multiPageComicList",
+            "loadPage": true,
+            "loadNext": false,
+            "loadMultiPart": false,
+            "loadMixed": false
+          },
+          {
+            "title": "Picacg D7",
+            "type": "multiPageComicList",
+            "loadPage": true,
+            "loadNext": false,
+            "loadMultiPart": false,
+            "loadMixed": false
+          },
+          {
+            "title": "Picacg D30",
+            "type": "multiPageComicList",
+            "loadPage": true,
+            "loadNext": false,
+            "loadMultiPart": false,
+            "loadMixed": false
+          }
+        ],
+        "account": {
+          "login": true,
+          "checkLoginStatus": false,
+          "cookieFieldCount": 0,
+          "validateCookies": false
+        },
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": true,
+          "thumbnailLoadingConfig": true,
+          "commentsLoader": true,
+          "sendComment": true,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": true,
+          "voteComment": false,
+          "likeComment": true,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [
+          "appChannel",
+          "base_url",
+          "favoriteSort",
+          "imageQuality"
+        ],
+        "translationLanguages": [
+          "zh_CN",
+          "zh_TW"
+        ]
+      }
+    },
+    {
+      "fileName": "nhentai.js",
+      "indexKey": "nhentai",
+      "indexVersion": "1.1.0",
+      "indexName": "nhentai",
+      "capability": {
+        "key": "nhentai",
+        "version": "1.1.0",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": [
+            {
+              "label": "sort",
+              "type": "select",
+              "defaultValue": "date",
+              "choices": {
+                "date": "Recent",
+                "popular": "Popular All"
+              }
+            }
+          ]
+        },
+        "category": {
+          "title": "nhentai",
+          "enableRankingPage": true,
+          "parts": [
+            {
+              "title": "Language",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 3
+            },
+            {
+              "title": "Tags",
+              "enableRandom": true,
+              "kind": "random",
+              "count": 720,
+              "randomNumber": 20
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "",
+              "choices": {
+                "/": "Recent",
+                "/popular": "Popular All",
+                "/popular@month": "Popular Month",
+                "/popular@today": "Popular Today",
+                "/popular@week": "Popular Week"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            }
+          ],
+          "optionLoader": false,
+          "ranking": {
+            "choices": {
+              "date": "Recent",
+              "month": "Popular Month",
+              "popular": "Popular All",
+              "today": "Popular Today",
+              "week": "Popular Week"
+            },
+            "load": true,
+            "loadWithNext": false
+          }
+        },
+        "favorites": {
+          "title": "nhentai",
+          "multiFolder": false,
+          "singleFolderForSingleComic": false,
+          "loadComic": true,
+          "loadNext": false,
+          "loadFolders": false,
+          "addFolder": false,
+          "deleteFolder": false,
+          "addOrDelFavorite": true,
+          "updateCheck": false
+        },
+        "explore": [
+          {
+            "title": "nhentai",
+            "type": "mixed",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": false,
+            "loadMixed": true
+          }
+        ],
+        "account": {
+          "login": false,
+          "checkLoginStatus": true,
+          "cookieFieldCount": 0,
+          "validateCookies": false
+        },
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": true,
+          "thumbnailLoadingConfig": true,
+          "commentsLoader": true,
+          "sendComment": true,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": true,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": true,
+          "enableTagsSuggestions": true,
+          "enableTagsTranslate": true
+        },
+        "settingsKeys": [
+          "apiKey"
+        ],
+        "translationLanguages": [
+          "en",
+          "zh_CN",
+          "zh_TW"
+        ]
+      }
+    },
+    {
+      "fileName": "wnacg.js",
+      "indexKey": "wnacg",
+      "indexVersion": "1.0.5",
+      "indexName": "紳士漫畫",
+      "capability": {
+        "key": "wnacg",
+        "version": "1.0.5",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": []
+        },
+        "category": {
+          "title": "紳士漫畫",
+          "enableRankingPage": true,
+          "parts": [
+            {
+              "title": "最新",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 1
+            },
+            {
+              "title": "同人誌",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 7
+            },
+            {
+              "title": "單行本",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 4
+            },
+            {
+              "title": "雜誌短篇",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 4
+            },
+            {
+              "title": "韓漫",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 3
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [],
+          "optionLoader": false,
+          "ranking": {
+            "choices": {
+              "day": "Day",
+              "month": "Month",
+              "week": "Week"
+            },
+            "load": true,
+            "loadWithNext": false
+          }
+        },
+        "favorites": {
+          "title": "紳士漫畫",
+          "multiFolder": true,
+          "singleFolderForSingleComic": false,
+          "loadComic": true,
+          "loadNext": false,
+          "loadFolders": true,
+          "addFolder": true,
+          "deleteFolder": true,
+          "addOrDelFavorite": true,
+          "updateCheck": false
+        },
+        "explore": [
+          {
+            "title": "紳士漫畫",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": {
+          "login": true,
+          "checkLoginStatus": false,
+          "cookieFieldCount": 0,
+          "validateCookies": false
+        },
+        "comic": {
+          "thumbnailLoader": true,
+          "imageLoadingConfig": false,
+          "thumbnailLoadingConfig": false,
+          "commentsLoader": false,
+          "sendComment": false,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [
+          "domain0",
+          "domainSelection",
+          "refreshDomains",
+          "refreshDomainsOnStart"
+        ],
+        "translationLanguages": [
+          "zh_CN",
+          "zh_TW"
+        ]
+      }
+    },
+    {
+      "fileName": "ehentai.js",
+      "indexKey": "ehentai",
+      "indexVersion": "1.1.8",
+      "indexName": "ehentai",
+      "capability": {
+        "key": "ehentai",
+        "version": "1.2.0",
+        "search": {
+          "loadPage": false,
+          "loadNext": true,
+          "optionList": [
+            {
+              "label": "Category",
+              "type": "multi-select",
+              "defaultValue": "[\"0\",\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\"]",
+              "choices": {
+                "0": "Misc",
+                "1": "Doujinshi",
+                "2": "Manga",
+                "3": "Artist CG",
+                "4": "Game CG",
+                "5": "Image Set",
+                "6": "Cosplay",
+                "7": "Asian Porn",
+                "8": "Non-H",
+                "9": "Western"
+              }
+            },
+            {
+              "label": "Min Stars",
+              "type": "dropdown",
+              "defaultValue": "",
+              "choices": {
+                "": "<none>",
+                "0": "0",
+                "1": "1",
+                "2": "2",
+                "3": "3",
+                "4": "4",
+                "5": "5"
+              }
+            },
+            {
+              "label": "Language",
+              "type": "dropdown",
+              "defaultValue": "",
+              "choices": {
+                "": "<none>",
+                "chinese": "Chinese",
+                "english": "English",
+                "japanese": "Japanese"
+              }
+            }
+          ]
+        },
+        "category": {
+          "title": "ehentai",
+          "enableRankingPage": true,
+          "parts": []
+        },
+        "categoryComics": {
+          "optionList": [],
+          "optionLoader": false,
+          "ranking": {
+            "choices": {
+              "11": "all",
+              "12": "year",
+              "13": "month",
+              "15": "yesterday"
+            },
+            "load": true,
+            "loadWithNext": false
+          }
+        },
+        "favorites": {
+          "title": "ehentai",
+          "multiFolder": true,
+          "singleFolderForSingleComic": true,
+          "loadComic": false,
+          "loadNext": true,
+          "loadFolders": true,
+          "addFolder": false,
+          "deleteFolder": false,
+          "addOrDelFavorite": true,
+          "updateCheck": false
+        },
+        "explore": [
+          {
+            "title": "eh latest",
+            "type": "multiPageComicList",
+            "loadPage": false,
+            "loadNext": true,
+            "loadMultiPart": false,
+            "loadMixed": false
+          },
+          {
+            "title": "eh popular",
+            "type": "multiPageComicList",
+            "loadPage": false,
+            "loadNext": true,
+            "loadMultiPart": false,
+            "loadMixed": false
+          },
+          {
+            "title": "eh watched",
+            "type": "multiPageComicList",
+            "loadPage": false,
+            "loadNext": true,
+            "loadMultiPart": false,
+            "loadMixed": false
+          }
+        ],
+        "account": {
+          "login": false,
+          "checkLoginStatus": true,
+          "cookieFieldCount": 4,
+          "validateCookies": true
+        },
+        "comic": {
+          "thumbnailLoader": true,
+          "imageLoadingConfig": true,
+          "thumbnailLoadingConfig": true,
+          "commentsLoader": true,
+          "sendComment": true,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": true,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": true,
+          "archiveDownloader": true
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": true,
+          "enableTagsSuggestions": true,
+          "enableTagsTranslate": true
+        },
+        "settingsKeys": [
+          "domain",
+          "ehevent",
+          "hvevent"
+        ],
+        "translationLanguages": [
+          "en_US",
+          "zh_CN",
+          "zh_TW"
+        ]
+      }
+    },
+    {
+      "fileName": "jm.js",
+      "indexKey": "jm",
+      "indexVersion": "1.4.0",
+      "indexName": "禁漫天堂",
+      "capability": {
+        "key": "jm",
+        "version": "1.4.0",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": [
+            {
+              "label": "排序",
+              "type": "select",
+              "defaultValue": "mr",
+              "choices": {
+                "mp": "最多圖片",
+                "mr": "最新",
+                "mv": "總排行",
+                "mv_m": "月排行",
+                "mv_t": "日排行",
+                "mv_w": "周排行",
+                "tf": "最多喜歡"
+              }
+            }
+          ]
+        },
+        "category": {
+          "title": "禁漫天堂",
+          "enableRankingPage": true,
+          "parts": [
+            {
+              "title": "每週必看",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 1
+            },
+            {
+              "title": "成人A漫",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 10
+            },
+            {
+              "title": "主題A漫",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 18
+            },
+            {
+              "title": "角色扮演",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 13
+            },
+            {
+              "title": "特殊PLAY",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 18
+            },
+            {
+              "title": "特殊PLAY",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 6
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [],
+          "optionLoader": true,
+          "ranking": {
+            "choices": {
+              "mv": "總排行",
+              "mv_m": "月排行",
+              "mv_t": "日排行",
+              "mv_w": "周排行"
+            },
+            "load": true,
+            "loadWithNext": false
+          }
+        },
+        "favorites": {
+          "title": "禁漫天堂",
+          "multiFolder": true,
+          "singleFolderForSingleComic": true,
+          "loadComic": true,
+          "loadNext": false,
+          "loadFolders": true,
+          "addFolder": true,
+          "deleteFolder": true,
+          "addOrDelFavorite": true,
+          "updateCheck": false
+        },
+        "explore": [
+          {
+            "title": "禁漫天堂",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": {
+          "login": true,
+          "checkLoginStatus": false,
+          "cookieFieldCount": 0,
+          "validateCookies": false
+        },
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": true,
+          "thumbnailLoadingConfig": true,
+          "commentsLoader": true,
+          "sendComment": true,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": true,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": true,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [
+          "apiDomain",
+          "dailyCheckIn",
+          "dailyCheckInTask",
+          "favoriteOrder",
+          "imageStream",
+          "refreshDomains",
+          "refreshDomainsOnStart"
+        ],
+        "translationLanguages": [
+          "zh_CN",
+          "zh_TW"
+        ]
+      }
+    },
+    {
+      "fileName": "manga_dex.js",
+      "indexKey": "manga_dex",
+      "indexVersion": "1.1.0",
+      "indexName": "MangaDex",
+      "capability": {
+        "key": "manga_dex",
+        "version": "1.1.1",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": [
+            {
+              "label": "Sort By",
+              "type": "select",
+              "defaultValue": "any",
+              "choices": {
+                "any": "Any",
+                "follows": "Follows",
+                "popular": "Popular",
+                "rating": "Rating",
+                "recent": "Recent",
+                "updated": "Updated"
+              }
+            },
+            {
+              "label": "Content Rating",
+              "type": "select",
+              "defaultValue": "any",
+              "choices": {
+                "any": "Any",
+                "erotica": "Erotica",
+                "safe": "Safe",
+                "suggestive": "Suggestive"
+              }
+            },
+            {
+              "label": "Status",
+              "type": "select",
+              "defaultValue": "any",
+              "choices": {
+                "any": "Any",
+                "cancelled": "Cancelled",
+                "completed": "Completed",
+                "hiatus": "Hiatus",
+                "ongoing": "Ongoing"
+              }
+            }
+          ]
+        },
+        "category": {
+          "title": "MangaDex",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "Tags",
+              "enableRandom": false,
+              "kind": "dynamic",
+              "loader": true
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "",
+              "choices": {
+                "any": "Any",
+                "follows": "Follows",
+                "popular": "Popular",
+                "rating": "Rating",
+                "recent": "Recent",
+                "updated": "Updated"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            },
+            {
+              "label": "",
+              "choices": {
+                "any": "Any",
+                "erotica": "Erotica",
+                "safe": "Safe",
+                "suggestive": "Suggestive"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            },
+            {
+              "label": "",
+              "choices": {
+                "any": "Any",
+                "cancelled": "Cancelled",
+                "completed": "Completed",
+                "hiatus": "Hiatus",
+                "ongoing": "Ongoing"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            }
+          ],
+          "optionLoader": false,
+          "ranking": null
+        },
+        "favorites": null,
+        "explore": [
+          {
+            "title": "Manga Dex",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": null,
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": false,
+          "thumbnailLoadingConfig": false,
+          "commentsLoader": true,
+          "sendComment": true,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": true,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": true,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [
+          "image_quality"
+        ],
+        "translationLanguages": [
+          "en",
+          "zh_CN",
+          "zh_TW"
+        ]
+      }
+    },
+    {
+      "fileName": "ikmmh.js",
+      "indexKey": "ikmmh",
+      "indexVersion": "1.0.5",
+      "indexName": "爱看漫",
+      "capability": {
+        "key": "ikmmh",
+        "version": "1.0.5",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": []
+        },
+        "category": {
+          "title": "爱看漫",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "更新",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 7
+            },
+            {
+              "title": "分类",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 42
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "",
+              "choices": {
+                "1": "已完结",
+                "3": "全部",
+                "4": "连载中"
+              },
+              "notShowWhen": [
+                "星期一",
+                "星期二",
+                "星期三",
+                "星期四",
+                "星期五",
+                "星期六",
+                "星期日"
+              ],
+              "showWhen": null
+            },
+            {
+              "label": "",
+              "choices": {
+                "1": "日漫",
+                "2": "港台",
+                "3": "美漫",
+                "4": "国漫",
+                "5": "韩漫",
+                "6": "未分类",
+                "9": "全部"
+              },
+              "notShowWhen": [
+                "星期一",
+                "星期二",
+                "星期三",
+                "星期四",
+                "星期五",
+                "星期六",
+                "星期日"
+              ],
+              "showWhen": null
+            }
+          ],
+          "optionLoader": false,
+          "ranking": null
+        },
+        "favorites": {
+          "title": "爱看漫",
+          "multiFolder": false,
+          "singleFolderForSingleComic": false,
+          "loadComic": true,
+          "loadNext": false,
+          "loadFolders": false,
+          "addFolder": false,
+          "deleteFolder": false,
+          "addOrDelFavorite": true,
+          "updateCheck": false
+        },
+        "explore": [
+          {
+            "title": "爱看漫",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": {
+          "login": true,
+          "checkLoginStatus": false,
+          "cookieFieldCount": 0,
+          "validateCookies": false
+        },
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": true,
+          "thumbnailLoadingConfig": true,
+          "commentsLoader": false,
+          "sendComment": false,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": false,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "shonen_jump_plus.js",
+      "indexKey": "shonen_jump_plus",
+      "indexVersion": "1.1.1",
+      "indexName": "少年ジャンプ＋",
+      "capability": {
+        "key": "shonen_jump_plus",
+        "version": "1.1.1",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": []
+        },
+        "category": null,
+        "categoryComics": null,
+        "favorites": null,
+        "explore": [
+          {
+            "title": "少年ジャンプ＋",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": null,
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": true,
+          "thumbnailLoadingConfig": false,
+          "commentsLoader": false,
+          "sendComment": false,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "hitomi.js",
+      "indexKey": "hitomi",
+      "indexVersion": "1.1.2",
+      "indexName": "hitomi.la",
+      "capability": {
+        "key": "hitomi",
+        "version": "1.1.2",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": [
+            {
+              "label": "sort",
+              "type": "select",
+              "defaultValue": "0",
+              "choices": {
+                "0": "Date Added",
+                "1": "Date Published",
+                "2": "Popular:Today",
+                "3": "Popular:Week",
+                "4": "Popular:Month",
+                "5": "Popular:Year",
+                "6": "Random"
+              }
+            }
+          ]
+        },
+        "category": {
+          "title": "hitomi.la",
+          "enableRankingPage": true,
+          "parts": [
+            {
+              "title": "语言",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 2
+            },
+            {
+              "title": "类别",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 6
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "",
+              "choices": {
+                "0": "Date Added",
+                "1": "Date Published",
+                "2": "Popular:Today",
+                "3": "Popular:Week",
+                "4": "Popular:Month",
+                "5": "Popular:Year",
+                "6": "Random"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            }
+          ],
+          "optionLoader": false,
+          "ranking": {
+            "choices": {
+              "month": "Month",
+              "today": "Today",
+              "week": "Week",
+              "year": "Year"
+            },
+            "load": true,
+            "loadWithNext": false
+          }
+        },
+        "favorites": null,
+        "explore": [
+          {
+            "title": "hitomi.la",
+            "type": "multiPageComicList",
+            "loadPage": true,
+            "loadNext": false,
+            "loadMultiPart": false,
+            "loadMixed": false
+          }
+        ],
+        "account": null,
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": true,
+          "thumbnailLoadingConfig": true,
+          "commentsLoader": false,
+          "sendComment": false,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": true,
+          "linkHandler": true,
+          "enableTagsSuggestions": true,
+          "enableTagsTranslate": true
+        },
+        "settingsKeys": [],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "comick.js",
+      "indexKey": "comick",
+      "indexVersion": "1.2.0",
+      "indexName": "comick",
+      "capability": {
+        "key": "comick",
+        "version": "1.2.0",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": []
+        },
+        "category": {
+          "title": "comick",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "类型",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 79
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "",
+              "choices": {
+                "created_at": "更新排序",
+                "rating": "评分排序",
+                "uploaded": "创建排序",
+                "user_follow_count": "关注排序"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            },
+            {
+              "label": "",
+              "choices": {
+                "": "全部",
+                "cn": "国漫",
+                "jp": "日本",
+                "kr": "韩国",
+                "others": "欧美"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            },
+            {
+              "label": "",
+              "choices": {
+                "1": "连载",
+                "2": "完结",
+                "3": "休刊",
+                "4": "暂停更新"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            }
+          ],
+          "optionLoader": false,
+          "ranking": null
+        },
+        "favorites": null,
+        "explore": [
+          {
+            "title": "comick",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": null,
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": true,
+          "thumbnailLoadingConfig": true,
+          "commentsLoader": false,
+          "sendComment": false,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [
+          "domains"
+        ],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "ykmh.js",
+      "indexKey": "ykmh",
+      "indexVersion": "1.0.0",
+      "indexName": "优酷漫画",
+      "capability": {
+        "key": "ykmh",
+        "version": "1.0.0",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": []
+        },
+        "category": {
+          "title": "优酷漫画",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "主题",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 175
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "",
+              "choices": {
+                "click": "点击量",
+                "post": "发布时间",
+                "update": "更新时间"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            },
+            {
+              "label": "",
+              "choices": {
+                "0": "降序",
+                "1": "升序"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            }
+          ],
+          "optionLoader": false,
+          "ranking": null
+        },
+        "favorites": null,
+        "explore": [
+          {
+            "title": "优酷漫画",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": null,
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": false,
+          "thumbnailLoadingConfig": false,
+          "commentsLoader": false,
+          "sendComment": false,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "zaimanhua.js",
+      "indexKey": "zaimanhua",
+      "indexVersion": "1.0.2",
+      "indexName": "再漫画",
+      "capability": {
+        "key": "zaimanhua",
+        "version": "1.0.2",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": []
+        },
+        "category": {
+          "title": "再漫画",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "排行榜",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 4
+            },
+            {
+              "title": "分类",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 51
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "",
+              "choices": {
+                "1": "更新",
+                "2": "人气"
+              },
+              "notShowWhen": [],
+              "showWhen": [
+                "全部",
+                "冒险",
+                "欢乐向",
+                "格斗",
+                "科幻",
+                "爱情",
+                "侦探",
+                "竞技",
+                "魔法",
+                "神鬼",
+                "校园",
+                "惊悚",
+                "其他",
+                "四格",
+                "亲情",
+                "百合",
+                "秀吉",
+                "悬疑",
+                "纯爱",
+                "热血",
+                "泛爱",
+                "历史",
+                "战争",
+                "萌系",
+                "宅系",
+                "治愈",
+                "励志",
+                "武侠",
+                "机战",
+                "音乐舞蹈",
+                "美食",
+                "职场",
+                "西方魔幻",
+                "高清单行",
+                "TS",
+                "东方",
+                "魔幻",
+                "奇幻",
+                "节操",
+                "轻小说",
+                "颜艺",
+                "搞笑",
+                "仙侠",
+                "舰娘",
+                "动画",
+                "AA",
+                "福瑞",
+                "生存",
+                "日常",
+                "画集",
+                "C100"
+              ]
+            },
+            {
+              "label": "",
+              "choices": {
+                "0": "全部",
+                "13626": "女青漫画",
+                "3262": "少年漫画",
+                "3263": "少女漫画",
+                "3264": "青年漫画"
+              },
+              "notShowWhen": [],
+              "showWhen": [
+                "全部",
+                "冒险",
+                "欢乐向",
+                "格斗",
+                "科幻",
+                "爱情",
+                "侦探",
+                "竞技",
+                "魔法",
+                "神鬼",
+                "校园",
+                "惊悚",
+                "其他",
+                "四格",
+                "亲情",
+                "百合",
+                "秀吉",
+                "悬疑",
+                "纯爱",
+                "热血",
+                "泛爱",
+                "历史",
+                "战争",
+                "萌系",
+                "宅系",
+                "治愈",
+                "励志",
+                "武侠",
+                "机战",
+                "音乐舞蹈",
+                "美食",
+                "职场",
+                "西方魔幻",
+                "高清单行",
+                "TS",
+                "东方",
+                "魔幻",
+                "奇幻",
+                "节操",
+                "轻小说",
+                "颜艺",
+                "搞笑",
+                "仙侠",
+                "舰娘",
+                "动画",
+                "AA",
+                "福瑞",
+                "生存",
+                "日常",
+                "画集",
+                "C100"
+              ]
+            },
+            {
+              "label": "",
+              "choices": {
+                "0": "全部",
+                "2309": "连载中",
+                "2310": "已完结",
+                "29205": "短篇"
+              },
+              "notShowWhen": [],
+              "showWhen": [
+                "全部",
+                "冒险",
+                "欢乐向",
+                "格斗",
+                "科幻",
+                "爱情",
+                "侦探",
+                "竞技",
+                "魔法",
+                "神鬼",
+                "校园",
+                "惊悚",
+                "其他",
+                "四格",
+                "亲情",
+                "百合",
+                "秀吉",
+                "悬疑",
+                "纯爱",
+                "热血",
+                "泛爱",
+                "历史",
+                "战争",
+                "萌系",
+                "宅系",
+                "治愈",
+                "励志",
+                "武侠",
+                "机战",
+                "音乐舞蹈",
+                "美食",
+                "职场",
+                "西方魔幻",
+                "高清单行",
+                "TS",
+                "东方",
+                "魔幻",
+                "奇幻",
+                "节操",
+                "轻小说",
+                "颜艺",
+                "搞笑",
+                "仙侠",
+                "舰娘",
+                "动画",
+                "AA",
+                "福瑞",
+                "生存",
+                "日常",
+                "画集",
+                "C100"
+              ]
+            },
+            {
+              "label": "",
+              "choices": {
+                "0": "全部",
+                "2304": "日本",
+                "2305": "韩国",
+                "2306": "欧美",
+                "2307": "港台",
+                "2308": "内地",
+                "8435": "其他"
+              },
+              "notShowWhen": [],
+              "showWhen": [
+                "全部",
+                "冒险",
+                "欢乐向",
+                "格斗",
+                "科幻",
+                "爱情",
+                "侦探",
+                "竞技",
+                "魔法",
+                "神鬼",
+                "校园",
+                "惊悚",
+                "其他",
+                "四格",
+                "亲情",
+                "百合",
+                "秀吉",
+                "悬疑",
+                "纯爱",
+                "热血",
+                "泛爱",
+                "历史",
+                "战争",
+                "萌系",
+                "宅系",
+                "治愈",
+                "励志",
+                "武侠",
+                "机战",
+                "音乐舞蹈",
+                "美食",
+                "职场",
+                "西方魔幻",
+                "高清单行",
+                "TS",
+                "东方",
+                "魔幻",
+                "奇幻",
+                "节操",
+                "轻小说",
+                "颜艺",
+                "搞笑",
+                "仙侠",
+                "舰娘",
+                "动画",
+                "AA",
+                "福瑞",
+                "生存",
+                "日常",
+                "画集",
+                "C100"
+              ]
+            },
+            {
+              "label": "",
+              "choices": {
+                "0": "人气",
+                "1": "吐槽",
+                "2": "订阅"
+              },
+              "notShowWhen": [],
+              "showWhen": [
+                "日排行",
+                "周排行",
+                "月排行",
+                "总排行"
+              ]
+            }
+          ],
+          "optionLoader": false,
+          "ranking": null
+        },
+        "favorites": {
+          "title": "再漫画",
+          "multiFolder": false,
+          "singleFolderForSingleComic": false,
+          "loadComic": true,
+          "loadNext": false,
+          "loadFolders": false,
+          "addFolder": false,
+          "deleteFolder": false,
+          "addOrDelFavorite": true,
+          "updateCheck": false
+        },
+        "explore": [
+          {
+            "title": "再漫画 更新",
+            "type": "multiPageComicList",
+            "loadPage": true,
+            "loadNext": false,
+            "loadMultiPart": false,
+            "loadMixed": false
+          }
+        ],
+        "account": {
+          "login": true,
+          "checkLoginStatus": false,
+          "cookieFieldCount": 0,
+          "validateCookies": false
+        },
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": false,
+          "thumbnailLoadingConfig": false,
+          "commentsLoader": true,
+          "sendComment": true,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": true,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": false,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [
+          "signTask"
+        ],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "manhuagui.js",
+      "indexKey": "ManHuaGui",
+      "indexVersion": "1.2.1",
+      "indexName": "漫画柜",
+      "capability": {
+        "key": "ManHuaGui",
+        "version": "1.2.1",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": [
+            {
+              "label": "sort",
+              "type": "select",
+              "defaultValue": "0",
+              "choices": {
+                "0": "最新更新",
+                "1": "最近最热",
+                "2": "最新上架",
+                "3": "评分最高"
+              }
+            }
+          ]
+        },
+        "category": {
+          "title": "漫画柜",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "类型",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 39
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "",
+              "choices": {
+                "": "全部",
+                "china": "内地",
+                "europe": "欧美",
+                "hongkong": "港台",
+                "japan": "日本",
+                "korea": "韩国",
+                "other": "其它"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            },
+            {
+              "label": "",
+              "choices": {
+                "": "全部",
+                "ertong": "儿童",
+                "qingnian": "青年",
+                "shaonian": "少年",
+                "shaonv": "少女",
+                "tongyong": "通用"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            },
+            {
+              "label": "",
+              "choices": {
+                "": "全部",
+                "lianzai": "连载",
+                "wanjie": "完结"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            },
+            {
+              "label": "",
+              "choices": {
+                "index": "最新发布",
+                "rate": "评分最高",
+                "update": "最新更新",
+                "view": "人气最旺"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            }
+          ],
+          "optionLoader": false,
+          "ranking": {
+            "choices": {
+              "": "最新发布",
+              "rate": "评分最高",
+              "update": "最新更新",
+              "view": "人气最旺"
+            },
+            "load": true,
+            "loadWithNext": false
+          }
+        },
+        "favorites": {
+          "title": "漫画柜",
+          "multiFolder": false,
+          "singleFolderForSingleComic": false,
+          "loadComic": true,
+          "loadNext": false,
+          "loadFolders": false,
+          "addFolder": false,
+          "deleteFolder": false,
+          "addOrDelFavorite": true,
+          "updateCheck": false
+        },
+        "explore": [
+          {
+            "title": "漫画柜",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": {
+          "login": true,
+          "checkLoginStatus": false,
+          "cookieFieldCount": 0,
+          "validateCookies": false
+        },
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": true,
+          "thumbnailLoadingConfig": true,
+          "commentsLoader": true,
+          "sendComment": true,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "manwaba.js",
+      "indexKey": "manwaba",
+      "indexVersion": "1.0.2",
+      "indexName": "漫蛙吧",
+      "capability": {
+        "key": "manwaba",
+        "version": "1.0.3",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": []
+        },
+        "category": {
+          "title": "漫蛙吧",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "类型",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 24
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "",
+              "choices": {
+                "0": "连载中",
+                "1": "已完结",
+                "2": "全部"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            },
+            {
+              "label": "",
+              "choices": {
+                "0": "全部",
+                "1": "周一",
+                "2": "周二",
+                "3": "周三",
+                "4": "周四",
+                "5": "周五",
+                "6": "周六",
+                "7": "周日"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            },
+            {
+              "label": "",
+              "choices": {
+                "0": "更新",
+                "1": "新作",
+                "2": "畅销",
+                "3": "热门",
+                "4": "收藏"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            }
+          ],
+          "optionLoader": false,
+          "ranking": null
+        },
+        "favorites": null,
+        "explore": [
+          {
+            "title": "漫蛙吧",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": null,
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": false,
+          "thumbnailLoadingConfig": false,
+          "commentsLoader": false,
+          "sendComment": false,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": false,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "lanraragi.js",
+      "indexKey": "lanraragi",
+      "indexVersion": "1.1.0",
+      "indexName": "Lanraragi",
+      "capability": {
+        "key": "lanraragi",
+        "version": "1.2.0",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": [
+            {
+              "label": "sortby",
+              "type": "select",
+              "defaultValue": "\"title\"",
+              "choices": {
+                "date_added": "最新添加",
+                "lastread": "最近阅读",
+                "title": "按标题"
+              }
+            },
+            {
+              "label": "order",
+              "type": "select",
+              "defaultValue": "\"asc\"",
+              "choices": {
+                "asc": "升序",
+                "desc": "降序"
+              }
+            },
+            {
+              "label": "newonly",
+              "type": "select",
+              "defaultValue": "\"false\"",
+              "choices": {
+                "false": "全部",
+                "true": "仅新"
+              }
+            },
+            {
+              "label": "untaggedonly",
+              "type": "select",
+              "defaultValue": "\"false\"",
+              "choices": {
+                "false": "全部",
+                "true": "仅未打标签"
+              }
+            },
+            {
+              "label": "groupby_tanks",
+              "type": "select",
+              "defaultValue": "\"true\"",
+              "choices": {
+                "false": "禁用",
+                "true": "启用"
+              }
+            }
+          ]
+        },
+        "category": {
+          "title": "Lanraragi",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "ALL",
+              "enableRandom": false,
+              "kind": "dynamic",
+              "loader": true
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [],
+          "optionLoader": false,
+          "ranking": null
+        },
+        "favorites": {
+          "title": "Lanraragi",
+          "multiFolder": true,
+          "singleFolderForSingleComic": false,
+          "loadComic": true,
+          "loadNext": false,
+          "loadFolders": true,
+          "addFolder": false,
+          "deleteFolder": false,
+          "addOrDelFavorite": true,
+          "updateCheck": false
+        },
+        "explore": [
+          {
+            "title": "Lanraragi",
+            "type": "multiPageComicList",
+            "loadPage": true,
+            "loadNext": false,
+            "loadMultiPart": false,
+            "loadMixed": false
+          }
+        ],
+        "account": {
+          "login": false,
+          "checkLoginStatus": false,
+          "cookieFieldCount": 1,
+          "validateCookies": true
+        },
+        "comic": {
+          "thumbnailLoader": true,
+          "imageLoadingConfig": true,
+          "thumbnailLoadingConfig": true,
+          "commentsLoader": false,
+          "sendComment": false,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": true,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": true
+        },
+        "settingsKeys": [
+          "api",
+          "apiKey"
+        ],
+        "translationLanguages": [
+          "en_US",
+          "zh_CN"
+        ]
+      }
+    },
+    {
+      "fileName": "komga.js",
+      "indexKey": "komga",
+      "indexVersion": "1.0.0",
+      "indexName": "Komga",
+      "capability": {
+        "key": "komga",
+        "version": "1.0.0",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": [
+            {
+              "label": "排序",
+              "type": "select",
+              "defaultValue": "*metadata.lastModified,desc",
+              "choices": {
+                "*metadata.lastModified,desc": "更新时间(新→旧)",
+                "metadata.lastModified,asc": "更新时间(旧→新)",
+                "metadata.titleSort,asc": "标题(A-Z)",
+                "metadata.titleSort,desc": "标题(Z-A)"
+              }
+            }
+          ]
+        },
+        "category": {
+          "title": "Komga",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "常用",
+              "enableRandom": false,
+              "kind": "dynamic",
+              "loader": true
+            },
+            {
+              "title": "书库",
+              "enableRandom": false,
+              "kind": "dynamic",
+              "loader": true
+            },
+            {
+              "title": "合集",
+              "enableRandom": false,
+              "kind": "dynamic",
+              "loader": true
+            },
+            {
+              "title": "标签",
+              "enableRandom": false,
+              "kind": "dynamic",
+              "loader": true
+            },
+            {
+              "title": "语言",
+              "enableRandom": false,
+              "kind": "dynamic",
+              "loader": true
+            },
+            {
+              "title": "题材",
+              "enableRandom": false,
+              "kind": "dynamic",
+              "loader": true
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "",
+              "choices": {
+                "*created,desc": "添加时间(新→旧)",
+                "created,asc": "添加时间(旧→新)",
+                "metadata.lastModified,asc": "更新时间(旧→新)",
+                "metadata.lastModified,desc": "更新时间(新→旧)",
+                "metadata.titleSort,asc": "标题(A-Z)",
+                "metadata.titleSort,desc": "标题(Z-A)"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            }
+          ],
+          "optionLoader": false,
+          "ranking": null
+        },
+        "favorites": null,
+        "explore": [
+          {
+            "title": "Komga",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": {
+          "login": true,
+          "checkLoginStatus": false,
+          "cookieFieldCount": 0,
+          "validateCookies": false
+        },
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": true,
+          "thumbnailLoadingConfig": true,
+          "commentsLoader": false,
+          "sendComment": false,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [
+          "base_url"
+        ],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "comic_walker.js",
+      "indexKey": "comic_walker",
+      "indexVersion": "1.0.0",
+      "indexName": "カドコミ",
+      "capability": {
+        "key": "comic_walker",
+        "version": "1.0.0",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": []
+        },
+        "category": null,
+        "categoryComics": null,
+        "favorites": null,
+        "explore": [
+          {
+            "title": "カドコミ",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": null,
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": true,
+          "thumbnailLoadingConfig": false,
+          "commentsLoader": false,
+          "sendComment": false,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "mh1234.js",
+      "indexKey": "mh1234",
+      "indexVersion": "1.0.0",
+      "indexName": "漫画1234",
+      "capability": {
+        "key": "mh1234",
+        "version": "1.0.0",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": [
+            {
+              "label": "排序",
+              "type": "select",
+              "defaultValue": "update",
+              "choices": {
+                "click": "点击",
+                "post": "发布",
+                "update": "更新"
+              }
+            }
+          ]
+        },
+        "category": {
+          "title": "漫画1234",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "题材",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 343
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [],
+          "optionLoader": true,
+          "ranking": null
+        },
+        "favorites": null,
+        "explore": [
+          {
+            "title": "漫画1234",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": null,
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": false,
+          "thumbnailLoadingConfig": false,
+          "commentsLoader": false,
+          "sendComment": false,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": false,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [
+          "domains"
+        ],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "ccc.js",
+      "indexKey": "ccc",
+      "indexVersion": "1.0.1",
+      "indexName": "CCC追漫台",
+      "capability": {
+        "key": "ccc",
+        "version": "1.0.1",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": [
+            {
+              "label": "排序",
+              "type": "select",
+              "defaultValue": "updated_at",
+              "choices": {
+                "collect_count": "收藏",
+                "like_count": "推薦",
+                "read_count": "閲覽",
+                "updated_at": "最新"
+              }
+            },
+            {
+              "label": "分類",
+              "type": "select",
+              "defaultValue": "",
+              "choices": {
+                "": "全部",
+                "10": "歷史古裝",
+                "11": "推理懸疑",
+                "12": "新感覺推薦",
+                "13": "活動",
+                "2": "劇情",
+                "3": "幽默搞笑",
+                "4": "溫馨療癒",
+                "5": "青春成長",
+                "6": "愛情",
+                "7": "奇幻架空",
+                "8": "恐怖驚悚",
+                "9": "冒險動作"
+              }
+            },
+            {
+              "label": "連載狀態",
+              "type": "select",
+              "defaultValue": "",
+              "choices": {
+                "": "全部",
+                "0": "連載中",
+                "2": "已完結"
+              }
+            },
+            {
+              "label": "更新日期",
+              "type": "select",
+              "defaultValue": "",
+              "choices": {
+                "": "全部",
+                "month": "本月",
+                "week": "本周"
+              }
+            },
+            {
+              "label": "作品篇幅",
+              "type": "select",
+              "defaultValue": "",
+              "choices": {
+                "": "全部",
+                "1": "短篇",
+                "2": "中篇",
+                "3": "長篇"
+              }
+            },
+            {
+              "label": "作品形式",
+              "type": "select",
+              "defaultValue": "",
+              "choices": {
+                "": "全部",
+                "2": "格漫",
+                "3": "條漫"
+              }
+            },
+            {
+              "label": "出版社",
+              "type": "dropdown",
+              "defaultValue": "",
+              "choices": {
+                "": "全部",
+                "1": "長鴻出版社",
+                "10": "國立臺灣美術館",
+                "11": "國立歷史博物館",
+                "12": "黑白文化",
+                "13": "慢工文化 Slowork Publishing",
+                "14": "綺影映畫",
+                "15": "蓋亞文化",
+                "16": "獨步文化",
+                "17": "獨立出版",
+                "18": "MarsCat火星貓科技",
+                "19": "柒拾陸號原子",
+                "2": "CCC創作集",
+                "20": "國立臺灣工藝研究發展中心",
+                "21": "尖端媒體集團",
+                "22": "時報文化出版企業股份有限公司",
+                "23": "海穹文化",
+                "24": "鏡文學股份有限公司",
+                "25": "目色出版",
+                "26": "金漫獎",
+                "27": "澄波藝術文化股份有限公司",
+                "28": "一顆星工作室",
+                "29": "相之丘tōkhiu books",
+                "3": "大塊文化",
+                "30": "經濟部智慧財產局",
+                "31": "艾德萊娛樂",
+                "32": "金繪國際有限公司",
+                "33": "台灣角川",
+                "34": "虎尾建國眷村再造協會",
+                "35": "國立臺灣歷史博物館",
+                "36": "奇異果文創",
+                "37": "目宿媒體股份有限公司",
+                "38": "XPG",
+                "39": "聚場文化",
+                "4": "大辣出版",
+                "40": "KADOKAWA",
+                "41": "文化內容策進院",
+                "42": "聯經出版事業股份有限公司",
+                "43": "Taiwan Comic City",
+                "44": "MOJOIN",
+                "45": "國立國父紀念館",
+                "46": "好人出版",
+                "47": "前衛出版社",
+                "48": "東立出版社有限公司",
+                "49": "國際合製｜臺漫新視界",
+                "5": "台灣東販",
+                "50": "Contents Lab. Blue TOKYO",
+                "51": "大寬文化工作室",
+                "52": "陌上商行有限公司",
+                "53": "彰化縣政府",
+                "54": "白範出版工作室",
+                "6": "未來數位",
+                "7": "威向文化",
+                "8": "特有生物研究保育中心",
+                "9": "留守番工作室"
+              }
+            }
+          ]
+        },
+        "category": {
+          "title": "CCC追漫台",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "CCC追漫台",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 1
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "分類",
+              "choices": {
+                "": "全部",
+                "10": "歷史古裝",
+                "11": "推理懸疑",
+                "12": "新感覺推薦",
+                "13": "活動",
+                "2": "劇情",
+                "3": "幽默搞笑",
+                "4": "溫馨療癒",
+                "5": "青春成長",
+                "6": "愛情",
+                "7": "奇幻架空",
+                "8": "恐怖驚悚",
+                "9": "冒險動作"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            },
+            {
+              "label": "排行榜",
+              "choices": {
+                "buy": "銷售榜",
+                "collect": "收藏榜",
+                "donate": "斗内榜",
+                "read": "人氣榜"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            }
+          ],
+          "optionLoader": false,
+          "ranking": null
+        },
+        "favorites": {
+          "title": "CCC追漫台",
+          "multiFolder": false,
+          "singleFolderForSingleComic": true,
+          "loadComic": true,
+          "loadNext": false,
+          "loadFolders": false,
+          "addFolder": false,
+          "deleteFolder": false,
+          "addOrDelFavorite": true,
+          "updateCheck": false
+        },
+        "explore": [
+          {
+            "title": "CCC追漫台",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": {
+          "login": true,
+          "checkLoginStatus": true,
+          "cookieFieldCount": 0,
+          "validateCookies": false
+        },
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": true,
+          "thumbnailLoadingConfig": false,
+          "commentsLoader": true,
+          "sendComment": true,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": true,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "goda.js",
+      "indexKey": "goda",
+      "indexVersion": "1.2.1",
+      "indexName": "GoDa漫画",
+      "capability": {
+        "key": "goda",
+        "version": "1.2.1",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": []
+        },
+        "category": {
+          "title": "GoDa漫画",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "类型",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 7
+            },
+            {
+              "title": "标签",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 30
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [],
+          "optionLoader": false,
+          "ranking": null
+        },
+        "favorites": null,
+        "explore": [
+          {
+            "title": "GoDa漫画",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": null,
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": false,
+          "thumbnailLoadingConfig": true,
+          "commentsLoader": false,
+          "sendComment": false,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": false,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [
+          "api",
+          "domains",
+          "image"
+        ],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "mh18.js",
+      "indexKey": "mh18",
+      "indexVersion": "1.0.0",
+      "indexName": "18漫画",
+      "capability": {
+        "key": "mh18",
+        "version": "1.0.0",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": []
+        },
+        "category": {
+          "title": "18漫画",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "类型",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 6
+            },
+            {
+              "title": "标签",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 30
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [],
+          "optionLoader": false,
+          "ranking": null
+        },
+        "favorites": null,
+        "explore": [
+          {
+            "title": "18漫画",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": null,
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": false,
+          "thumbnailLoadingConfig": true,
+          "commentsLoader": false,
+          "sendComment": false,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": false,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [
+          "domains"
+        ],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "mxs.js",
+      "indexKey": "mxs",
+      "indexVersion": "1.0.0",
+      "indexName": "漫小肆",
+      "capability": {
+        "key": "mxs",
+        "version": "1.0.0",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": []
+        },
+        "category": {
+          "title": "漫小肆",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "推荐",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 3
+            },
+            {
+              "title": "题材",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 24
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [],
+          "optionLoader": true,
+          "ranking": null
+        },
+        "favorites": null,
+        "explore": [
+          {
+            "title": "漫小肆",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": null,
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": false,
+          "thumbnailLoadingConfig": false,
+          "commentsLoader": true,
+          "sendComment": false,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [
+          "domainCheck",
+          "domains"
+        ],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "manhuaren.js",
+      "indexKey": "manhuaren",
+      "indexVersion": "1.0.0",
+      "indexName": "漫画人",
+      "capability": {
+        "key": "manhuaren",
+        "version": "1.0.0",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": []
+        },
+        "category": {
+          "title": "漫画人",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "类型",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 28
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "状态",
+              "choices": {
+                "st0": "全部",
+                "st1": "连载",
+                "st2": "已完结"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            },
+            {
+              "label": "排序",
+              "choices": {
+                "s10": "人气最旺",
+                "s18": "最近上架",
+                "s2": "最近更新"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            }
+          ],
+          "optionLoader": false,
+          "ranking": null
+        },
+        "favorites": null,
+        "explore": [
+          {
+            "title": "漫画人",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": null,
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": true,
+          "thumbnailLoadingConfig": true,
+          "commentsLoader": true,
+          "sendComment": false,
+          "chapterCommentsLoader": true,
+          "sendChapterComment": false,
+          "likeComic": true,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": false,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "hcomic.js",
+      "indexKey": "hcomic",
+      "indexVersion": "1.0.0",
+      "indexName": "H-Comic",
+      "capability": {
+        "key": "hcomic",
+        "version": "1.0.0",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": []
+        },
+        "category": {
+          "title": "H-Comic",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "热门TAG",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 29
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "",
+              "choices": {
+                "latest": "最近更新",
+                "random": "随机刷新"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            }
+          ],
+          "optionLoader": false,
+          "ranking": {
+            "choices": {},
+            "load": true,
+            "loadWithNext": false
+          }
+        },
+        "favorites": null,
+        "explore": [
+          {
+            "title": "h-comic",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": null,
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": false,
+          "thumbnailLoadingConfig": false,
+          "commentsLoader": false,
+          "sendComment": false,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": true,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "jcomic.js",
+      "indexKey": "jcomic",
+      "indexVersion": "1.0.0",
+      "indexName": "jcomic.net",
+      "capability": {
+        "key": "jcomic",
+        "version": "1.0.0",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": [
+            {
+              "label": "sort",
+              "type": "select",
+              "defaultValue": "0",
+              "choices": {
+                "0": "Default"
+              }
+            }
+          ]
+        },
+        "category": {
+          "title": "jcomic.net",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "分類",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 37
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [],
+          "optionLoader": false,
+          "ranking": null
+        },
+        "favorites": null,
+        "explore": [
+          {
+            "title": "JComic",
+            "type": "multiPageComicList",
+            "loadPage": true,
+            "loadNext": false,
+            "loadMultiPart": false,
+            "loadMixed": false
+          }
+        ],
+        "account": null,
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": true,
+          "thumbnailLoadingConfig": true,
+          "commentsLoader": false,
+          "sendComment": false,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": true,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "hot_manga.js",
+      "indexKey": "hot_manga",
+      "indexVersion": "1.0.0",
+      "indexName": "热辣漫画",
+      "capability": {
+        "key": "hot_manga",
+        "version": "1.0.0",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": []
+        },
+        "category": {
+          "title": "热辣漫画",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "免费漫画排行",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 1
+            },
+            {
+              "title": "免费漫画主题",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 69
+            },
+            {
+              "title": "主页",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 5
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "",
+              "choices": {
+                "": "非韩漫",
+                "1": "韩漫"
+              },
+              "notShowWhen": [],
+              "showWhen": [
+                "排行"
+              ]
+            },
+            {
+              "label": "",
+              "choices": {
+                "day": "上升最快",
+                "month": "最近30天",
+                "total": "總榜單",
+                "week": "最近7天"
+              },
+              "notShowWhen": [],
+              "showWhen": [
+                "排行"
+              ]
+            },
+            {
+              "label": "",
+              "choices": {
+                "*datetime_updated": "时间倒序",
+                "*popular": "热度倒序",
+                "datetime_updated": "时间正序",
+                "popular": "热度正序"
+              },
+              "notShowWhen": [],
+              "showWhen": [
+                "全部",
+                "愛情",
+                "歡樂向",
+                "冒險",
+                "奇幻",
+                "百合",
+                "校园",
+                "科幻",
+                "東方",
+                "耽美",
+                "生活",
+                "格鬥",
+                "轻小说",
+                "其他",
+                "悬疑",
+                "TL",
+                "萌系",
+                "神鬼",
+                "职场",
+                "治愈",
+                "节操",
+                "四格",
+                "長條",
+                "舰娘",
+                "搞笑",
+                "竞技",
+                "伪娘",
+                "魔幻",
+                "热血",
+                "性转换",
+                "美食",
+                "励志",
+                "彩色",
+                "後宮",
+                "侦探",
+                "惊悚",
+                "AA",
+                "音乐舞蹈",
+                "异世界",
+                "战争",
+                "历史",
+                "机战",
+                "都市",
+                "穿越",
+                "恐怖",
+                "生存",
+                "武侠",
+                "宅系",
+                "转生",
+                "無修正",
+                "仙侠",
+                "LoveLive",
+                "C95",
+                "C96",
+                "C97",
+                "C98",
+                "C99",
+                "C100",
+                "C101",
+                "C102",
+                "C103",
+                "C104",
+                "C105",
+                "玄幻",
+                "異能",
+                "遊戲",
+                "真人",
+                "雜誌附贈寫真集",
+                "FATE"
+              ]
+            },
+            {
+              "label": "",
+              "choices": {
+                "*datetime_updated": "时间倒序",
+                "*popular": "热度倒序",
+                "datetime_updated": "时间正序",
+                "popular": "热度正序"
+              },
+              "notShowWhen": [],
+              "showWhen": [
+                "全彩",
+                "韩漫",
+                "单行本",
+                "已完结",
+                "同志"
+              ]
+            }
+          ],
+          "optionLoader": false,
+          "ranking": null
+        },
+        "favorites": {
+          "title": "热辣漫画",
+          "multiFolder": false,
+          "singleFolderForSingleComic": false,
+          "loadComic": true,
+          "loadNext": false,
+          "loadFolders": false,
+          "addFolder": false,
+          "deleteFolder": false,
+          "addOrDelFavorite": true,
+          "updateCheck": false
+        },
+        "explore": [
+          {
+            "title": "热辣漫画",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": {
+          "login": true,
+          "checkLoginStatus": false,
+          "cookieFieldCount": 0,
+          "validateCookies": false
+        },
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": false,
+          "thumbnailLoadingConfig": false,
+          "commentsLoader": false,
+          "sendComment": false,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [
+          "base_url",
+          "favorites_ordering",
+          "image_quality"
+        ],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "kavita.js",
+      "indexKey": "kavita",
+      "indexVersion": "1.0.0",
+      "indexName": "Kavita",
+      "capability": {
+        "key": "kavita",
+        "version": "1.0.0",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": [
+            {
+              "label": "搜索选项",
+              "type": "select",
+              "defaultValue": "All",
+              "choices": {
+                "All": "全部",
+                "FilePath": "文件名",
+                "SeriesName": "名称"
+              }
+            }
+          ]
+        },
+        "category": {
+          "title": "Kavita",
+          "enableRankingPage": false,
+          "parts": [
+            {
+              "title": "常用",
+              "enableRandom": false,
+              "kind": "dynamic",
+              "loader": true
+            },
+            {
+              "title": "书库",
+              "enableRandom": false,
+              "kind": "dynamic",
+              "loader": true
+            },
+            {
+              "title": "作者",
+              "enableRandom": false,
+              "kind": "dynamic",
+              "loader": true
+            },
+            {
+              "title": "题材",
+              "enableRandom": false,
+              "kind": "dynamic",
+              "loader": true
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "",
+              "choices": {
+                "1,false": "名称[降序]",
+                "1,true": "名称[升序]",
+                "2,false": "创建时间[降序]",
+                "2,true": "创建时间[升序]",
+                "3,false": "修改时间[降序]",
+                "3,true": "修改时间[升序]",
+                "4,false": "最近添加"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            }
+          ],
+          "optionLoader": false,
+          "ranking": null
+        },
+        "favorites": null,
+        "explore": [
+          {
+            "title": "Kavita",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": {
+          "login": true,
+          "checkLoginStatus": false,
+          "cookieFieldCount": 0,
+          "validateCookies": false
+        },
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": false,
+          "thumbnailLoadingConfig": false,
+          "commentsLoader": false,
+          "sendComment": false,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": true,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": true,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [
+          "base_url"
+        ],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "happy.js",
+      "indexKey": "happy",
+      "indexVersion": "1.0.0",
+      "indexName": "嗨皮漫画",
+      "capability": {
+        "key": "happy",
+        "version": "1.0.0",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": []
+        },
+        "category": {
+          "title": "嗨皮漫画",
+          "enableRankingPage": true,
+          "parts": [
+            {
+              "title": "最近更新",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 140
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "地区",
+              "choices": {
+                "": "全部",
+                "china": "内地",
+                "europe": "欧美",
+                "hongkong": "港台",
+                "japan": "日本",
+                "korea": "韩国",
+                "other": "其他"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            },
+            {
+              "label": "受众",
+              "choices": {
+                "": "全部",
+                "BL": "BL",
+                "GL": "GL",
+                "qingnian": "青年",
+                "shaonian": "少年",
+                "shaonv": "少女"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            },
+            {
+              "label": "状态",
+              "choices": {
+                "": "全部",
+                "0": "连载中",
+                "1": "完结"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            }
+          ],
+          "optionLoader": false,
+          "ranking": {
+            "choices": {
+              "day": "日阅读",
+              "dayBookcasesOne": "日收藏",
+              "month": "月阅读",
+              "monthBookcases": "月收藏",
+              "voteNumMonthRank": "月投票",
+              "voteRank": "总评分",
+              "week": "周阅读",
+              "weekBookcase": "周收藏"
+            },
+            "load": true,
+            "loadWithNext": false
+          }
+        },
+        "favorites": null,
+        "explore": [
+          {
+            "title": "嗨皮漫画",
+            "type": "singlePageWithMultiPart",
+            "loadPage": false,
+            "loadNext": false,
+            "loadMultiPart": true,
+            "loadMixed": false
+          }
+        ],
+        "account": null,
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": false,
+          "thumbnailLoadingConfig": false,
+          "commentsLoader": true,
+          "sendComment": false,
+          "chapterCommentsLoader": true,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [
+          "cacheTTL",
+          "commentOrder",
+          "originalImage",
+          "wipeCache"
+        ],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "mycomic.js",
+      "indexKey": "mycomic",
+      "indexVersion": "1.1.0",
+      "indexName": "MYCOMIC",
+      "capability": {
+        "key": "mycomic",
+        "version": "1.1.0",
+        "search": {
+          "loadPage": true,
+          "loadNext": false,
+          "optionList": [
+            {
+              "label": "排序",
+              "type": "select",
+              "defaultValue": "",
+              "choices": {
+                "": "views-最高人气"
+              }
+            }
+          ]
+        },
+        "category": {
+          "title": "MYCOMIC",
+          "enableRankingPage": true,
+          "parts": [
+            {
+              "title": "作品类型",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 38
+            },
+            {
+              "title": "作品地区",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 6
+            },
+            {
+              "title": "适合受众",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 5
+            },
+            {
+              "title": "出品年份",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 21
+            },
+            {
+              "title": "目前进度",
+              "enableRandom": false,
+              "kind": "fixed",
+              "count": 2
+            }
+          ]
+        },
+        "categoryComics": {
+          "optionList": [
+            {
+              "label": "",
+              "choices": {
+                "": "views-最高人气"
+              },
+              "notShowWhen": [],
+              "showWhen": null
+            }
+          ],
+          "optionLoader": false,
+          "ranking": {
+            "choices": {
+              "": "month-月排行"
+            },
+            "load": true,
+            "loadWithNext": false
+          }
+        },
+        "favorites": null,
+        "explore": [
+          {
+            "title": "最新上架",
+            "type": "multiPageComicList",
+            "loadPage": true,
+            "loadNext": false,
+            "loadMultiPart": false,
+            "loadMixed": false
+          },
+          {
+            "title": "最近更新",
+            "type": "multiPageComicList",
+            "loadPage": true,
+            "loadNext": false,
+            "loadMultiPart": false,
+            "loadMixed": false
+          },
+          {
+            "title": "最高人气",
+            "type": "multiPageComicList",
+            "loadPage": true,
+            "loadNext": false,
+            "loadMultiPart": false,
+            "loadMixed": false
+          }
+        ],
+        "account": {
+          "login": false,
+          "checkLoginStatus": true,
+          "cookieFieldCount": 1,
+          "validateCookies": true
+        },
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": true,
+          "thumbnailLoadingConfig": true,
+          "commentsLoader": false,
+          "sendComment": false,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": true,
+          "onTagSuggestionSelected": false,
+          "linkHandler": true,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [],
+        "translationLanguages": []
+      }
+    },
+    {
+      "fileName": "manwa.js",
+      "indexKey": "manwa",
+      "indexVersion": "1.0.8",
+      "indexName": "漫蛙",
+      "capability": {
+        "key": "manwa",
+        "version": "1.0.8",
+        "search": null,
+        "category": null,
+        "categoryComics": null,
+        "favorites": {
+          "title": "漫蛙",
+          "multiFolder": false,
+          "singleFolderForSingleComic": false,
+          "loadComic": true,
+          "loadNext": false,
+          "loadFolders": false,
+          "addFolder": false,
+          "deleteFolder": false,
+          "addOrDelFavorite": true,
+          "updateCheck": false
+        },
+        "explore": [],
+        "account": {
+          "login": true,
+          "checkLoginStatus": false,
+          "cookieFieldCount": 0,
+          "validateCookies": false
+        },
+        "comic": {
+          "thumbnailLoader": false,
+          "imageLoadingConfig": true,
+          "thumbnailLoadingConfig": true,
+          "commentsLoader": true,
+          "sendComment": false,
+          "chapterCommentsLoader": false,
+          "sendChapterComment": false,
+          "likeComic": false,
+          "voteComment": false,
+          "likeComment": false,
+          "idMatcher": false,
+          "starRating": false,
+          "archiveDownloader": false
+        },
+        "tagNavigation": {
+          "onClickTag": false,
+          "onTagSuggestionSelected": false,
+          "linkHandler": false,
+          "enableTagsSuggestions": false,
+          "enableTagsTranslate": false
+        },
+        "settingsKeys": [],
+        "translationLanguages": []
+      }
+    }
+  ]
+}

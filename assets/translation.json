@@ -731,7 +731,12 @@
     "Account switched": "账号已切换",
     "Follow-up needs a complete favorite cache again after switching accounts.": "切换账号后需要重新完整缓存收藏才能看到追更结果。",
     "Favorites are fully cached now": "收藏已完整缓存",
-    "Show updates": "显示更新"
+    "Show updates": "显示更新",
+    "Tag: @a": "标签: @a",
+    "This comic source cannot search by tag": "该漫画源不支持按标签搜索",
+    "This source has no exact tag search; results are not guaranteed to be exact.": "该源没有精确标签搜索，结果不保证精确。",
+    "No matches in the current range. Continue scrolling to search further.": "当前范围内没有匹配结果。继续滚动可搜索更多。",
+    "Network Error": "网络错误"
   },
   "zh_TW": {
     "Invalid server address": "伺服器位址無效",
@@ -1464,6 +1469,11 @@
     "Account switched": "帳號已切換",
     "Follow-up needs a complete favorite cache again after switching accounts.": "切換帳號後需要重新完整快取收藏才能看到追更結果。",
     "Favorites are fully cached now": "收藏已完整快取",
-    "Show updates": "顯示更新"
+    "Show updates": "顯示更新",
+    "Tag: @a": "標籤: @a",
+    "This comic source cannot search by tag": "該漫畫源不支援依標籤搜尋",
+    "This source has no exact tag search; results are not guaranteed to be exact.": "該源沒有精確標籤搜尋，結果不保證精確。",
+    "No matches in the current range. Continue scrolling to search further.": "目前範圍內沒有符合的結果。繼續捲動可搜尋更多。",
+    "Network Error": "網路錯誤"
   }
 }

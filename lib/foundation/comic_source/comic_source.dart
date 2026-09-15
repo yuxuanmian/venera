@@ -16,6 +16,7 @@ import 'package:venera/foundation/tracking/comparability.dart';
 import 'package:venera/foundation/tracking/update_state.dart';
 import 'package:venera/pages/category_comics_page.dart';
 import 'package:venera/pages/search_result_page.dart';
+import 'package:venera/pages/semantic_search_page.dart';
 import 'package:venera/utils/data_sync.dart';
 import 'package:venera/utils/ext.dart';
 import 'package:venera/utils/init.dart';
@@ -27,6 +28,7 @@ import '../log.dart';
 import '../scan/failure_sanitizer.dart';
 import '../scan/models.dart';
 import '../scan/source_adapter.dart';
+import '../semantic_search/request_scope.dart';
 
 part 'category.dart';
 
@@ -47,6 +49,16 @@ class ComicSourceManager with ChangeNotifier, Init {
 
   factory ComicSourceManager() => _instance ??= ComicSourceManager._create();
 
+  /// Monotonic identity of the currently installed source assembly.
+  ///
+  /// Long-lived source callbacks (a semantic page holding a tag capability)
+  /// subscribe to it instead of relying on GC: installing, adding or removing
+  /// a source invalidates every callback that belonged to the previous
+  /// assembly.
+  int _assemblyRevision = 0;
+
+  int get assemblyRevision => _assemblyRevision;
+
   List<ComicSource> all() => List.from(_sources);
 
   /// Atomically installs a fully prepared Catalog assembly. Preparation must
@@ -61,6 +73,7 @@ class ComicSourceManager with ChangeNotifier, Init {
     _sources
       ..clear()
       ..addAll(next);
+    _assemblyRevision++;
     notifyListeners();
   }
 
@@ -76,6 +89,7 @@ class ComicSourceManager with ChangeNotifier, Init {
 
   void add(ComicSource source) {
     _sources.add(source);
+    _assemblyRevision++;
     notifyListeners();
   }
 
@@ -84,6 +98,9 @@ class ComicSourceManager with ChangeNotifier, Init {
     _sources.removeWhere((element) => element.key == key);
     for (final source in removed) {
       source.scan?.dispose();
+    }
+    if (removed.isNotEmpty) {
+      _assemblyRevision++;
     }
     notifyListeners();
   }
@@ -142,6 +159,14 @@ class ComicSource {
 
   /// Search page.
   final SearchPageData? searchPageData;
+
+  /// Optional Tag semantic-search capability.
+  ///
+  /// A missing value is intentionally different from an invalid declaration:
+  /// both leave ordinary source browsing and ordinary search available, and
+  /// the semantic resolver degrades to its ordinary fallback instead of
+  /// failing the whole source parse.
+  final SemanticSearchData? semanticSearchData;
 
   /// Load comic info.
   final LoadComicFunc? loadComicInfo;
@@ -344,6 +369,7 @@ class ComicSource {
     this.archiveDownloader, {
     this.runtimeContext,
     this.scan,
+    this.semanticSearchData,
   });
 }
 
@@ -480,6 +506,27 @@ class SearchOptions {
   const SearchOptions(this.options, this.label, this.type, this.defaultVal);
 
   String get defaultValue => defaultVal ?? options.keys.firstOrNull ?? "";
+}
+
+/// Optional Tag semantic-search capability declared as `search.tagSearch`.
+///
+/// Exactly one pagination form is used per invocation. When both are declared
+/// the Host uses [loadPage]; this matches the ordinary search contract, where
+/// `search.load` also wins over `search.loadNext`.
+class SemanticSearchData {
+  /// Page form: `tagSearch.load(value, options, page) -> {comics, maxPage}`.
+  final SemanticPageLoader? loadPage;
+
+  /// Cursor form: `tagSearch.loadNext(value, options, next) -> {comics, next}`.
+  final SemanticNextLoader? loadNext;
+
+  /// Host-only: destroys the semantic execution lane bound to `scope`.
+  ///
+  /// A source can never see this hook; it exists so the controller can retire
+  /// the lane's runtime together with the query attempt it belonged to.
+  final Future<void> Function(SemanticSearchRequestScope scope)? releaseLane;
+
+  const SemanticSearchData(this.loadPage, this.loadNext, {this.releaseLane});
 }
 
 typedef CategoryComicsLoader =

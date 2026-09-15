@@ -12,6 +12,7 @@ import 'package:venera/foundation/image_provider/cached_image.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/pages/comic_details_page/comic_page.dart';
 import 'package:venera/pages/search_result_page.dart';
+import 'package:venera/pages/semantic_search_page.dart';
 import 'package:venera/utils/translations.dart';
 
 class _DetailFixture {
@@ -348,5 +349,244 @@ void main() {
     expect(find.byType(SearchResultPage), findsOneWidget);
     final searchField = tester.widget<TextField>(find.byType(TextField));
     expect(searchField.controller!.text, 'artist:作者');
+  });
+
+  group('detail tag click five states (feature 008)', () {
+    /// Builds a source whose detail tags and `onClickTag` are scripted.
+    ComicSource tagSource({
+      required String sourceKey,
+      required Map<String, List<String>> tags,
+      HandleClickTagEvent? handleClickTagEvent,
+      SearchFunction? searchLoader,
+    }) {
+      // A real on-disk cover keeps the shared card widget from starting a
+      // network image load, which would leave pending timers in widget tests.
+      final coverPath =
+          'file://${Directory.current.path}${Platform.pathSeparator}assets'
+          '${Platform.pathSeparator}app_icon.png';
+      return ComicSource(
+        'Tag source',
+        sourceKey,
+        null,
+        null,
+        null,
+        null,
+        const [],
+        SearchPageData(null, searchLoader, null),
+        null,
+        (id) async => Res(
+          ComicDetails.fromJson({
+            'title': 'Tag comic',
+            'subtitle': '',
+            'cover': coverPath,
+            'description': '',
+            'tags': tags,
+            'chapters': <String, String>{'chapter': 'Chapter'},
+            'sourceKey': sourceKey,
+            'comicId': id,
+          }),
+        ),
+        null,
+        null,
+        null,
+        null,
+        '',
+        '',
+        '1.0.0',
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        handleClickTagEvent,
+        null,
+        null,
+        false,
+        false,
+        null,
+        null,
+      );
+    }
+
+    Future<GlobalKey<NavigatorState>> pumpTagComic(
+      WidgetTester tester,
+      ComicSource source,
+      String comicId,
+    ) async {
+      ComicSourceManager().add(source);
+      addTearDown(() => ComicSourceManager().remove(source.key));
+      final navigatorKey = GlobalKey<NavigatorState>();
+      App.mainNavigatorKey = navigatorKey;
+      addTearDown(() => App.mainNavigatorKey = null);
+      await tester.pumpWidget(
+        MaterialApp(
+          navigatorKey: navigatorKey,
+          home: ComicPage(id: comicId, sourceKey: source.key),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      return navigatorKey;
+    }
+
+    testWidgets('a missing handler falls back to ordinary search with the raw '
+        'field value', (tester) async {
+      const sourceKey = 'tag-missing-handler';
+      final queries = <String>[];
+      final source = tagSource(
+        sourceKey: sourceKey,
+        tags: <String, List<String>>{
+          'Tags': ['  Fate  '],
+        },
+        handleClickTagEvent: null,
+        searchLoader: (keyword, page, options) async {
+          queries.add(keyword);
+          return const Res(<Comic>[]);
+        },
+      );
+      await pumpTagComic(tester, source, 'tag-comic-missing');
+
+      await tester.tap(find.text('  Fate  '));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(SearchResultPage), findsOneWidget);
+      expect(queries, [
+        '  Fate  ',
+      ], reason: 'the fallback must use the raw field value, untrimmed');
+      final searchField = tester.widget<TextField>(find.byType(TextField));
+      expect(searchField.controller!.text, '  Fate  ');
+    });
+
+    testWidgets('an explicit null handler is a no-op', (tester) async {
+      const sourceKey = 'tag-explicit-null';
+      final source = tagSource(
+        sourceKey: sourceKey,
+        tags: <String, List<String>>{
+          'Tags': ['Silent'],
+        },
+        handleClickTagEvent: (namespace, tag) => null,
+      );
+      await pumpTagComic(tester, source, 'tag-comic-null');
+
+      await tester.tap(find.text('Silent'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(SearchResultPage), findsNothing);
+      expect(find.byType(SemanticSearchPage), findsNothing);
+      expect(find.byType(ComicPage), findsOneWidget);
+    });
+
+    testWidgets('a tagSearch target opens the semantic page with the opaque '
+        'keyword from the target source', (tester) async {
+      const sourceKey = 'tag-navigation-source';
+      final seen = <String>[];
+      final source = tagSource(
+        sourceKey: sourceKey,
+        tags: <String, List<String>>{
+          'Tags': ['Fate Series'],
+        },
+        handleClickTagEvent: (namespace, tag) {
+          seen.add('$namespace|$tag');
+          return PageJumpTarget(sourceKey, 'tagSearch', {'keyword': tag});
+        },
+      );
+      await pumpTagComic(tester, source, 'tag-comic-search');
+
+      await tester.tap(find.text('Fate Series'));
+      await tester.pumpAndSettle();
+
+      expect(seen, ['Tags|Fate Series']);
+      expect(find.byType(SemanticSearchPage), findsOneWidget);
+      final page = tester.widget<SemanticSearchPage>(
+        find.byType(SemanticSearchPage),
+      );
+      expect(page.sourceKey, sourceKey);
+      expect(page.value, 'Fate Series');
+      expect(find.textContaining('Tag: Fate Series'), findsOneWidget);
+      // The semantic page never offers a search box.
+      expect(find.byType(TextField), findsNothing);
+    });
+
+    testWidgets('the legacy action shape keeps its opaque keyword', (
+      tester,
+    ) async {
+      const sourceKey = 'tag-legacy-shape';
+      final source = tagSource(
+        sourceKey: sourceKey,
+        tags: <String, List<String>>{
+          'Tags': ['Legacy Tag'],
+        },
+        handleClickTagEvent: (namespace, tag) => PageJumpTarget.parse(
+          sourceKey,
+          {'action': 'tagSearch', 'keyword': tag},
+        ),
+      );
+      await pumpTagComic(tester, source, 'tag-comic-legacy');
+
+      await tester.tap(find.text('Legacy Tag'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(SemanticSearchPage), findsOneWidget);
+      final page = tester.widget<SemanticSearchPage>(
+        find.byType(SemanticSearchPage),
+      );
+      expect(page.value, 'Legacy Tag');
+    });
+
+    testWidgets('a non-author namespace never opens the candidate menu', (
+      tester,
+    ) async {
+      const sourceKey = 'tag-non-author';
+      final seen = <String>[];
+      final source = tagSource(
+        sourceKey: sourceKey,
+        tags: <String, List<String>>{
+          'Tags': ['社团（作者）'],
+        },
+        handleClickTagEvent: (namespace, tag) {
+          seen.add(tag);
+          return null;
+        },
+      );
+      await pumpTagComic(tester, source, 'tag-comic-non-author');
+
+      await tester.tap(find.text('社团（作者）'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Choose an author to search'.tl), findsNothing);
+      expect(seen, ['社团（作者）']);
+    });
+
+    testWidgets('cancelling the author menu never navigates', (tester) async {
+      const sourceKey = 'tag-author-cancel';
+      final seen = <String>[];
+      final source = tagSource(
+        sourceKey: sourceKey,
+        tags: <String, List<String>>{
+          'artist': ['社团（作者）'],
+        },
+        handleClickTagEvent: (namespace, tag) {
+          seen.add(tag);
+          return PageJumpTarget(sourceKey, 'search', {'text': tag});
+        },
+      );
+      await pumpTagComic(tester, source, 'tag-comic-author-cancel');
+
+      await tester.tap(find.text('社团（作者）'));
+      await tester.pumpAndSettle();
+      expect(find.text('Choose an author to search'.tl), findsOneWidget);
+
+      // Dismiss the chooser without selecting a candidate.
+      await tester.tapAt(const Offset(5, 5));
+      await tester.pumpAndSettle();
+
+      expect(seen, isEmpty);
+      expect(find.byType(SearchResultPage), findsNothing);
+      expect(find.byType(ComicPage), findsOneWidget);
+    });
   });
 }

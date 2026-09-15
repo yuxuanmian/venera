@@ -42,6 +42,7 @@ import 'scan/models.dart';
 import 'scan/scan_call_lease.dart';
 import 'scan/scan_limits.dart';
 import 'scan/source_adapter.dart';
+import 'semantic_search/request_scope.dart';
 
 class JavaScriptRuntimeException implements Exception {
   final String message;
@@ -159,12 +160,17 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
   Object? _messageReceiver(
     dynamic message, [
     ManagedSourceContext? domainContext,
+    SemanticExecutionLane? lane,
   ]) {
     try {
       // Context is supplied by the owning engine's host closure, never by a
       // field in an untrusted source message.
       final executionContext = domainContext ?? managedRuntimeBridge.current;
       _requireExecutionContext(executionContext);
+      // A lane-bound runtime reads and writes the exact ComicSource instance
+      // the lane was created from; it never re-resolves the key, so a replaced
+      // source can never be read or mutated by an old runtime.
+      final boundSource = lane?.boundSource;
       if (message is Map<dynamic, dynamic>) {
         if (message["method"] == null) return null;
         String method = message["method"] as String;
@@ -188,7 +194,7 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
               _requireManagedSourceKey(executionContext, key);
               return executionContext!.readData(dataKey);
             }
-            return ComicSource.find(key)?.data[dataKey];
+            return (boundSource ?? ComicSource.find(key))?.data[dataKey];
           case 'save_data':
             String key = message["key"];
             String dataKey = message["data_key"];
@@ -200,7 +206,7 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
               _requireManagedSourceKey(executionContext, key);
               return executionContext!.writeData(dataKey, data);
             }
-            var source = ComicSource.find(key)!;
+            var source = boundSource ?? ComicSource.find(key)!;
             source.data[dataKey] = data;
             return source.saveData(runtimeContext: executionContext);
           case 'delete_data':
@@ -210,11 +216,15 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
               _requireManagedSourceKey(executionContext, key);
               return executionContext!.deleteData(dataKey);
             }
-            var source = ComicSource.find(key);
+            var source = boundSource ?? ComicSource.find(key);
             source?.data.remove(dataKey);
             source?.saveData(runtimeContext: executionContext);
           case 'http':
-            return _http(Map.from(message), executionContext);
+            return _http(
+              Map.from(message),
+              executionContext,
+              semanticScope: lane?.scope ?? SemanticSearchRequestScope.current,
+            );
           case 'html':
             return handleHtmlCallback(Map.from(message));
           case 'convert':
@@ -253,7 +263,7 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
               if (value != null) return value;
               throw "Setting not found: $settingKey";
             }
-            var source = ComicSource.find(key)!;
+            var source = boundSource ?? ComicSource.find(key)!;
             return source.data["settings"]?[settingKey] ??
                 source.settings?[settingKey]?['default'] ??
                 (throw "Setting not found: $settingKey");
@@ -265,7 +275,7 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
             if (executionContext?.phase == ManagedSourcePhase.preparing) {
               return executionContext!.readData('account') != null;
             }
-            return ComicSource.find(key)!.isLogged;
+            return (boundSource ?? ComicSource.find(key)!).isLogged;
           // temporary solution for [setTimeout] function
           // TODO: implement [setTimeout] in quickjs project
           case "delay":
@@ -422,6 +432,7 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
     ScanCallLease? scanLease,
     bool isScanRequest = false,
     ScanLimits limits = const ScanLimits(),
+    SemanticSearchRequestScope? semanticScope,
   }) async {
     _requireExecutionContext(executionContext);
     _requirePublished(executionContext);
@@ -433,6 +444,11 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
     var requestTimedOut = false;
     Dio? privateDio;
     void Function()? removeRevokeListener;
+    // The semantic invocation scope is supplied either by the Host-only lane
+    // binding that owns this runtime, or by the ambient Host Zone for
+    // Host-initiated calls. It is never taken from `req`, `req.extra` or any
+    // other source-supplied payload.
+    semanticScope ??= SemanticSearchRequestScope.current;
 
     try {
       if (isScanRequest) {
@@ -496,6 +512,10 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
       if (scanLease != null && !scanLease.registerRequest(cancellation)) {
         scanLease.checkOpen();
       }
+      // A request created inside a canceled scope is canceled immediately and
+      // never reaches the network. Registration is Host-owned and is invisible
+      // to the JavaScript caller.
+      semanticScope?.register(cancellation);
       if (isScanRequest) {
         requestTimer = Timer(limits.requestTimeout, () {
           requestTimedOut = true;
@@ -569,6 +589,9 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
     } finally {
       requestTimer?.cancel();
       removeRevokeListener?.call();
+      if (cancellation != null) {
+        semanticScope?.unregister(cancellation);
+      }
       if (scanLease != null && cancellation != null) {
         scanLease.unregisterRequest(cancellation);
       }
@@ -693,7 +716,50 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
     _scanCapabilities.add(capabilities);
   }
 
+  /// Disposable semantic execution lanes, keyed by the Host-owned cancellation
+  /// group that owns them. A lane is created lazily for the first semantic
+  /// invocation of a query attempt and destroyed when that attempt ends.
+  final _semanticLanes = <SemanticSearchRequestScope, SemanticExecutionLane>{};
+
+  /// Returns the lane bound to [scope], creating it on first use.
+  ///
+  /// Lazy creation keeps sources that never use the Tag capability untouched:
+  /// no extra runtime exists until a semantic page actually asks for one.
+  SemanticExecutionLane acquireSemanticLane(
+    SemanticSearchRequestScope scope,
+    SemanticLaneSpec spec,
+  ) {
+    final existing = _semanticLanes[scope];
+    if (existing != null) return existing;
+    if (scope.isCanceled) {
+      throw const CatalogRuntimeDenied(
+        'Semantic scope was canceled before a lane could be created.',
+      );
+    }
+    final lane = SemanticExecutionLane._(
+      owner: this,
+      spec: spec,
+      scope: scope,
+      initSource:
+          _initSource ?? (throw StateError('JS engine is not initialized.')),
+      source: ComicSource.find(spec.sourceKey),
+    );
+    _semanticLanes[scope] = lane;
+    return lane;
+  }
+
+  /// Destroys the lane bound to [scope]. Idempotent.
+  void releaseSemanticLane(SemanticSearchRequestScope scope) {
+    _semanticLanes.remove(scope)?.revoke();
+  }
+
   void dispose() {
+    // Semantic lanes own their own runtimes and cancellation groups; retire
+    // them before the engine itself goes away.
+    for (final lane in _semanticLanes.values.toList()) {
+      lane.revoke();
+    }
+    _semanticLanes.clear();
     // Source scan callbacks are owned by the published source assembly, not
     // by the Dart GC. Release them before tearing down the native runtime so
     // QuickJS can observe a clean handle table during shutdown.
@@ -902,6 +968,242 @@ class _DomainHostFunction extends JSInvokable {
 
   @override
   void destroy() {}
+}
+
+/// The Host-only description of one source's semantic capability, captured by
+/// the parser at parse time.
+///
+/// It is deliberately not part of the public JavaScript contract: a source
+/// cannot read it, and it never travels through a bridge message.
+class SemanticLaneSpec {
+  const SemanticLaneSpec({
+    required this.sourceKey,
+    required this.script,
+    required this.className,
+    required this.alias,
+    this.context,
+  });
+
+  /// The published source key used to pin the ComicSource instance.
+  final String sourceKey;
+
+  /// The evaluated source script. A lane re-evaluates it in its own runtime.
+  final String script;
+
+  final String className;
+
+  /// The runtime alias the lane registers the capability under.
+  final String alias;
+
+  final ManagedSourceContext? context;
+}
+
+/// One disposable QuickJS execution lane that belongs to exactly one semantic
+/// query attempt.
+///
+/// Why a dedicated runtime instead of ambient context propagation: `flutter_qjs`
+/// pumps promise continuations from the `FlutterQjs` port listener
+/// (`dispatch()` -> `JS_ExecutePendingJob`), which always runs in the zone the
+/// listener was created in. A `runZoned` scope therefore survives only the
+/// synchronous `evaluate` entry, and every request a source creates after its
+/// first `await` would lose it. Instead of trying to propagate a scope along an
+/// asynchronous chain, this lane makes ownership a structural property: the
+/// `sendMessage` host closure is created together with the lane and captures
+/// this lane's cancellation group immutably. Nothing inside the lane can reach
+/// the network without passing through it, and the ordinary source runtime is
+/// structurally outside the lane, so it can never be canceled by it.
+class SemanticExecutionLane {
+  SemanticExecutionLane._({
+    required JsEngine owner,
+    required this.spec,
+    required this.scope,
+    required String initSource,
+    required ComicSource? source,
+  }) : _owner = owner,
+       _source = source,
+       _sourceRevision = ComicSourceManager().assemblyRevision {
+    _engine = FlutterQjs();
+    _engine.dispatch();
+    final setGlobal =
+        _engine.evaluate('(key, value) => { this[key] = value; }')
+            as JSInvokable;
+    setGlobal([
+      'sendMessage',
+      (dynamic message) {
+        requireOpen();
+        // The binding is immutable for this runtime's whole lifetime: the
+        // scope is captured here at creation and never read from ambient
+        // state, so a leftover promise or timer job from an earlier invocation
+        // can only ever be attributed to the lane that created it.
+        final context = spec.context;
+        final result = context == null
+            ? _owner._messageReceiver(message, null, this)
+            : managedRuntimeBridge.run(
+                context,
+                () => _owner._messageReceiver(message, context, this),
+              );
+        return _gate(result);
+      },
+    ]);
+    setGlobal(['appVersion', App.version]);
+    setGlobal.free();
+    _engine.evaluate(initSource, name: '<semantic-init>');
+    _engine.evaluate('''
+      (() => {
+        ${spec.script}
+        ComicSource.sources[${jsonEncode(spec.alias)}] =
+            new ${spec.className}();
+        return null;
+      }).call()
+    ''', name: '<semantic-source>');
+    _revokeListener = spec.context?.addRevokeListener(revoke);
+  }
+
+  final JsEngine _owner;
+
+  final SemanticLaneSpec spec;
+
+  /// The Host-owned cancellation group that every request in this lane is
+  /// registered into.
+  final SemanticSearchRequestScope scope;
+
+  final ComicSource? _source;
+
+  final int _sourceRevision;
+
+  late final FlutterQjs _engine;
+
+  final _pending = <Completer<dynamic>>{};
+
+  final _functions = <JSAutoFreeFunction>[];
+
+  void Function()? _revokeListener;
+
+  bool _revoked = false;
+
+  Future<void> _queue = Future<void>.value();
+
+  /// The ComicSource instance this lane is pinned to. Never resolved lazily by
+  /// key, so a replaced source cannot be read or written by an old runtime.
+  ComicSource? get boundSource => _source;
+
+  bool get isRevoked => _revoked;
+
+  void requireOpen() {
+    if (_revoked) {
+      throw const CatalogRuntimeDenied('Semantic lane was revoked.');
+    }
+    final pinned = _source;
+    if (pinned != null &&
+        (ComicSourceManager().assemblyRevision != _sourceRevision ||
+            !identical(ComicSource.find(pinned.key), pinned))) {
+      // The assembly this lane was created from is gone. Retire the lane before
+      // the runtime can observe the replacement source.
+      revoke();
+      throw const CatalogRuntimeDenied(
+        'Semantic lane source was replaced or revoked.',
+      );
+    }
+  }
+
+  /// Runs [action] after every previously queued invocation settled. The lane
+  /// never executes two logical invocations at the same time.
+  Future<T> serialize<T>(Future<T> Function() action) {
+    final next = _queue.then((_) => action());
+    _queue = next.then((_) {}, onError: (_) {});
+    return next;
+  }
+
+  dynamic evaluate(String code, [String? name]) {
+    requireOpen();
+    return _wrap(_engine.evaluate(code, name: name));
+  }
+
+  dynamic _gate(dynamic result) {
+    if (result is! Future) return result;
+    final completer = Completer<dynamic>();
+    result.then(
+      (value) {
+        if (!_revoked) completer.complete(value);
+      },
+      onError: (Object error, StackTrace stack) {
+        if (!_revoked) completer.completeError(error, stack);
+      },
+    );
+    return completer.future;
+  }
+
+  dynamic _wrap(dynamic result) {
+    if (result is JSInvokable) {
+      final function = JSAutoFreeFunction(result);
+      _functions.add(function);
+      return function;
+    }
+    if (result is Uint8List) return result;
+    if (result is Future) {
+      final completer = Completer<dynamic>();
+      _pending.add(completer);
+      result.then(
+        (value) {
+          if (_pending.remove(completer)) {
+            try {
+              requireOpen();
+              completer.complete(_wrap(value));
+            } catch (error, stack) {
+              completer.completeError(error, stack);
+            }
+          }
+        },
+        onError: (Object error, StackTrace stack) {
+          if (_pending.remove(completer)) completer.completeError(error, stack);
+        },
+      );
+      return completer.future;
+    }
+    if (result is List) return result.map(_wrap).toList();
+    if (result is Map) {
+      if (result.keys.every((key) => key is String)) {
+        return <String, dynamic>{
+          for (final entry in result.entries)
+            entry.key as String: _wrap(entry.value),
+        };
+      }
+      return <dynamic, dynamic>{
+        for (final entry in result.entries) entry.key: _wrap(entry.value),
+      };
+    }
+    return result;
+  }
+
+  /// The single, idempotent destruction entry point.
+  ///
+  /// Order matters: mark the lane revoked, invalidate the Host generation
+  /// through the cancellation group, then destroy the native runtime. A request
+  /// created between the cancel and the close finds an already canceled scope
+  /// and cancels its own token immediately, so there is no race window.
+  void revoke() {
+    if (_revoked) return;
+    _revoked = true;
+    scope.cancel();
+    _revokeListener?.call();
+    _revokeListener = null;
+    for (final function in _functions) {
+      function.dispose();
+    }
+    _functions.clear();
+    for (final pending in _pending) {
+      pending.completeError(
+        const CatalogRuntimeDenied('Semantic lane was revoked.'),
+      );
+    }
+    _pending.clear();
+    try {
+      _engine.port.close();
+    } catch (_) {}
+    try {
+      _engine.close();
+    } catch (_) {}
+  }
 }
 
 mixin class _JSEngineApi {

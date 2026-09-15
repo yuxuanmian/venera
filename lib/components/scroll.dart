@@ -5,16 +5,25 @@ class SmoothCustomScrollView extends StatelessWidget {
     super.key,
     required this.slivers,
     this.controller,
+    this.physics,
   });
 
   final ScrollController? controller;
 
   final List<Widget> slivers;
 
+  /// Optional physics override.
+  ///
+  /// A list that must be able to express a trailing overscroll even when its
+  /// content is shorter than the viewport passes `AlwaysScrollableScrollPhysics`
+  /// here; the default keeps the platform-specific behaviour.
+  final ScrollPhysics? physics;
+
   @override
   Widget build(BuildContext context) {
     return SmoothScrollProvider(
       controller: controller,
+      physics: physics,
       builder: (context, controller, physics) {
         return CustomScrollView(
           controller: controller,
@@ -35,10 +44,16 @@ class SmoothScrollProvider extends StatefulWidget {
   const SmoothScrollProvider({
     super.key,
     this.controller,
+    this.physics,
     required this.builder,
   });
 
   final ScrollController? controller;
+
+  /// When set, this physics is used instead of the platform-derived default.
+  /// It is still composed with the scroll behaviour's own physics so a caller
+  /// cannot silently drop `AlwaysScrollable` semantics.
+  final ScrollPhysics? physics;
 
   final Widget Function(BuildContext, ScrollController, ScrollPhysics) builder;
 
@@ -161,9 +176,10 @@ class _SmoothScrollProviderState extends State<SmoothScrollProvider> {
         child: widget.builder(
           context,
           _controller,
-          _isMouseScroll
-              ? const NeverScrollableScrollPhysics()
-              : const BouncingScrollPhysics(),
+          widget.physics ??
+              (_isMouseScroll
+                  ? const NeverScrollableScrollPhysics()
+                  : const BouncingScrollPhysics()),
         ),
       ),
     );

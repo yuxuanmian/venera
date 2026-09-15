@@ -428,6 +428,105 @@ This part is used to load search results.
 `load` and `loadNext` functions are used to load search results. 
 If `load` function is implemented, `loadNext` function will be ignored.
 
+#### Semantic Tag Search
+
+`search.tagSearch` 是可选的 source capability：让 source 把自己已经产出的 **opaque Tag token**
+解析成结果，而不是把它当作自由文本交给普通搜索。它是 additive 的：缺少，或存在但非法
+（不是对象，或既没有 `load` 也没有 `loadNext`）时，该能力被隔离并记录错误，普通解析、普通
+搜索和既有 `onClickTag` 行为完全不变。
+
+设计依据是 [ADR-0017](../../doc/design/adr/0017-semantic-tag-search.md)
+（`doc/design/adr/0017-semantic-tag-search.md`）以及 feature contracts
+（[`specs/008-semantic-tag-search/contracts/`](../../specs/008-semantic-tag-search/contracts/README.md)），
+其中 Contract S（`source-semantic-search-v1.md`）定义 capability 形状，Contract N
+（`navigation-v1.md`）定义详情点击导航。本文只描述契约，不代表任何 source 已经采用、发布或
+部署该能力。
+
+```javascript
+    search = {
+        // ... ordinary load / loadNext / optionList
+
+        // [Optional] Tag semantic search capability.  Declare it only when the
+        // source can resolve its own opaque Tag value on its own.
+        tagSearch: {
+            // Pick ONE pagination form.  If both are declared, the Host uses `load`.
+            // Page form:
+            load: async (value, options, page) => ({ comics, maxPage }),
+            // or cursor form:
+            loadNext: async (value, options, next) => ({ comics, next }),
+        },
+    }
+```
+
+**Inputs**
+
+- `value` 是 **source 自己产出的 opaque token**。Host 原样透传：不 trim、不做大小写转换、
+  不把 namespace 拼进去、也不做 tokenization。source 若需要 namespace，必须自己生成一个
+  包含该语义的 token。
+- `options` 是由同一份 `search.optionList` 默认值构建的快照，不是普通搜索页上一次可变的
+  用户选择。
+- `page` 是 Host 拥有的整数续页参数，沿用普通搜索的既有约定。
+- `next` 由 source 拥有、对 Host opaque；`null` 表示第一次调用。Host 只把它与输入做相等
+  比较、并检查是否为 `null`，不做解码。cursor 的内部结构完全由 source 定义，因此升级 cursor
+  格式时 source 必须自己版本化，并在遇到无法识别的输入时明确失败，而不是静默从第一页重新开始。
+
+**Outputs**
+
+两种形态二选一；同时声明时 Host 使用 `load`，`loadNext` 被忽略。
+
+- Page form：`{comics: Comic[], maxPage: integer}`。结束只由显式的 `maxPage` 决定；
+  `maxPage` 之前的空 `comics` 是合法的稀疏窗口，**不**意味着结束。
+- Cursor form：`{comics: Comic[], next}`。`[] + next` 是合法的成功结果（稀疏窗口）；只要成功
+  且 `next` 非 `null`，它就必须相对输入**前进**，返回与输入完全相同的 cursor 属于协议错误
+  （Host 会安全终止）。
+- 两种形态都可以返回任意条数（包括超过 UI 单次追加上限）。跨 invocation 的缓冲、去重和
+  追加由 Host 负责，source 不需要（也不应该）为凑满 UI 而多取数据。
+
+**Work and atomicity**
+
+- 每次回调 invocation 都必须有一个**有限**的工作上界，并且该上界要写在 source 注释/文档里；
+  它必须独立于 UI 的追加条数。
+- source **绝不能**为了让 UI 列表看起来填满而继续扫描。
+- 如果一次 invocation 发出多个请求，它要么返回一个完整且有序的成功结果，要么失败：不允许
+  返回部分 comics，也不允许部分推进 cursor。
+- source 自定义的并发必须有界，并且无论请求完成顺序如何，都要保持逻辑 source 顺序。
+
+**Cancellation**
+
+取消是 **Host 私有** 的：JavaScript 回调签名没有取消参数，也没有新增任何 JavaScript 全局对象；
+source 无法观察、伪造或转移 Host 的 request scope。Host 在页面被 dispose/refresh，或排序
+（options）变化时取消该 invocation 创建的所有请求；晚到的结果由 Host 的 generation 检查丢弃。
+source 只需保证失败/取消时不留部分结果。
+
+**Detail navigation**
+
+用户点击详情字段 `(namespace, rawValue)` 时，导航语义完全由 source 决定；App 不会根据
+namespace 推断 Tag/Author/Category，也不会猜测 semantic intent。
+
+| source `onClickTag` 状态 | App 行为 |
+| --- | --- |
+| property missing | 用**原始**字段值（`rawValue`）对当前 source 执行普通搜索 |
+| handler 返回 `null`/`undefined` | 完全不导航（绝不回退到普通搜索） |
+| `{page: "search", keyword}`（或 legacy `{action: "search", keyword}`） | 普通搜索 |
+| 已存在的 category target | 携带其 attributes 打开 category 页 |
+| `{page: "tagSearch", keyword}`（或 legacy `{action: "tagSearch", keyword}`） | 绑定当前 source 的独立语义 Tag 页，使用 opaque keyword |
+
+- 现代写法是 `{page: "tagSearch", attributes: {keyword: "..."}}`；legacy 写法
+  `{action: "tagSearch", keyword: "..."}` 同样被接受，并且保留其 opaque keyword（未知
+  action 会被丢弃，`tagSearch` 不会）。
+- 若 App 先执行既有的作者候选消歧，消歧发生在 handler **之前**，handler 收到
+  `(namespace, resolvedValue)`；而 **property missing** 的回退使用原始字段值，而不是消歧后
+  的候选语法，以免把作者展示用的消歧逻辑误当成 source 查询语法。
+- 本次点击的 `sourceKey` 由点击上下文可靠提供；source 不需要在返回值里暴露 sourceKey。
+- 语义页使用本地化的 `Tag: <value>` 等价标题并显示固定 source 语境，且不提供搜索框、值编辑、
+  source 切换、history、suggestions 或自动语言追加。capability 缺失只改变语义页内部的解析
+  mode（退化到普通搜索 compatibility，或不支持），不改变 navigation target。
+
+**Forbidden V1 extensions**
+
+V1 不引入以下任何一项：通用 Author/Category semantic kind、语义 history/suggestions、prefetch、
+cross-source mapping、per-comic detail filtering、取消参数，以及任何 server 契约或无界扫描。
+
 #### Favorites
 
 ```javascript
@@ -678,9 +777,11 @@ If `load` function is implemented, `loadNext` function will be ignored.
         idMatch: null,
         /**
          * [Optional] Handle tag click event
+         * The returned target decides the navigation; the App never infers
+         * Tag/Author/Category from `namespace`.  See "Semantic Tag Search".
          * @param namespace {string}
          * @param tag {string}
-         * @returns {{action: string, keyword: string, param: string?}}
+         * @returns {{page: string, attributes: {}} | {action: string, keyword: string, param: string?} | null}
          */
         onClickTag: (namespace, tag) => {
 
