@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';
+import 'package:venera/utils/translations.dart';
 
 import 'models.dart';
 import 'request_scope.dart';
@@ -108,13 +109,20 @@ class ComicSourceSemanticResolver implements SemanticResolver {
     if (_ordinaryPageLoader != null || _ordinaryNextLoader != null) {
       return _loadOrdinary(snapshot, scope);
     }
-    return const Res.error('This source does not support semantic search');
+    return Res.error('This source does not support semantic search'.tl);
   }
 
   @override
   Future<void> releaseLane(SemanticSearchRequestScope scope) async {
     await source.semanticSearchData?.releaseLane?.call(scope);
+    await source.ordinarySearchLaneData?.releaseLane?.call(scope);
   }
+
+  /// Whether the compatibility mode has a real cancellation binding (a lane)
+  /// rather than only the legacy Zone fallback. Exposed for focused tests and
+  /// evidence collection.
+  @visibleForTesting
+  bool get ordinaryFallbackUsesLane => source.ordinarySearchLaneData != null;
 
   Future<Res<SemanticSourceResult>> _loadExact(
     SemanticSearchData capability,
@@ -130,7 +138,7 @@ class ComicSourceSemanticResolver implements SemanticResolver {
         case PageContinuation(:final nextPage):
           page = nextPage;
         case CursorContinuation():
-          return const Res.error('Semantic source pagination form changed');
+          return Res.error('Semantic source pagination form changed'.tl);
       }
       final res = await capability.loadPage!(
         snapshot.query.value,
@@ -147,7 +155,7 @@ class ComicSourceSemanticResolver implements SemanticResolver {
       case CursorContinuation(:final value):
         next = value;
       case PageContinuation():
-        return const Res.error('Semantic source pagination form changed');
+        return Res.error('Semantic source pagination form changed'.tl);
     }
     final res = await capability.loadNext!(
       snapshot.query.value,
@@ -162,10 +170,17 @@ class ComicSourceSemanticResolver implements SemanticResolver {
     SemanticInvocationSnapshot snapshot,
     SemanticSearchRequestScope scope,
   ) async {
-    // The ordinary loaders do not accept a Host scope, so the adapter is the
-    // one place that keeps their requests inside the invocation zone.
+    // The compatibility adapter runs the ordinary loaders on an execution lane
+    // (see `ComicSource.ordinarySearchLaneData`), so cancellation is structural
+    // like the exact capability's and does not depend on an ambient Zone that
+    // cannot survive the QuickJS job pump (ADR-0017 Amendment 1). The
+    // `searchPageData` path below is only a defensive fallback for a source
+    // built without a lane binding.
+    final lane = source.ordinarySearchLaneData;
+    final pageLoader = lane?.loadPage ?? _ordinaryPageLoader;
+    final nextLoader = lane?.loadNext ?? _ordinaryNextLoader;
     final options = snapshot.query.options;
-    if (_ordinaryPageLoader != null) {
+    if (pageLoader != null) {
       final int page;
       switch (snapshot.inputContinuation) {
         case null:
@@ -173,11 +188,18 @@ class ComicSourceSemanticResolver implements SemanticResolver {
         case PageContinuation(:final nextPage):
           page = nextPage;
         case CursorContinuation():
-          return const Res.error('Semantic source pagination form changed');
+          return Res.error('Semantic source pagination form changed'.tl);
       }
-      final res = await scope.run(
-        () => _ordinaryPageLoader!(snapshot.query.value, page, options),
-      );
+      final res = lane != null
+          ? await pageLoader(
+              snapshot.query.value,
+              options,
+              page,
+              requestScope: scope,
+            )
+          : await scope.run(
+              () => _ordinaryPageLoader!(snapshot.query.value, page, options),
+            );
       return _adaptPageResult(res, page);
     }
     final String? next;
@@ -187,11 +209,18 @@ class ComicSourceSemanticResolver implements SemanticResolver {
       case CursorContinuation(:final value):
         next = value;
       case PageContinuation():
-        return const Res.error('Semantic source pagination form changed');
+        return Res.error('Semantic source pagination form changed'.tl);
     }
-    final res = await scope.run(
-      () => _ordinaryNextLoader!(snapshot.query.value, next, options),
-    );
+    final res = lane != null
+        ? await nextLoader!(
+            snapshot.query.value,
+            options,
+            next,
+            requestScope: scope,
+          )
+        : await scope.run(
+            () => _ordinaryNextLoader!(snapshot.query.value, next, options),
+          );
     return _adaptCursorResult(res);
   }
 
@@ -207,7 +236,7 @@ class ComicSourceSemanticResolver implements SemanticResolver {
         'Semantic Search',
         'Source declared a non-integer maxPage (${maxPage.runtimeType})',
       );
-      return const Res.error('Semantic source declared an invalid maxPage');
+      return Res.error('Semantic source declared an invalid maxPage'.tl);
     }
     final limit = maxPage as int?;
     final SemanticContinuation? next = (limit != null && page >= limit)
@@ -232,7 +261,7 @@ class ComicSourceSemanticResolver implements SemanticResolver {
         'Semantic Search',
         'Source declared a non-string cursor (${raw.runtimeType})',
       );
-      return const Res.error('Semantic source declared an invalid cursor');
+      return Res.error('Semantic source declared an invalid cursor'.tl);
     }
     return Res(SemanticSourceResult(res.data, next), subData: raw);
   }

@@ -1,9 +1,15 @@
+import 'dart:async';
+import 'dart:collection';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:venera/components/components.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/foundation/semantic_search/controller.dart';
 import 'package:venera/foundation/semantic_search/models.dart';
+import 'package:venera/pages/search_page.dart';
+import 'package:venera/pages/search_result_page.dart';
 import 'package:venera/pages/semantic_search_page.dart';
 import 'package:venera/utils/translations.dart';
 
@@ -74,6 +80,282 @@ FakeSemanticResolver _pagedResolver({int perWindow = 6, int? maxPage}) {
 
 void main() {
   setUpAll(AppTranslation.init);
+
+  group('results presentation and page interactions (T080/T081)', () {
+    /// A published source whose capability is built from plain Dart loaders, so
+    /// the semantic page can be exercised end to end without a JavaScript
+    /// runtime. The loaders stand in for what Pica's exact predicate returns.
+    ComicSource sourceWithSemantic({
+      required String key,
+      required Future<Res<List<Comic>>> Function(
+        String value,
+        List<String> options,
+        int page,
+      )
+      loader,
+      List<SearchOptions> searchOptions = const <SearchOptions>[],
+    }) {
+      return ComicSource(
+        'Semantic source',
+        key,
+        null,
+        null,
+        null,
+        null,
+        const [],
+        SearchPageData(searchOptions, null, null),
+        null,
+        (id) async => Res<ComicDetails>.error('unused'),
+        null,
+        null,
+        null,
+        null,
+        '',
+        '',
+        '1.0.0',
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        false,
+        false,
+        null,
+        null,
+        semanticSearchData: SemanticSearchData((
+          value,
+          options,
+          page, {
+          required requestScope,
+        }) async {
+          expect(requestScope, isNotNull);
+          return loader(value, options, page);
+        }, null),
+      );
+    }
+
+    testWidgets('only the exact fixture ids reach the shared grid', (
+      tester,
+    ) async {
+      const key = 'page_exact_presentation';
+      final source = sourceWithSemantic(
+        key: key,
+        loader: (value, options, page) async => Res([
+          fixtureComic(10, sourceKey: key),
+          fixtureComic(11, sourceKey: key),
+        ], subData: 1),
+      );
+      ComicSourceManager().add(source);
+      addTearDown(() => ComicSourceManager().remove(key));
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: const SemanticSearchPage(sourceKey: key, value: 'Fate'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // The grid renders the loader's result...
+      final grid = tester.widget<SliverGridComics>(
+        find.byType(SliverGridComics),
+      );
+      expect(grid.comics.map((comic) => comic.id), ['id-10', 'id-11']);
+      // ...and uses the shared card's default detail navigation.
+      expect(grid.onTap, isNull);
+      expect(grid.onLastItemBuild, isNull);
+      // Ids that only matched by title or by category must not appear.
+      for (final excluded in ['title-only-1', 'categories-only-1']) {
+        expect(find.text(excluded), findsNothing);
+      }
+      await drainCoverLoads(tester);
+    });
+
+    testWidgets('pull-to-refresh reloads from the start', (tester) async {
+      const key = 'page_refresh';
+      var calls = 0;
+      final pages = <int>[];
+      final source = sourceWithSemantic(
+        key: key,
+        loader: (value, options, page) async {
+          calls++;
+          pages.add(page);
+          return Res([fixtureComic(calls, sourceKey: key)], subData: 9);
+        },
+      );
+      ComicSourceManager().add(source);
+      addTearDown(() => ComicSourceManager().remove(key));
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: const SemanticSearchPage(sourceKey: key, value: 'Fate'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(calls, 1);
+
+      await tester.fling(
+        find.byType(CustomScrollView),
+        const Offset(0, 320),
+        1000,
+      );
+      await tester.pumpAndSettle();
+
+      expect(calls, 2, reason: 'RefreshIndicator must run one fresh cycle');
+      expect(pages, [1, 1], reason: 'refresh restarts from the first page');
+      await drainCoverLoads(tester);
+    });
+
+    testWidgets('a sort change resets instead of opening ordinary search', (
+      tester,
+    ) async {
+      const key = 'page_sort';
+      final seenOptions = <List<String>>[];
+      final source = sourceWithSemantic(
+        key: key,
+        searchOptions: [
+          SearchOptions(
+            LinkedHashMap<String, String>.from({'dd': 'New', 'ld': 'Likes'}),
+            'Sort',
+            'select',
+            null,
+          ),
+        ],
+        loader: (value, options, page) async {
+          seenOptions.add(List<String>.from(options));
+          return Res([
+            fixtureComic(seenOptions.length, sourceKey: key),
+          ], subData: 9);
+        },
+      );
+      ComicSourceManager().add(source);
+      addTearDown(() => ComicSourceManager().remove(key));
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: const SemanticSearchPage(sourceKey: key, value: 'Fate'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // The first invocation used the declared default option.
+      expect(seenOptions.single, ['dd']);
+
+      await tester.tap(find.byIcon(Icons.tune));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Likes'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Confirm'));
+      await tester.pumpAndSettle();
+
+      expect(seenOptions.length, 2);
+      expect(seenOptions.last, [
+        'ld',
+      ], reason: 'the new options snapshot must reach the source request');
+      expect(
+        find.byType(SearchResultPage),
+        findsNothing,
+        reason: 'a sort change never rebuilds ordinary search',
+      );
+      await drainCoverLoads(tester);
+    });
+
+    testWidgets('the options dialog keeps its rows off the dialog edges', (
+      tester,
+    ) async {
+      const key = 'page_sort_layout';
+      final source = sourceWithSemantic(
+        key: key,
+        searchOptions: [
+          SearchOptions(
+            LinkedHashMap<String, String>.from({'dd': 'New', 'ld': 'Likes'}),
+            'Sort',
+            'select',
+            null,
+          ),
+        ],
+        loader: (value, options, page) async =>
+            Res([fixtureComic(1, sourceKey: key)], subData: 1),
+      );
+      ComicSourceManager().add(source);
+      addTearDown(() => ComicSourceManager().remove(key));
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: const SemanticSearchPage(sourceKey: key, value: 'Fate'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(Icons.tune));
+      await tester.pumpAndSettle();
+
+      // `ContentDialog` adds no horizontal padding of its own and
+      // `SearchOptionWidget` provides none either, so the dialog content must
+      // inset the rows itself.
+      final dialog = tester.getRect(find.byType(Dialog));
+      final row = tester.getRect(find.byType(SearchOptionWidget));
+      expect(
+        row.left - dialog.left,
+        greaterThanOrEqualTo(16),
+        reason: 'the option label must not touch the dialog edge',
+      );
+      expect(
+        dialog.right - row.right,
+        greaterThanOrEqualTo(16),
+        reason: 'the option chips must not touch the dialog edge',
+      );
+      await drainCoverLoads(tester);
+    });
+
+    testWidgets('disposing during an in-flight request is silent', (
+      tester,
+    ) async {
+      const key = 'page_dispose_in_flight';
+      final gate = Completer<void>();
+      final source = sourceWithSemantic(
+        key: key,
+        loader: (value, options, page) async {
+          await gate.future;
+          return Res([fixtureComic(1, sourceKey: key)], subData: 1);
+        },
+      );
+      ComicSourceManager().add(source);
+      addTearDown(() => ComicSourceManager().remove(key));
+
+      SemanticSearchController? controller;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SemanticSearchPage(
+            sourceKey: key,
+            value: 'Fate',
+            onControllerCreated: (value) => controller = value,
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(controller, isNotNull);
+      expect(controller!.status, SemanticSearchStatus.loading);
+      final scope = controller!.queryScope;
+
+      await tester.pumpWidget(const SizedBox());
+      expect(scope.isCanceled, isTrue);
+      gate.complete();
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.takeException(),
+        isNull,
+        reason: 'a canceled in-flight invocation must not surface an error',
+      );
+      expect(controller!.errorMessage, isNull);
+    });
+  });
 
   group('semantic page shell', () {
     testWidgets('shows the fixed source context and opaque Tag value', (

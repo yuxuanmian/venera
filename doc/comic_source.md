@@ -475,7 +475,10 @@ If `load` function is implemented, `loadNext` function will be ignored.
 两种形态二选一；同时声明时 Host 使用 `load`，`loadNext` 被忽略。
 
 - Page form：`{comics: Comic[], maxPage: integer}`。结束只由显式的 `maxPage` 决定；
-  `maxPage` 之前的空 `comics` 是合法的稀疏窗口，**不**意味着结束。
+  `maxPage` 之前的空 `comics` 是合法的稀疏窗口，**不**意味着结束。若 source 不返回
+  `maxPage`（`null`/缺失/非正整数），Host 不视为结束，而是按「无上限」处理：只要用户继续
+  产生滚动意图，Host 就按 `page + 1` 继续请求。source 若想让扫描在某个终点停下，必须显式
+  返回 `maxPage`。
 - Cursor form：`{comics: Comic[], next}`。`[] + next` 是合法的成功结果（稀疏窗口）；只要成功
   且 `next` 非 `null`，它就必须相对输入**前进**，返回与输入完全相同的 cursor 属于协议错误
   （Host 会安全终止）。
@@ -498,6 +501,16 @@ source 无法观察、伪造或转移 Host 的 request scope。Host 在页面被
 （options）变化时取消该 invocation 创建的所有请求；晚到的结果由 Host 的 generation 检查丢弃。
 source 只需保证失败/取消时不留部分结果。
 
+**Compatibility mode**
+
+source 没有合法的 `search.tagSearch` 时，语义页不会退回普通搜索页，而是留在同一个固定
+source/Tag 的页面上、用该 source 的普通 search loader 作为兼容适配器，并且：
+
+- 页面**必须**显式提示这是普通搜索结果、不保证精确 Tag 语义；任何情况下都不得宣称精确；
+- 兼容适配器同样在 Host 的执行 lane 上运行，因此 dispose/refresh/排序变化同样会真实取消它的
+  在途请求，而不只是被 generation 隔离（见 Host 侧 ADR-0017 Amendment 1）；
+- 兼容模式不写入普通搜索历史，也不使用 suggestion 或自动语言追加。
+
 **Detail navigation**
 
 用户点击详情字段 `(namespace, rawValue)` 时，导航语义完全由 source 决定；App 不会根据
@@ -507,13 +520,14 @@ namespace 推断 Tag/Author/Category，也不会猜测 semantic intent。
 | --- | --- |
 | property missing | 用**原始**字段值（`rawValue`）对当前 source 执行普通搜索 |
 | handler 返回 `null`/`undefined` | 完全不导航（绝不回退到普通搜索） |
-| `{page: "search", keyword}`（或 legacy `{action: "search", keyword}`） | 普通搜索 |
+| `{page: "search", attributes: {text}}`（或 legacy `{action: "search", keyword}`） | 普通搜索 |
 | 已存在的 category target | 携带其 attributes 打开 category 页 |
-| `{page: "tagSearch", keyword}`（或 legacy `{action: "tagSearch", keyword}`） | 绑定当前 source 的独立语义 Tag 页，使用 opaque keyword |
+| `{page: "tagSearch", attributes: {keyword}}`（或 legacy `{action: "tagSearch", keyword}`） | 绑定当前 source 的独立语义 Tag 页，使用 opaque keyword |
 
-- 现代写法是 `{page: "tagSearch", attributes: {keyword: "..."}}`；legacy 写法
-  `{action: "tagSearch", keyword: "..."}` 同样被接受，并且保留其 opaque keyword（未知
-  action 会被丢弃，`tagSearch` 不会）。
+- 现代写法的规范载体是 `attributes`。把 `keyword` 直接写在 `page` 同级
+  （`{page: "tagSearch", keyword: "..."}`）是等价简写，Host 同样接受，两者同时出现时
+  `attributes` 优先。legacy 写法 `{action: "tagSearch", keyword: "..."}` 也被接受，并且
+  保留其 opaque keyword（未知 action 会被丢弃，`tagSearch` 不会）。
 - 若 App 先执行既有的作者候选消歧，消歧发生在 handler **之前**，handler 收到
   `(namespace, resolvedValue)`；而 **property missing** 的回退使用原始字段值，而不是消歧后
   的候选语法，以免把作者展示用的消歧逻辑误当成 source 查询语法。

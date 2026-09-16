@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:venera/utils/translations.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/foundation/semantic_search/models.dart';
@@ -64,6 +65,12 @@ SemanticInvocationSnapshot snapshot({
 );
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  // The Host-generated semantic error messages are translated; the library
+  // must be loaded before any of them can be produced.
+  setUpAll(AppTranslation.init);
+
   group('capability resolution', () {
     test('a valid tagSearch is exact', () {
       final resolver = ComicSourceSemanticResolver(

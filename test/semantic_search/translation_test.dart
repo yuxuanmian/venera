@@ -37,6 +37,14 @@ void main() {
     'Finished',
     // 6. The generic error fallback.
     'Network Error',
+    // 7. Host-generated errors surfaced by the full-page and footer error
+    //    states. A source's own passthrough error text is never translated.
+    'Semantic search failed',
+    'Semantic source cursor did not advance',
+    'This source does not support semantic search',
+    'Semantic source pagination form changed',
+    'Semantic source declared an invalid maxPage',
+    'Semantic source declared an invalid cursor',
   ];
 
   /// Keys the page also uses that already existed before this feature. They are

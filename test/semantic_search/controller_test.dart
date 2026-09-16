@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:venera/utils/translations.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/foundation/semantic_search/controller.dart';
 import 'package:venera/foundation/semantic_search/models.dart';
@@ -22,6 +23,12 @@ SemanticSearchController _controller(
 );
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  // The Host-generated semantic error messages are translated; the library
+  // must be loaded before any of them can be produced.
+  setUpAll(AppTranslation.init);
+
   group('immutable models', () {
     test('a query freezes its options snapshot', () {
       final options = <String>['dd'];

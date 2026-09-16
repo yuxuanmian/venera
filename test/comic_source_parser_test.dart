@@ -795,5 +795,43 @@ class ParserTagThrowsSource extends ComicSource {
       expect(stringCategory.page, 'category');
       expect(stringCategory.attributes, {'category': 'name', 'param': 'param'});
     });
+
+    test('a top-level keyword is accepted as a shorthand for attributes', () {
+      const key = 'parser_tag_shorthand';
+      // Canonical form.
+      final canonical = PageJumpTarget.parse(key, {
+        'page': 'tagSearch',
+        'attributes': {'keyword': '  A B  '},
+      });
+      expect(canonical.page, 'tagSearch');
+      expect(canonical.sourceKey, key);
+      expect(canonical.tagSearchValue, '  A B  ');
+
+      // Shorthand: the keyword sits next to `page` instead of inside
+      // `attributes`. It must not silently become an empty opaque value.
+      final shorthand = PageJumpTarget.parse(key, {
+        'page': 'tagSearch',
+        'keyword': '  A B  ',
+      });
+      expect(shorthand.page, 'tagSearch');
+      expect(shorthand.sourceKey, key);
+      expect(shorthand.tagSearchValue, '  A B  ');
+
+      // `attributes` stays authoritative when both are present.
+      final both = PageJumpTarget.parse(key, {
+        'page': 'tagSearch',
+        'keyword': 'top-level',
+        'attributes': {'keyword': 'nested'},
+      });
+      expect(both.tagSearchValue, 'nested');
+
+      // The same shorthand works for ordinary search.
+      final search = PageJumpTarget.parse(key, {
+        'page': 'search',
+        'keyword': 'plain',
+      });
+      expect(search.page, 'search');
+      expect(search.attributes?['keyword'], 'plain');
+    });
   });
 }

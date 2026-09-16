@@ -736,7 +736,13 @@
     "This comic source cannot search by tag": "该漫画源不支持按标签搜索",
     "This source has no exact tag search; results are not guaranteed to be exact.": "该源没有精确标签搜索，结果不保证精确。",
     "No matches in the current range. Continue scrolling to search further.": "当前范围内没有匹配结果。继续滚动可搜索更多。",
-    "Network Error": "网络错误"
+    "Network Error": "网络错误",
+    "Semantic search failed": "语义搜索失败",
+    "Semantic source cursor did not advance": "语义源的游标没有前进",
+    "This source does not support semantic search": "该漫画源不支持语义搜索",
+    "Semantic source pagination form changed": "语义源的分页形态发生了变化",
+    "Semantic source declared an invalid maxPage": "语义源返回了无效的 maxPage",
+    "Semantic source declared an invalid cursor": "语义源返回了无效的游标"
   },
   "zh_TW": {
     "Invalid server address": "伺服器位址無效",
@@ -1474,6 +1480,12 @@
     "This comic source cannot search by tag": "該漫畫源不支援依標籤搜尋",
     "This source has no exact tag search; results are not guaranteed to be exact.": "該源沒有精確標籤搜尋，結果不保證精確。",
     "No matches in the current range. Continue scrolling to search further.": "目前範圍內沒有符合的結果。繼續捲動可搜尋更多。",
-    "Network Error": "網路錯誤"
+    "Network Error": "網路錯誤",
+    "Semantic search failed": "語意搜尋失敗",
+    "Semantic source cursor did not advance": "語意源的游標沒有前進",
+    "This source does not support semantic search": "該漫畫源不支援語意搜尋",
+    "Semantic source pagination form changed": "語意源的分頁形態發生了變化",
+    "Semantic source declared an invalid maxPage": "語意源回傳了無效的 maxPage",
+    "Semantic source declared an invalid cursor": "語意源回傳了無效的游標"
   }
 }

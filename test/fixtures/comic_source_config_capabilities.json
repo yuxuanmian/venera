@@ -797,11 +797,11 @@
     {
       "fileName": "picacg.js",
       "indexKey": "picacg",
-      "indexVersion": "1.0.8",
+      "indexVersion": "1.0.9",
       "indexName": "Picacg",
       "capability": {
         "key": "picacg",
-        "version": "1.0.8",
+        "version": "1.0.9",
         "search": {
           "loadPage": true,
           "loadNext": false,

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
+import 'package:venera/utils/translations.dart';
 
 import 'models.dart';
 import 'request_scope.dart';
@@ -237,7 +238,7 @@ class SemanticSearchController extends ChangeNotifier {
             inputContinuation: input,
             generation: _generation,
           );
-          _errorMessage = res.errorMessage ?? 'Semantic search failed';
+          _errorMessage = res.errorMessage ?? 'Semantic search failed'.tl;
           _setStatus(SemanticSearchStatus.error);
           return;
         }
@@ -251,7 +252,7 @@ class SemanticSearchController extends ChangeNotifier {
             inputContinuation: input,
             generation: _generation,
           );
-          _errorMessage = 'Semantic source cursor did not advance';
+          _errorMessage = 'Semantic source cursor did not advance'.tl;
           _setStatus(SemanticSearchStatus.error);
           return;
         }

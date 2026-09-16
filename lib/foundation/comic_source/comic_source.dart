@@ -168,6 +168,22 @@ class ComicSource {
   /// failing the whole source parse.
   final SemanticSearchData? semanticSearchData;
 
+  /// Host-only execution-lane binding of this source's **ordinary** search
+  /// loaders.
+  ///
+  /// A semantic page's compatibility mode needs the same real cancellation
+  /// guarantee as the exact capability. A Dart Zone cannot carry the scope
+  /// across the QuickJS job pump (ADR-0017 Amendment 1), so the fallback
+  /// adapter runs on a lane too. This is built only when the source has no
+  /// usable `tagSearch`; a source can never observe it.
+  ///
+  /// Tradeoff: the lane spec holds this source's script text so a lane can be
+  /// created lazily on first use. That keeps the ordinary path correct for the
+  /// compatibility mode at the cost of retaining one script string per source.
+  /// The lane runtime itself is still created only when a semantic page
+  /// actually falls back.
+  final SemanticSearchData? ordinarySearchLaneData;
+
   /// Load comic info.
   final LoadComicFunc? loadComicInfo;
 
@@ -370,6 +386,7 @@ class ComicSource {
     this.runtimeContext,
     this.scan,
     this.semanticSearchData,
+    this.ordinarySearchLaneData,
   });
 }
 

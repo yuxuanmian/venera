@@ -411,24 +411,33 @@ class _SemanticOptionsDialog extends StatefulWidget {
 class _SemanticOptionsDialogState extends State<_SemanticOptionsDialog> {
   @override
   Widget build(BuildContext context) {
+    // `ContentDialog` gives its content no horizontal padding and
+    // `SearchOptionWidget` provides none of its own, so the caller must inset
+    // the rows. This mirrors the ordinary search settings dialog's 16dp, which
+    // is what keeps the labels and the option chips off the dialog edge.
     return ContentDialog(
       title: "Settings".tl,
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (var i = 0; i < widget.options.length; i++)
-            SearchOptionWidget(
-              option: widget.options[i],
-              value: widget.values[i],
-              sourceKey: widget.sourceKey,
-              onChanged: (value) {
-                setState(() {
-                  widget.values[i] = value;
-                });
-              },
-            ),
-        ],
-      ).fixWidth(double.infinity),
+      content: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (var i = 0; i < widget.options.length; i++)
+              SearchOptionWidget(
+                option: widget.options[i],
+                value: widget.values[i],
+                sourceKey: widget.sourceKey,
+                onChanged: (value) {
+                  setState(() {
+                    widget.values[i] = value;
+                  });
+                },
+              ),
+          ],
+        ),
+      ),
       actions: [
         FilledButton(
           onPressed: () => context.pop(true),

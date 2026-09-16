@@ -7,7 +7,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/js_engine.dart';
+import 'package:venera/foundation/semantic_search/models.dart';
 import 'package:venera/foundation/semantic_search/request_scope.dart';
+import 'package:venera/foundation/semantic_search/source_resolver.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -228,8 +230,89 @@ void main() {
       );
       expect(ordinaryResult.error, isFalse);
     });
+
+    test('the compatibility fallback owns and cancels requests created after '
+        'await', () async {
+      final adapter = _ProbeAdapter();
+      final dio = Dio(BaseOptions(validateStatus: (_) => true))
+        ..httpClientAdapter = adapter;
+      addTearDown(() => dio.close(force: true));
+      JsEngine().setDioForTesting(dio);
+
+      const key = 'scope_fallback_lane';
+      final source = await ComicSourceParser().parse(
+        _fallbackProbeSource(key),
+        '$key.js',
+      );
+      // No tagSearch: the semantic page can only use the compatibility mode.
+      expect(source.semanticSearchData, isNull);
+      expect(source.searchPageData, isNotNull);
+      expect(
+        source.ordinarySearchLaneData,
+        isNotNull,
+        reason:
+            'the fallback adapter must be lane-bound, not Zone-bound, so '
+            'FR-040 cancellation holds after the QuickJS job pump',
+      );
+
+      final resolver = ComicSourceSemanticResolver(source);
+      addTearDown(resolver.dispose);
+      expect(resolver.mode, SemanticCapabilityMode.ordinaryFallback);
+      expect(resolver.ordinaryFallbackUsesLane, isTrue);
+
+      final scope = SemanticSearchRequestScope();
+      final pending = resolver.load(
+        SemanticInvocationSnapshot(
+          query: SemanticQuery(sourceKey: key, value: 'ignored'),
+          inputContinuation: null,
+          generation: 1,
+        ),
+        scope,
+      );
+
+      await adapter.concurrentStarted.future.timeout(
+        const Duration(seconds: 10),
+      );
+      expect(
+        scope.ownedTokenCount,
+        2,
+        reason:
+            'the ordinary fallback must own the requests it creates after '
+            'its first await',
+      );
+
+      await resolver.releaseLane(scope);
+      final result = await pending.timeout(const Duration(seconds: 10));
+      expect(scope.isCanceled, isTrue);
+      expect(adapter.canceledRequests, 2);
+      expect(scope.ownedTokenCount, 0);
+      // A canceled fallback invocation is silent: it may report an error to
+      // the resolver, but the controller drops it on `scope.isCanceled`.
+      expect(result.error, isTrue);
+    });
   });
 }
+
+/// Ordinary search only: the semantic page must use the compatibility adapter.
+String _fallbackProbeSource(String key) =>
+    '''
+class FallbackProbeSource extends ComicSource {
+  name = "Fallback probe";
+  key = "$key";
+  version = "1.0.0";
+  minAppVersion = "1.0.0";
+  search = {
+    load: async (keyword, options, page) => {
+      await Network.post("https://probe.invalid/fallback-awaited", {}, "{}");
+      const results = await Promise.all([
+        Network.post("https://probe.invalid/concurrent-a", {}, "{}"),
+        Network.post("https://probe.invalid/concurrent-b", {}, "{}"),
+      ]);
+      return {comics: [], maxPage: results.length};
+    },
+  };
+}
+''';
 
 String _probeSource(String key) =>
     '''

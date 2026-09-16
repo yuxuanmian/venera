@@ -2,19 +2,24 @@ import 'dart:async';
 
 import 'package:dio/dio.dart';
 
-/// Host-only ownership scope for exactly one logical semantic-search
-/// invocation.
+/// Host-only ownership scope for exactly one semantic query attempt.
 ///
-/// The scope owns the Dio [CancelToken]s that the invocation's JavaScript
-/// requests created. It is deliberately Host-private: a source config can
-/// neither see it nor receive it as a callback argument, and the JavaScript
-/// signatures are unchanged.
+/// The scope owns the Dio [CancelToken]s that the attempt's JavaScript requests
+/// created. It is deliberately Host-private: a source config can neither see it
+/// nor receive it as a callback argument, and the JavaScript signatures are
+/// unchanged.
 ///
-/// The scope reaches [_http] through the ambient Dart [Zone] that
-/// [run] establishes around the whole asynchronous parser invocation. This is
-/// the same propagation mechanism the Catalog runtime already relies on
-/// (`managedRuntimeBridge`); it never degrades into a global mutable "current
-/// scope" field.
+/// **How the scope reaches `_http`.** Ownership is structural, not propagated.
+/// Each attempt owns a disposable QuickJS execution lane, and the lane's
+/// `sendMessage` host closure captures this scope when the runtime is created,
+/// so every request that can possibly be made from that lane is attributed
+/// unambiguously (see `SemanticExecutionLane` and ADR-0017 Amendment 1).
+///
+/// [run] still exists, and `_http` still falls back to
+/// [current] when no lane binding is present, but that ambient-Zone path only
+/// covers requests created inside the synchronous `evaluate` entry: a Zone does
+/// not survive the `flutter_qjs` job pump, which is exactly why the lane
+/// exists. Do not build new guarantees on `run`/`current`.
 class SemanticSearchRequestScope {
   static const String defaultCancelReason = 'Semantic search canceled';
 

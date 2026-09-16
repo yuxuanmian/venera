@@ -601,13 +601,34 @@ class PageJumpTarget {
   String get tagSearchValue =>
       attributes?["keyword"] ?? attributes?["text"] ?? "";
 
+  /// Normalizes the modern `{page, attributes}` target shape.
+  ///
+  /// `attributes` is the canonical carrier. A source that writes the keyword at
+  /// the top level (`{page: "search"|"tagSearch", keyword: "..."}`) is
+  /// accepted as a shorthand, because silently returning an empty opaque value
+  /// would be a worse failure than honouring the obvious intent.
+  static Map<String, dynamic>? _modernAttributes(Map<dynamic, dynamic> value) {
+    final raw = value["attributes"];
+    Map<String, dynamic>? attributes;
+    if (raw is Map) {
+      attributes = Map<String, dynamic>.from(raw);
+    }
+    final keyword = value["keyword"];
+    if (keyword != null &&
+        (attributes == null || !attributes.containsKey("keyword"))) {
+      attributes ??= <String, dynamic>{};
+      attributes["keyword"] = keyword;
+    }
+    return attributes;
+  }
+
   static PageJumpTarget parse(String sourceKey, dynamic value) {
     if (value is Map) {
       if (value['page'] != null) {
         return PageJumpTarget(
           sourceKey,
           value["page"] ?? "search",
-          value["attributes"],
+          _modernAttributes(value),
         );
       } else if (value["action"] != null) {
         // old version `onClickTag`

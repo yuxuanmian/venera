@@ -234,6 +234,7 @@ class ComicSourceParser {
         runtimeContext: executionContext,
         scan: _parseScanCapabilities(),
         semanticSearchData: _loadSemanticSearchData(),
+        ordinarySearchLaneData: _loadOrdinarySearchLaneData(),
       );
 
       if (loadData) {
@@ -1330,17 +1331,52 @@ class ComicSourceParser {
     );
   }
 
-  /// Discovers the optional `search.tagSearch` capability without invoking it.
-  ///
-  /// A missing or invalid optional sub-object is isolated: it must never
-  /// prevent ordinary source parsing and it never changes the ordinary search
-  /// contract. `tagSearch.load` wins when both pagination forms are declared.
-  ///
-  /// The JS probe returns only plain booleans, so no JavaScript handle from the
-  /// optional sub-object survives into Dart. The loader bodies re-read the
-  /// current code path on every call, which keeps callback ownership with this
-  /// parser instance's runtime alias and never with a stale published source.
   SemanticSearchData? _loadSemanticSearchData() {
+    _resolveSearchLaneData();
+    return _semanticSearchDataMemo;
+  }
+
+  /// Host-only lane binding of the ordinary search loaders.
+  ///
+  /// Built only when the exact capability is absent, so an exact-mode source
+  /// never pays for a second runtime.
+  SemanticSearchData? _loadOrdinarySearchLaneData() {
+    _resolveSearchLaneData();
+    return _ordinarySearchLaneDataMemo;
+  }
+
+  SemanticSearchData? _semanticSearchDataMemo;
+
+  SemanticSearchData? _ordinarySearchLaneDataMemo;
+
+  bool _searchLaneDataResolved = false;
+
+  void _resolveSearchLaneData() {
+    if (_searchLaneDataResolved) return;
+    _searchLaneDataResolved = true;
+    final spec = _semanticLaneSpec();
+    if (spec == null) return;
+    _semanticSearchDataMemo = _buildTagSearchData(spec);
+    if (_semanticSearchDataMemo == null) {
+      _ordinarySearchLaneDataMemo = _buildOrdinarySearchLaneData(spec);
+    }
+  }
+
+  SemanticLaneSpec? _semanticLaneSpec() {
+    final script = _sourceScript;
+    final className = _className;
+    final alias = _key;
+    if (script == null || className == null || alias == null) return null;
+    return SemanticLaneSpec(
+      sourceKey: _sourceKey!,
+      script: script,
+      className: className,
+      alias: alias,
+      context: _executionContext,
+    );
+  }
+
+  SemanticSearchData? _buildTagSearchData(SemanticLaneSpec spec) {
     dynamic shape;
     try {
       shape = _runCode('''
@@ -1379,25 +1415,35 @@ class ComicSourceParser {
     }
     if (shape['present'] != true) return null;
 
-    final script = _sourceScript;
-    final className = _className;
-    if (script == null || className == null) {
-      Log.error(
-        "Semantic Search",
-        "tagSearch was declared but the source script is unavailable",
-      );
-      return null;
-    }
-    final runtimeAlias = _key!;
-    final spec = SemanticLaneSpec(
-      sourceKey: _sourceKey!,
-      script: script,
-      className: className,
-      alias: runtimeAlias,
-      context: _executionContext,
+    return _buildLaneSearchData(
+      spec,
+      'search.tagSearch',
+      pageForm: shape['hasLoad'] == true,
     );
+  }
 
-    if (shape['hasLoad'] == true) {
+  /// Lane binding for the compatibility fallback.
+  ///
+  /// A source without `tagSearch` is still reachable from a semantic page (a
+  /// `tagSearch` navigation target, or a stored target from an older App), and
+  /// FR-040 requires the Host to cancel that invocation's network work too.
+  /// Running the ordinary loaders on a lane gives them the same structural
+  /// cancellation guarantee as the exact capability, instead of the ambient
+  /// Zone that ADR-0017 Amendment 1 proved cannot survive the QuickJS job pump.
+  SemanticSearchData? _buildOrdinarySearchLaneData(SemanticLaneSpec spec) {
+    final hasLoad = _checkExists('search.load');
+    final hasLoadNext = _checkExists('search.loadNext');
+    if (!hasLoad && !hasLoadNext) return null;
+    return _buildLaneSearchData(spec, 'search', pageForm: hasLoad);
+  }
+
+  SemanticSearchData _buildLaneSearchData(
+    SemanticLaneSpec spec,
+    String accessor, {
+    required bool pageForm,
+  }) {
+    final runtimeAlias = spec.alias;
+    if (pageForm) {
       return SemanticSearchData(
         (value, options, page, {required requestScope}) async {
           try {
@@ -1405,7 +1451,7 @@ class ComicSourceParser {
               requestScope,
               spec,
               """
-              ComicSource.sources.$runtimeAlias.search.tagSearch.load(
+              ComicSource.sources.$runtimeAlias.$accessor.load(
                 ${jsonEncode(value)}, ${jsonEncode(options)}, ${jsonEncode(page)})
             """,
             );
@@ -1425,7 +1471,6 @@ class ComicSourceParser {
         releaseLane: _releaseSemanticLane,
       );
     }
-
     return SemanticSearchData(null, (
       value,
       options,
@@ -1434,7 +1479,7 @@ class ComicSourceParser {
     }) async {
       try {
         final result = await _invokeSemanticCapability(requestScope, spec, """
-              ComicSource.sources.$runtimeAlias.search.tagSearch.loadNext(
+              ComicSource.sources.$runtimeAlias.$accessor.loadNext(
                 ${jsonEncode(value)}, ${jsonEncode(options)}, ${jsonEncode(next)})
             """);
         return Res(
