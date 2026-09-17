@@ -1,5 +1,80 @@
 part of 'settings_page.dart';
 
+/// Canonical destinations for *this* application.
+///
+/// The fork owns its own About, update manifest and release assets, so every
+/// "the app itself" link points at `yuxuanmian/venera`. Upstream/third-party
+/// dependency repositories (`venera-app/*` in `pubspec.yaml`) are deliberately
+/// untouched.
+const String autoUpdateManifestUrl =
+    "https://cdn.jsdelivr.net/gh/yuxuanmian/venera@master/pubspec.yaml";
+
+const String appGithubUrl = "https://github.com/yuxuanmian/venera";
+
+const String appReleaseUrl = "https://github.com/yuxuanmian/venera/releases";
+
+/// The outcome of one update check.
+///
+/// "No new version" and "the comparison could not be made" are deliberately
+/// different outcomes: reporting an unknown result as "no new version" would
+/// tell the user their app is current when nothing was actually verified.
+enum AppUpdateOutcome {
+  /// The remote manifest declares a strictly newer semantic version.
+  available,
+
+  /// The remote manifest declares the same or an older semantic version.
+  none,
+
+  /// The comparison could not be made: the local version is unknown, the remote
+  /// version is missing or malformed, or the manifest could not be fetched.
+  unknown,
+}
+
+/// Compares a remote manifest version against the running version.
+///
+/// Build metadata never decides precedence, and an unknown local version can
+/// never be reported as older or newer. Pure and offline-testable: it is the
+/// whole decision the update check makes, separated from the network fetch.
+AppUpdateOutcome resolveUpdateOutcome({
+  required String? remoteVersion,
+  required String localVersion,
+}) {
+  if (!isSemanticVersionString(localVersion)) {
+    return AppUpdateOutcome.unknown;
+  }
+  if (remoteVersion == null || !isSemanticVersionString(remoteVersion)) {
+    return AppUpdateOutcome.unknown;
+  }
+  return isNewerSemanticVersion(remoteVersion, localVersion)
+      ? AppUpdateOutcome.available
+      : AppUpdateOutcome.none;
+}
+
+/// Fetches the raw update manifest.
+///
+/// Replaced in tests so the three outcomes and their UI can be exercised
+/// without network access.
+typedef UpdateManifestReader = Future<String?> Function();
+
+/// The production manifest reader.
+Future<String?> fetchAutoUpdateManifest() async {
+  var res = await AppDio().get(autoUpdateManifestUrl);
+  if (res.statusCode != 200) return null;
+  var data = res.data;
+  return data is String ? data : null;
+}
+
+/// The injectable manifest reader, defaulting to the real network fetch.
+UpdateManifestReader updateManifestReader = fetchAutoUpdateManifest;
+
+/// The version line for the About header.
+///
+/// A real version is prefixed with `V`; the unknown marker is shown on its own,
+/// localized through the existing translation path, so the page never renders
+/// something that looks like a version (`VUnknown`) when there is none.
+String appVersionDisplay(String version) =>
+    version == unknownAppVersion ? unknownAppVersion.tl : "V$version";
+
 class AboutSettings extends StatefulWidget {
   const AboutSettings({super.key});
 
@@ -36,7 +111,10 @@ class _AboutSettingsState extends State<AboutSettings> {
         Column(
           children: [
             const SizedBox(height: 8),
-            Text("V${App.version}", style: const TextStyle(fontSize: 16)),
+            Text(
+              appVersionDisplay(App.version),
+              style: const TextStyle(fontSize: 16),
+            ),
             Text("Venera is a free and open-source app for comic reading.".tl),
             const SizedBox(height: 8),
           ],
@@ -51,6 +129,7 @@ class _AboutSettingsState extends State<AboutSettings> {
                 isCheckingUpdate = true;
               });
               checkUpdateUi().then((value) {
+                if (!mounted) return;
                 setState(() {
                   isCheckingUpdate = false;
                 });
@@ -66,14 +145,7 @@ class _AboutSettingsState extends State<AboutSettings> {
           title: const Text("Github"),
           trailing: const Icon(Icons.open_in_new),
           onTap: () {
-            launchUrlString("https://github.com/venera-app/venera");
-          },
-        ).toSliver(),
-        ListTile(
-          title: const Text("Telegram"),
-          trailing: const Icon(Icons.open_in_new),
-          onTap: () {
-            launchUrlString("https://t.me/venera_release");
+            launchUrlString(appGithubUrl);
           },
         ).toSliver(),
       ],
@@ -81,70 +153,107 @@ class _AboutSettingsState extends State<AboutSettings> {
   }
 }
 
-Future<bool> checkUpdate() async {
-  var res = await AppDio().get(
-    "https://cdn.jsdelivr.net/gh/venera-app/venera@master/pubspec.yaml",
-  );
-  if (res.statusCode == 200) {
-    var data = loadYaml(res.data);
-    if (data["version"] != null) {
-      return _compareVersion(data["version"].split("+")[0], App.version);
-    }
+/// Runs one update check against the fork's `master` manifest.
+///
+/// Never throws: an unreachable manifest, a missing `version:` key, an
+/// unparsable remote version and an unknown local version all resolve to
+/// [AppUpdateOutcome.unknown], which is reported as "cannot tell" rather than as
+/// "no new version".
+Future<AppUpdateOutcome> checkUpdate() async {
+  String? manifest;
+  try {
+    manifest = await updateManifestReader();
+  } catch (e) {
+    Log.error("Check Update", "The update manifest could not be fetched: $e");
+    return AppUpdateOutcome.unknown;
   }
-  return false;
+  if (manifest == null) {
+    Log.error("Check Update", "The update manifest could not be fetched");
+    return AppUpdateOutcome.unknown;
+  }
+  String? remoteVersion;
+  try {
+    var data = loadYaml(manifest);
+    var value = data is Map ? data["version"] : null;
+    remoteVersion = value is String ? value : null;
+  } catch (e) {
+    Log.error("Check Update", "The update manifest could not be parsed: $e");
+    return AppUpdateOutcome.unknown;
+  }
+  final outcome = resolveUpdateOutcome(
+    remoteVersion: remoteVersion,
+    localVersion: App.version,
+  );
+  if (outcome == AppUpdateOutcome.unknown) {
+    Log.error(
+      "Check Update",
+      remoteVersion == null
+          ? "The update manifest has no usable version; cannot tell whether an "
+                "update exists"
+          : "The version comparison is not possible; cannot tell whether an "
+                "update exists",
+    );
+  }
+  return outcome;
 }
 
+/// Runs one update check and reports the result to the user.
+///
+/// The three outcomes are reported differently on purpose: an available update
+/// opens the update dialog, "no new version" says so, and an undecidable result
+/// says that the latest version could not be determined — it never claims the
+/// app is current and never offers an upgrade.
+///
+/// [showMessageIfNoUpdate] must stay a positional optional argument: the
+/// start-up update check calls it as `checkUpdateUi(false, true)`.
 Future<void> checkUpdateUi([
   bool showMessageIfNoUpdate = true,
   bool delay = false,
 ]) async {
   try {
-    var value = await checkUpdate();
-    if (value) {
-      if (delay) {
-        await Future.delayed(const Duration(seconds: 2));
-      }
-      showDialog(
-        context: App.rootContext,
-        builder: (context) {
-          return ContentDialog(
-            title: "New version available".tl,
-            content: Text(
-              "A new version is available. Do you want to update now?".tl,
-            ).paddingHorizontal(16),
-            actions: [
-              Button.text(
-                onPressed: () {
-                  Navigator.pop(context);
-                  launchUrlString(
-                    "https://github.com/venera-app/venera/releases",
-                  );
-                },
-                child: Text("Update".tl),
-              ),
-            ],
+    // Resolved inside the guard: the start-up check runs before the UI is
+    // necessarily mounted, and a missing root context must not be fatal.
+    final target = App.rootContext;
+    var outcome = await checkUpdate();
+    switch (outcome) {
+      case AppUpdateOutcome.available:
+        if (delay) {
+          await Future.delayed(const Duration(seconds: 2));
+        }
+        showDialog(
+          context: target,
+          builder: (context) {
+            return ContentDialog(
+              title: "New version available".tl,
+              content: Text(
+                "A new version is available. Do you want to update now?".tl,
+              ).paddingHorizontal(16),
+              actions: [
+                Button.text(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    launchUrlString(appReleaseUrl);
+                  },
+                  child: Text("Update".tl),
+                ),
+              ],
+            );
+          },
+        );
+      case AppUpdateOutcome.none:
+        if (showMessageIfNoUpdate) {
+          target.showMessage(message: "No new version available".tl);
+        }
+      case AppUpdateOutcome.unknown:
+        // Never "no new version": nothing was verified, so the user must not be
+        // told they are up to date, and no upgrade prompt may be shown either.
+        if (showMessageIfNoUpdate) {
+          target.showMessage(
+            message: "Unable to determine the latest version".tl,
           );
-        },
-      );
-    } else if (showMessageIfNoUpdate) {
-      App.rootContext.showMessage(message: "No new version available".tl);
+        }
     }
   } catch (e, s) {
     Log.error("Check Update", e.toString(), s);
   }
-}
-
-/// return true if version1 > version2
-bool _compareVersion(String version1, String version2) {
-  var v1 = version1.split(".");
-  var v2 = version2.split(".");
-  for (var i = 0; i < v1.length; i++) {
-    if (int.parse(v1[i]) > int.parse(v2[i])) {
-      return true;
-    }
-    if (int.parse(v1[i]) < int.parse(v2[i])) {
-      return false;
-    }
-  }
-  return false;
 }

@@ -2,18 +2,75 @@ import 'dart:io';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:venera/foundation/history.dart';
+import 'package:venera/utils/semantic_version.dart';
 
 import 'appdata.dart';
 import 'favorites.dart';
 import 'local.dart';
+import 'log.dart';
 
 export "widget_utils.dart";
 export "context.dart";
 
+/// The explicit marker used when the running build's version is unknown.
+///
+/// It is never a version number, so no consumer can mistake it for one. The
+/// string is also a translation key, which is how the UI renders it localized.
+const String unknownAppVersion = "Unknown";
+
+/// Reads the build artifact's package metadata for the running application.
+///
+/// Replaced in tests so the version path can be exercised with synthetic
+/// metadata instead of a platform channel.
+typedef PackageInfoReader = Future<PackageInfo> Function();
+
 class _App {
-  final version = "2.0.0-beta.3";
+  factory _App() => _instance;
+
+  _App._();
+
+  static final _App _instance = _App._();
+
+  /// The injectable package-metadata reader.
+  ///
+  /// Kept as a field with a production default so a test can substitute the
+  /// metadata source without a platform channel.
+  static PackageInfoReader packageInfoReader = PackageInfo.fromPlatform;
+
+  /// The current package-metadata reader, as a test seam.
+  PackageInfoReader get packageInfoReaderSeam => packageInfoReader;
+
+  /// Replaces the package-metadata reader, as a test seam.
+  set packageInfoReaderSeam(PackageInfoReader reader) =>
+      packageInfoReader = reader;
+
+  /// Reads the build artifact's package metadata.
+  ///
+  /// This is the only call site of [packageInfoReader]; [readPackageVersion]
+  /// turns its result into the runtime version state.
+  static Future<PackageInfo> readPackageInfo() => packageInfoReader();
+
+  /// The semantic version reported by the running build, or `null` when the
+  /// package metadata is missing or unreadable.
+  ///
+  /// `pubspec.yaml` is the only place a real version is maintained. The value is
+  /// read from the built package metadata during [init] so Dart never keeps a
+  /// second copy that can drift from the release.
+  String? packageVersion;
+
+  /// The build number reported by the running build, or `null` when unknown.
+  String? packageBuildNumber;
+
+  /// The semantic version (`major.minor.patch[-prerelease]`) of this build.
+  ///
+  /// Build metadata is never shown: the release tag and the release asset name
+  /// are both derived from this string. When the package metadata could not be
+  /// read the version is [unknownAppVersion] — the explicit marker, which is a
+  /// translation key — rather than a fabricated version.
+  String get version => packageVersion ?? unknownAppVersion;
 
   bool get isAndroid => Platform.isAndroid;
 
@@ -80,12 +137,60 @@ class _App {
   }
 
   Future<void> init() async {
+    await readPackageVersion();
     cachePath = (await getApplicationCacheDirectory()).path;
     dataPath = (await getApplicationSupportDirectory()).path;
     if (isAndroid) {
       externalStoragePath = (await getExternalStorageDirectory())!.path;
     }
     isInitialized = true;
+  }
+
+  /// Reads `App.version` from the build artifact's package metadata.
+  ///
+  /// `pubspec.yaml` is the single real version source; the build copies it into
+  /// the package metadata that this reads back, so no Dart constant can drift
+  /// from a release. A missing, throwing or unparsable value is recorded and
+  /// left as the explicit unknown state: version display and the update check
+  /// degrade, but application start-up never fails because of versioning.
+  ///
+  /// Nothing from the package metadata is logged verbatim: only the fact that
+  /// it was absent or unusable is recorded, so no build-specific data can leak
+  /// into the log through the version path.
+  ///
+  /// [init] runs this first. It is public so the version contract can be
+  /// exercised without the platform-directory calls in [init].
+  Future<void> readPackageVersion() async {
+    PackageInfo? info;
+    var failed = false;
+    try {
+      info = await readPackageInfo();
+    } catch (_) {
+      failed = true;
+      Log.error(
+        "Read Package Version",
+        "The package metadata could not be read; the version is unknown",
+      );
+    }
+    final raw = info?.version;
+    final semantic = tryParseSemanticVersion(raw)?.semantic;
+    if (semantic == null) {
+      packageVersion = null;
+      packageBuildNumber = null;
+      if (!failed) {
+        Log.error(
+          "Read Package Version",
+          raw == null || raw.isEmpty
+              ? "The package metadata has no version; the version is unknown"
+              : "The package metadata version is not a semantic version; "
+                    "the version is unknown",
+        );
+      }
+      return;
+    }
+    packageVersion = semantic;
+    final build = info?.buildNumber;
+    packageBuildNumber = build == null || build.isEmpty ? null : build;
   }
 
   Future<void> initComponents() async {

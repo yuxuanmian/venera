@@ -12,6 +12,22 @@ This library provides a set of APIs for interacting with the Venera app.
  */
 
 /**
+ * Default minimum number of useful results a semantic search source should
+ * accumulate before it may end one invocation early.
+ *
+ * Mirrored from the shared source library `venera-configs/_venera_.js`, which
+ * is the canonical declaration seen by source authors. This copy is the one a
+ * running source actually reads, so the two values MUST stay equal: the number
+ * is a source-side scan-policy default and is deliberately independent of the
+ * host's UI presentation limit (`semanticSearchAppendLimit` = 20).
+ *
+ * @global
+ * @type {number}
+ * @since 1.6.0
+ */
+const SEMANTIC_SEARCH_MIN_RESULTS_PER_LOAD = 6;
+
+/**
  * Set a timeout to execute a callback function after a specified delay.
  * @param callback {Function}
  * @param delay {number} - delay in milliseconds

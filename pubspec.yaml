@@ -2,7 +2,11 @@ name: venera
 description: "A comic app."
 publish_to: 'none'
 
-version: 2.0.0-beta.3+167
+# The single real version source. The semantic version (the part before `+`)
+# drives the runtime version, the user-visible update comparison, the release
+# tag and the release asset name; the build number stays in the package
+# metadata and in the derived Android versionCode. See doc/android-actions.md.
+version: 2.0.0-beta.4+168
 
 environment:
   sdk: '>=3.8.0 <4.0.0'
@@ -90,6 +94,8 @@ dependencies:
   flutter_staggered_grid_view: ^0.7.0
   win32: ^5.15.0
   archive: any
+  package_info_plus: ^9.0.1
+  pub_semver: ^2.2.1
 
 dev_dependencies:
   flutter_test:
@@ -118,7 +124,7 @@ flutter_to_arch:
   icon: debian/gui/venera.png
   categories: Utility
   keywords: Flutter;comic;images;
-  url: https://github.com/venera-app/venera
+  url: https://github.com/yuxuanmian/venera
   depends:
     - gtk3
     - webkit2gtk-4.1

@@ -269,6 +269,18 @@ Generate a random double between min and max.
 
 Send log to application console. Same api as the browser console.
 
+### `SEMANTIC_SEARCH_MIN_RESULTS_PER_LOAD: number`
+
+The default minimum number of useful results a semantic search source should
+accumulate before it may end one invocation early (currently `6`).
+
+It is a source-side scan-policy default declared by the shared library
+`venera-configs/_venera_.js`, and this file's bundled `assets/init.js` mirrors
+it. It is independent of the host's UI presentation limit
+(`semanticSearchAppendLimit`, which only bounds how many comics the semantic
+result page appends at a time), and it never authorizes scanning more pages or
+issuing more requests than the source's own declared work bound.
+
 ## Types
 
 ### `Cookie`

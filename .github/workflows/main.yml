@@ -27,6 +27,37 @@ jobs:
         with:
           persist-credentials: false
 
+      # The release tag and the `pubspec.yaml` semantic version are one fact
+      # maintained in one place. A mismatch fails here, before the signing
+      # secrets and the build, so a wrong tag can never publish assets.
+      # `workflow_dispatch` runs are manual debug/release builds and are exempt.
+      - name: Verify release tag matches pubspec version
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = re.search(
+              r'^version:\s*(\S+)',
+              Path('pubspec.yaml').read_text(),
+              re.M,
+          ).group(1)
+          semantic_version = version.split('+')[0]
+          expected_tag = f'v{semantic_version}'
+          tag = os.environ['RELEASE_TAG']
+          if tag != expected_tag:
+              raise SystemExit(
+                  f'Release tag {tag!r} does not match pubspec.yaml '
+                  f'{version!r}: expected {expected_tag!r}. Bump version: in '
+                  'pubspec.yaml and merge it to master before publishing.'
+              )
+          print(f'Release tag {tag} matches pubspec.yaml {version}')
+          PY
+
       - name: Set up Java
         uses: actions/setup-java@v5
         with:
@@ -79,13 +110,19 @@ jobs:
 
           mode = os.environ['BUILD_MODE']
           version = re.search(r'^version:\s*(\S+)', Path('pubspec.yaml').read_text(), re.M).group(1)
+          # `pubspec.yaml` carries the single real version source as
+          # `<semantic version>+<build number>`. The build number stays in the
+          # package metadata and in the derived Android versionCode, but the
+          # release asset name is the semantic version alone, so a pure
+          # build-number bump never changes the published file name.
+          semantic_version = version.split('+')[0]
           apk = Path(f'build/app/outputs/flutter-apk/app-{mode}.apk')
           with zipfile.ZipFile(apk) as archive:
               abis = {name.split('/')[1] for name in archive.namelist()
                       if name.startswith('lib/') and name.endswith('.so')}
           if abis != {'arm64-v8a'}:
               raise SystemExit(f'Expected only arm64-v8a native libraries, got {sorted(abis)}')
-          shutil.copyfile(apk, f'dist/venera-{version}-android-arm64-{mode}.apk')
+          shutil.copyfile(apk, f'dist/venera-{semantic_version}-android-arm64-{mode}.apk')
           PY
 
       - name: Upload APK

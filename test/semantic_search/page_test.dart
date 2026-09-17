@@ -4,6 +4,7 @@ import 'dart:collection';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:venera/components/components.dart';
+import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/foundation/semantic_search/controller.dart';
@@ -81,66 +82,67 @@ FakeSemanticResolver _pagedResolver({int perWindow = 6, int? maxPage}) {
 void main() {
   setUpAll(AppTranslation.init);
 
-  group('results presentation and page interactions (T080/T081)', () {
-    /// A published source whose capability is built from plain Dart loaders, so
-    /// the semantic page can be exercised end to end without a JavaScript
-    /// runtime. The loaders stand in for what Pica's exact predicate returns.
-    ComicSource sourceWithSemantic({
-      required String key,
-      required Future<Res<List<Comic>>> Function(
-        String value,
-        List<String> options,
-        int page,
-      )
-      loader,
-      List<SearchOptions> searchOptions = const <SearchOptions>[],
-    }) {
-      return ComicSource(
-        'Semantic source',
-        key,
-        null,
-        null,
-        null,
-        null,
-        const [],
-        SearchPageData(searchOptions, null, null),
-        null,
-        (id) async => Res<ComicDetails>.error('unused'),
-        null,
-        null,
-        null,
-        null,
-        '',
-        '',
-        '1.0.0',
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        false,
-        false,
-        null,
-        null,
-        semanticSearchData: SemanticSearchData((
-          value,
-          options,
-          page, {
-          required requestScope,
-        }) async {
-          expect(requestScope, isNotNull);
-          return loader(value, options, page);
-        }, null),
-      );
-    }
+  /// A published source whose capability is built from plain Dart loaders, so
+  /// the semantic page can be exercised end to end without a JavaScript
+  /// runtime. The loaders stand in for what Pica's exact predicate returns.
+  ComicSource sourceWithSemantic({
+    required String key,
+    required Future<Res<List<Comic>>> Function(
+      String value,
+      List<String> options,
+      int page,
+    )
+    loader,
+    List<SearchOptions> searchOptions = const <SearchOptions>[],
+    Map<String, Map<String, String>>? translations,
+  }) {
+    return ComicSource(
+      'Semantic source', // 1  name
+      key, // 2  key
+      null, // 3  account
+      null, // 4  categoryData
+      null, // 5  categoryComicsData
+      null, // 6  favoriteData
+      const [], // 7  explorePages
+      SearchPageData(searchOptions, null, null), // 8  searchPageData
+      null, // 9  settings
+      (id) async => Res<ComicDetails>.error('unused'), // 10 loadComicInfo
+      null, // 11 loadComicThumbnail
+      null, // 12 loadComicPages
+      null, // 13 getImageLoadingConfig
+      null, // 14 getThumbnailLoadingConfig
+      '', // 15 filePath
+      '', // 16 url
+      '1.0.0', // 17 version
+      null, // 18 commentsLoader
+      null, // 19 sendCommentFunc
+      null, // 20 chapterCommentsLoader
+      null, // 21 sendChapterCommentFunc
+      null, // 22 likeOrUnlikeComic
+      null, // 23 voteCommentFunc
+      null, // 24 likeCommentFunc
+      null, // 25 idMatcher
+      translations, // 26 translations
+      null, // 27 handleClickTagEvent
+      null, // 28 onTagSuggestionSelected
+      null, // 29 linkHandler
+      false, // 30 enableTagsSuggestions
+      false, // 31 enableTagsTranslate
+      null, // 32 starRatingFunc
+      null, // 33 archiveDownloader
+      semanticSearchData: SemanticSearchData((
+        value,
+        options,
+        page, {
+        required requestScope,
+      }) async {
+        expect(requestScope, isNotNull);
+        return loader(value, options, page);
+      }, null),
+    );
+  }
 
+  group('results presentation and page interactions (T080/T081)', () {
     testWidgets('only the exact fixture ids reach the shared grid', (
       tester,
     ) async {
@@ -246,7 +248,10 @@ void main() {
       // The first invocation used the declared default option.
       expect(seenOptions.single, ['dd']);
 
-      await tester.tap(find.byIcon(Icons.tune));
+      // A single declared option has no tune action: its current value is the
+      // title's secondary entry, and tapping it opens the same dialog.
+      expect(find.byIcon(Icons.tune), findsNothing);
+      await tester.tap(find.text('New'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Likes'));
       await tester.pumpAndSettle();
@@ -292,7 +297,9 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byIcon(Icons.tune));
+      // A single option is reached through the title entry; the dialog it opens
+      // is the same one, with the same inset rows.
+      await tester.tap(find.text('New'));
       await tester.pumpAndSettle();
 
       // `ContentDialog` adds no horizontal padding of its own and
@@ -389,6 +396,213 @@ void main() {
       await tester.pump(const Duration(milliseconds: 50));
       await tester.pumpAndSettle();
       expect(resolver.requestCount, 1);
+    });
+  });
+
+  group('search option entry (0 / 1 / 2+)', () {
+    /// Builds a page over a real published source with `optionCount` declared
+    /// option groups, so the option entry is driven by the declaration and never
+    /// by the source key.
+    Future<List<List<String>>> pumpOptionPage(
+      WidgetTester tester, {
+      required String key,
+      required int optionCount,
+      Map<String, Map<String, String>>? translations,
+      FakeSemanticResolver? resolver,
+    }) async {
+      final seenOptions = <List<String>>[];
+      final declared = <SearchOptions>[
+        for (var i = 0; i < optionCount; i++)
+          SearchOptions(
+            LinkedHashMap<String, String>.from({
+              'dd': 'New to old',
+              'ld': 'Old to new',
+            }),
+            'Sort',
+            'select',
+            null,
+          ),
+      ];
+      final source = sourceWithSemantic(
+        key: key,
+        searchOptions: declared,
+        translations: translations,
+        loader: (value, options, page) async {
+          seenOptions.add(List<String>.from(options));
+          return Res([
+            fixtureComic(seenOptions.length, sourceKey: key),
+          ], subData: 9);
+        },
+      );
+      ComicSourceManager().add(source);
+      addTearDown(() => ComicSourceManager().remove(key));
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SemanticSearchPage(sourceKey: key, value: 'Fate'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      return seenOptions;
+    }
+
+    testWidgets('no declared option shows no entry at all', (tester) async {
+      await pumpOptionPage(tester, key: 'page_options_zero', optionCount: 0);
+
+      expect(find.byIcon(Icons.tune), findsNothing);
+      expect(find.text('New to old'), findsNothing);
+      expect(find.text('Sort'), findsNothing);
+      await drainCoverLoads(tester);
+    });
+
+    testWidgets('one declared option moves its value into the title', (
+      tester,
+    ) async {
+      await pumpOptionPage(tester, key: 'page_options_one', optionCount: 1);
+
+      // The title carries the human-readable current value, and the standalone
+      // tune action is gone.
+      expect(find.text('New to old'), findsOneWidget);
+      expect(find.byIcon(Icons.tune), findsNothing);
+      // The raw encoded key is never shown.
+      expect(find.text('dd'), findsNothing);
+      await drainCoverLoads(tester);
+    });
+
+    testWidgets('the title entry reuses the existing options dialog', (
+      tester,
+    ) async {
+      final seen = await pumpOptionPage(
+        tester,
+        key: 'page_options_one_dialog',
+        optionCount: 1,
+      );
+      expect(seen.single, ['dd']);
+
+      await tester.tap(find.text('New to old'));
+      await tester.pumpAndSettle();
+      expect(find.byType(SearchOptionWidget), findsOneWidget);
+
+      await tester.tap(find.text('Old to new'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Confirm'));
+      await tester.pumpAndSettle();
+
+      // The confirmed value restarts the query through `updateOptions`.
+      expect(seen.length, 2);
+      expect(seen.last, ['ld']);
+      expect(find.text('Old to new'), findsOneWidget);
+      await drainCoverLoads(tester);
+    });
+
+    testWidgets('cancelling the dialog leaves the query untouched', (
+      tester,
+    ) async {
+      final seen = await pumpOptionPage(
+        tester,
+        key: 'page_options_one_cancel',
+        optionCount: 1,
+      );
+      expect(seen.length, 1);
+
+      await tester.tap(find.text('New to old'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Old to new'));
+      await tester.pumpAndSettle();
+      // Dismiss without confirming.
+      await tester.tapAt(const Offset(5, 5));
+      await tester.pumpAndSettle();
+
+      expect(seen.length, 1, reason: 'a cancelled dialog must not restart');
+      expect(find.text('New to old'), findsOneWidget);
+      await drainCoverLoads(tester);
+    });
+
+    testWidgets('two declared options keep the tune entry', (tester) async {
+      await pumpOptionPage(tester, key: 'page_options_two', optionCount: 2);
+
+      expect(find.byIcon(Icons.tune), findsOneWidget);
+      // The title keeps the source subtitle instead of squeezing two values in.
+      expect(find.text('New to old'), findsNothing);
+      await drainCoverLoads(tester);
+
+      await tester.tap(find.byIcon(Icons.tune));
+      await tester.pumpAndSettle();
+      expect(find.byType(SearchOptionWidget), findsNWidgets(2));
+      await tester.tap(find.text('Confirm'));
+      await tester.pumpAndSettle();
+      await drainCoverLoads(tester);
+    });
+
+    testWidgets('an unsupported page shows no option entry', (tester) async {
+      final resolver = FakeSemanticResolver(
+        mode: SemanticCapabilityMode.unsupported,
+      );
+      const key = 'page_options_unsupported';
+      final source = sourceWithSemantic(
+        key: key,
+        searchOptions: [
+          SearchOptions(
+            LinkedHashMap<String, String>.from({'dd': 'New to old'}),
+            'Sort',
+            'select',
+            null,
+          ),
+        ],
+        loader: (value, options, page) async =>
+            Res([fixtureComic(1, sourceKey: key)], subData: 1),
+      );
+      ComicSourceManager().add(source);
+      addTearDown(() => ComicSourceManager().remove(key));
+
+      final controller = SemanticSearchController(
+        query: SemanticQuery(
+          sourceKey: key,
+          value: 'opaque value',
+          options: const ['dd'],
+        ),
+        resolver: resolver,
+      );
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SemanticSearchPage(
+            sourceKey: key,
+            value: 'opaque value',
+            controller: controller,
+            initialOptions: const ['dd'],
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('cannot search by tag'), findsOneWidget);
+      expect(find.byIcon(Icons.tune), findsNothing);
+      expect(find.text('New to old'), findsNothing);
+    });
+
+    testWidgets('a single option uses the source translation of its value', (
+      tester,
+    ) async {
+      // The option display semantics of `SearchOptionWidget` translate the map
+      // value with the source translations for the current locale, so pin the
+      // locale the same way a user would.
+      final previousLanguage = appdata.settings['language'];
+      appdata.settings['language'] = 'zh-CN';
+      addTearDown(() => appdata.settings['language'] = previousLanguage);
+
+      await pumpOptionPage(
+        tester,
+        key: 'page_options_one_translated',
+        optionCount: 1,
+        translations: {
+          'zh_CN': {'New to old': '新到旧'},
+        },
+      );
+
+      expect(find.text('新到旧'), findsOneWidget);
+      expect(find.text('New to old'), findsNothing);
+      await drainCoverLoads(tester);
     });
   });
 

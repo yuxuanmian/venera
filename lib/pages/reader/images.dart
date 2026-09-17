@@ -728,17 +728,22 @@ const double _kChangeChapterOffset = 160;
 /// the tap action by 200ms to detect double taps. A drag only wins the gesture
 /// arena after exceeding the touch slop, so a tap can still fire right around
 /// a scroll — the deferred tap of a tap that preceded the drag, or a tap meant
-/// to stop a coasting list. Without this guard those taps would toggle the
-/// toolbar mid-scroll.
+/// to stop a coasting list.
+///
+/// While armed, the reader consumes the ordinary single tap before any region
+/// dispatch, so such a tap is a no-op for every region: it neither turns a page
+/// or chapter (edge tap-to-turn) nor toggles the toolbar (center tap). The guard
+/// only consumes input; it never becomes scroll-stop logic, and an armed guard
+/// does not by itself move or halt the scroll view.
 ///
 /// Only user-initiated drags arm the guard. Programmatic scrolls (tap-to-turn,
 /// keyboard, auto page turning, mouse wheel) leave it disarmed so rapid
 /// tap-to-turn keeps working.
 class ScrollTapGuard {
   /// Taps stay suppressed for this long after the last scroll activity, so a
-  /// tap right after a flick (e.g. to stop a coasting list) cannot toggle the
-  /// toolbar. 1s is deliberately aggressive: the user must pause for a moment
-  /// before a center tap opens the menu.
+  /// tap right after a flick (e.g. to stop a coasting list) cannot reach any
+  /// tap region. 1s is deliberately aggressive: the user must pause for a
+  /// moment before a tap acts again.
   static const _clearDelay = Duration(seconds: 1);
 
   int _activity = 0;

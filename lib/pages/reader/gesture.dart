@@ -1,5 +1,168 @@
 part of 'reader.dart';
 
+/// What one ordinary single tap means for the reader surface.
+enum ReaderTapAction {
+  /// The tap is swallowed: a user drag armed the scroll guard, so the tap must
+  /// produce no page turn, no chapter turn and no toolbar toggle.
+  consume,
+
+  /// The tap turns to the previous page or chapter.
+  previous,
+
+  /// The tap turns to the next page or chapter.
+  next,
+
+  /// The tap toggles the toolbar (center tap, or any tap when tap-to-turn is
+  /// off).
+  toggleToolbar,
+
+  /// The tap is outside the reader's responsibility (toolbar already open, or
+  /// the chapter comments page).
+  none,
+}
+
+/// The event input of one single-tap routing decision.
+///
+/// It is extracted from the gesture detector so the routing rules — in
+/// particular that the scroll guard is consulted before any tap region is
+/// dispatched — are directly testable.
+class ReaderTapDecisionInput {
+  const ReaderTapDecisionInput({
+    required this.guardArmed,
+    required this.toolbarOpen,
+    required this.onChapterCommentsPage,
+    required this.tapToTurnEnabled,
+    required this.reverseTapToTurn,
+    required this.mode,
+    required this.position,
+    required this.size,
+    required this.eventTime,
+    required this.isQuickTap,
+    required this.lastMenuToggleTime,
+    this.tapToTurnPercent = _ReaderGestureDetectorState._kTapToTurnPagePercent,
+    this.menuToggleCooldown = _ReaderGestureDetectorState._kMenuToggleCooldown,
+  });
+
+  /// Whether a user drag armed [ScrollTapGuard].
+  final bool guardArmed;
+
+  /// Whether the toolbar is currently open.
+  final bool toolbarOpen;
+
+  final bool onChapterCommentsPage;
+
+  final bool tapToTurnEnabled;
+
+  final bool reverseTapToTurn;
+
+  final ReaderMode mode;
+
+  /// The tap position in global coordinates.
+  final Offset position;
+
+  /// The reader surface size.
+  final Size size;
+
+  /// The pointer-up time stamp, used to tell a quick tap from a press-and-hold.
+  final Duration eventTime;
+
+  final bool isQuickTap;
+
+  /// Event time stamp of the last toolbar toggle, or `null` when none happened.
+  final Duration? lastMenuToggleTime;
+
+  final double tapToTurnPercent;
+
+  final Duration menuToggleCooldown;
+}
+
+/// Routes one ordinary single tap to exactly one action.
+///
+/// The guard is checked first and on its own, before the toolbar state, the
+/// chapter-comments shortcut and every tap-to-turn region. That ordering is the
+/// contract: an armed guard makes the tap a no-op for the whole surface, so an
+/// edge tap cannot turn a page behind the guard's back.
+ReaderTapAction routeReaderSingleTap(ReaderTapDecisionInput input) {
+  if (input.guardArmed) return ReaderTapAction.consume;
+  // An open toolbar is closed by any tap, exactly as before this routing was
+  // extracted: the close action does not depend on the tap being quick or on
+  // the toggle cooldown.
+  if (input.toolbarOpen) return ReaderTapAction.toggleToolbar;
+  if (input.onChapterCommentsPage) return ReaderTapAction.none;
+  if (!input.tapToTurnEnabled) {
+    return readerTapToolbarOrNothing(input);
+  }
+  final region = readerTapRegion(input);
+  switch (region) {
+    case ReaderTapRegion.previous:
+      return ReaderTapAction.previous;
+    case ReaderTapRegion.next:
+      return ReaderTapAction.next;
+    case ReaderTapRegion.center:
+      return readerTapToolbarOrNothing(input);
+  }
+}
+
+/// The toolbar rule: only a quick tap outside the toggle cooldown toggles it.
+ReaderTapAction readerTapToolbarOrNothing(ReaderTapDecisionInput input) {
+  if (!input.isQuickTap) return ReaderTapAction.none;
+  final lastToggle = input.lastMenuToggleTime;
+  if (lastToggle != null &&
+      input.eventTime - lastToggle < input.menuToggleCooldown) {
+    return ReaderTapAction.none;
+  }
+  return ReaderTapAction.toggleToolbar;
+}
+
+/// Where a tap landed for the active reading mode.
+enum ReaderTapRegion { previous, next, center }
+
+/// The tap-to-turn region of [input], honouring the reverse-tap setting.
+///
+/// Kept separate from the routing decision because the mapping from a physical
+/// edge to previous/next is the only part that depends on the reading direction.
+ReaderTapRegion readerTapRegion(ReaderTapDecisionInput input) {
+  final width = input.size.width;
+  final height = input.size.height;
+  final x = input.position.dx;
+  final y = input.position.dy;
+  final percent = input.tapToTurnPercent;
+  var isLeft = false, isRight = false, isTop = false, isBottom = false;
+  if (x < width * percent) {
+    isLeft = true;
+  } else if (x > width * (1 - percent)) {
+    isRight = true;
+  }
+  if (y < height * percent) {
+    isTop = true;
+  } else if (y > height * (1 - percent)) {
+    isBottom = true;
+  }
+  var prev = ReaderTapRegion.previous;
+  var next = ReaderTapRegion.next;
+  if (input.reverseTapToTurn) {
+    prev = ReaderTapRegion.next;
+    next = ReaderTapRegion.previous;
+  }
+  switch (input.mode) {
+    case ReaderMode.galleryLeftToRight:
+    case ReaderMode.continuousLeftToRight:
+      if (isLeft) return prev;
+      if (isRight) return next;
+      return ReaderTapRegion.center;
+    case ReaderMode.galleryRightToLeft:
+    case ReaderMode.continuousRightToLeft:
+      if (isLeft) return next;
+      if (isRight) return prev;
+      return ReaderTapRegion.center;
+    case ReaderMode.galleryTopToBottom:
+    case ReaderMode.continuousTopToBottom:
+      if (isTop) return prev;
+      if (isBottom) return next;
+      return ReaderTapRegion.center;
+  }
+}
+
 class _ReaderGestureDetector extends StatefulWidget {
   const _ReaderGestureDetector({required this.child});
 
@@ -245,80 +408,50 @@ class _ReaderGestureDetectorState
     required Duration eventTime,
     required bool isQuickTap,
   }) {
-    if (context.readerScaffold.isOpen) {
-      context.readerScaffold.openOrClose();
-      _lastMenuToggleTime = eventTime;
-      return;
-    }
-    // Don't open toolbar on chapter comments page
-    if (reader.isOnChapterCommentsPage) {
-      return;
-    }
-    if (appdata.settings.getReaderSetting(
-      reader.cid,
-      reader.type.sourceKey,
-      'enableTapToTurnPages',
-    )) {
-      bool isLeft = false, isRight = false, isTop = false, isBottom = false;
-      final width = context.width;
-      final height = context.height;
-      final x = location.dx;
-      final y = location.dy;
-      if (x < width * _kTapToTurnPagePercent) {
-        isLeft = true;
-      } else if (x > width * (1 - _kTapToTurnPagePercent)) {
-        isRight = true;
-      }
-      if (y < height * _kTapToTurnPagePercent) {
-        isTop = true;
-      } else if (y > height * (1 - _kTapToTurnPagePercent)) {
-        isBottom = true;
-      }
-      bool isCenter = false;
-      var prev = () => context.reader.toPrevPage();
-      var next = () => context.reader.toNextPage();
-      if (appdata.settings.getReaderSetting(
-        reader.cid,
-        reader.type.sourceKey,
-        'reverseTapToTurnPages',
-      )) {
-        prev = () => context.reader.toNextPage();
-        next = () => context.reader.toPrevPage();
-      }
-      switch (context.reader.mode) {
-        case ReaderMode.galleryLeftToRight:
-        case ReaderMode.continuousLeftToRight:
-          if (isLeft) {
-            prev();
-          } else if (isRight) {
-            next();
-          } else {
-            isCenter = true;
-          }
-        case ReaderMode.galleryRightToLeft:
-        case ReaderMode.continuousRightToLeft:
-          if (isLeft) {
-            next();
-          } else if (isRight) {
-            prev();
-          } else {
-            isCenter = true;
-          }
-        case ReaderMode.galleryTopToBottom:
-        case ReaderMode.continuousTopToBottom:
-          if (isTop) {
-            prev();
-          } else if (isBottom) {
-            next();
-          } else {
-            isCenter = true;
-          }
-      }
-      if (isCenter) {
+    // The routing decision consults the scroll guard before anything else, so a
+    // tap that arrives around a user drag is consumed once for the whole
+    // surface: an edge tap cannot turn a page (or change a chapter) behind the
+    // guard's back, and a center tap cannot toggle the toolbar. The consumed tap
+    // performs no scroll action of its own — it is swallowed, never used to stop
+    // or nudge a coasting list.
+    final action = routeReaderSingleTap(
+      ReaderTapDecisionInput(
+        guardArmed: reader._imageViewController!.handleOnTap(location),
+        toolbarOpen: context.readerScaffold.isOpen,
+        // Don't open toolbar on chapter comments page
+        onChapterCommentsPage: reader.isOnChapterCommentsPage,
+        tapToTurnEnabled: appdata.settings.getReaderSetting(
+          reader.cid,
+          reader.type.sourceKey,
+          'enableTapToTurnPages',
+        ),
+        reverseTapToTurn: appdata.settings.getReaderSetting(
+          reader.cid,
+          reader.type.sourceKey,
+          'reverseTapToTurnPages',
+        ),
+        mode: context.reader.mode,
+        position: location,
+        size: Size(context.width, context.height),
+        eventTime: eventTime,
+        isQuickTap: isQuickTap,
+        lastMenuToggleTime: _lastMenuToggleTime,
+      ),
+    );
+    switch (action) {
+      case ReaderTapAction.consume:
+        return;
+      case ReaderTapAction.previous:
+        context.reader.toPrevPage();
+        return;
+      case ReaderTapAction.next:
+        context.reader.toNextPage();
+        return;
+      case ReaderTapAction.toggleToolbar:
         _handleMenuToggleTap(location, eventTime, isQuickTap);
-      }
-    } else {
-      _handleMenuToggleTap(location, eventTime, isQuickTap);
+        return;
+      case ReaderTapAction.none:
+        return;
     }
   }
 
@@ -327,12 +460,22 @@ class _ReaderGestureDetectorState
   /// recent (continuous mode), when the tap is a press-and-hold, or shortly
   /// after the toolbar already toggled (so a quick double tap in the center
   /// cannot flash the toolbar open and shut).
+  ///
+  /// The routing decision already applies the same rules; this method performs
+  /// the toggle and re-checks the guard as the toolbar toggle's own last line
+  /// of defence.
   void _handleMenuToggleTap(
     Offset location,
     Duration eventTime,
     bool isQuickTap,
   ) {
     if (reader._imageViewController!.handleOnTap(location)) {
+      return;
+    }
+    if (context.readerScaffold.isOpen) {
+      // Closing an open toolbar keeps its original unconditional behaviour.
+      _lastMenuToggleTime = eventTime;
+      context.readerScaffold.openOrClose();
       return;
     }
     if (!isQuickTap) {

@@ -195,16 +195,19 @@ class _SemanticSearchPageState extends State<SemanticSearchPage> {
     final unsupported =
         controller == null ||
         controller.mode == SemanticCapabilityMode.unsupported;
-    final hasOptions =
-        source != null &&
-        (source.searchPageData?.searchOptions ?? const <SearchOptions>[])
-            .isNotEmpty;
+    // The declared option groups are the single source of truth for the option
+    // entry: zero groups mean no entry at all, exactly one group can live in the
+    // title's secondary area, and two or more keep the dedicated Settings entry.
+    // Nothing here branches on the source key.
+    final declaredOptions =
+        source?.searchPageData?.searchOptions ?? const <SearchOptions>[];
+    final optionCount = unsupported ? 0 : declaredOptions.length;
     return Scaffold(
       extendBodyBehindAppBar: true,
       appBar: Appbar(
-        title: _buildTitle(context, source),
+        title: _buildTitle(context, source, optionCount == 1),
         actions: [
-          if (!unsupported && hasOptions)
+          if (optionCount >= 2)
             Tooltip(
               message: "Settings".tl,
               child: IconButton(
@@ -220,13 +223,33 @@ class _SemanticSearchPageState extends State<SemanticSearchPage> {
     );
   }
 
-  Widget _buildTitle(BuildContext context, ComicSource? source) {
+  Widget _buildTitle(
+    BuildContext context,
+    ComicSource? source,
+    bool singleOption,
+  ) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
         Text('Tag: @a'.tlParams({'a': widget.value}), maxLines: 1),
-        if (source != null)
+        if (singleOption)
+          // The one declared option replaces the source subtitle with its own
+          // current, human-readable value, and tapping it opens the same dialog
+          // the tune action used to open.
+          InkWell(
+            onTap: _openOptions,
+            child: Text(
+              _singleOptionValue(source),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 12,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+            ),
+          )
+        else if (source != null)
           Text(
             source.name.tl,
             maxLines: 1,
@@ -237,6 +260,36 @@ class _SemanticSearchPageState extends State<SemanticSearchPage> {
           ),
       ],
     );
+  }
+
+  /// The display value of the only declared option group.
+  ///
+  /// It uses the same display semantics as [SearchOptionWidget], so a raw
+  /// encoded value (for example `dd-New to old`, stored as the key `dd`) is
+  /// never shown verbatim: the map value is translated with the source
+  /// translations. A multi-select value is a JSON list, and each element is
+  /// resolved the same way so the title stays readable.
+  String _singleOptionValue(ComicSource? source) {
+    final declared =
+        source?.searchPageData?.searchOptions ?? const <SearchOptions>[];
+    if (declared.isEmpty) return '';
+    final option = declared.first;
+    final key = source?.key ?? _source?.key ?? '';
+    final current = _controller?.query.options.firstOrNull;
+    final value = current ?? option.defaultValue;
+    if (value.isEmpty) return '';
+    if (option.type == 'multi-select') {
+      return value
+          .split(',')
+          .map((entry) => _optionValueLabel(option, entry, key))
+          .join(', ');
+    }
+    return _optionValueLabel(option, value, key);
+  }
+
+  String _optionValueLabel(SearchOptions option, String value, String key) {
+    final label = option.options[value];
+    return label == null ? value : label.ts(key);
   }
 
   Widget _buildUnsupported(BuildContext context) {

@@ -43,14 +43,38 @@ keyPassword=你的私钥密码
 debug/release 沿用现有 Gradle 配置，共用同一签名。缺少 Secrets 时明确失败。
 上传 Release 使用内置 GITHUB_TOKEN，不再需要 ACTION_GITHUB_TOKEN 或 Apple 证书。
 
-本轮保持版本号算法：release 无 ABI split 时为 buildNumber × 10，debug 为
-buildNumber × 10 + 4。从 debug 切换到 release 时应增加 pubspec.yaml 的 buildNumber，
-避免降级。发布前更新版本并提交，再创建对应标签和 Release。
+## 版本号与发布流程
+
+`pubspec.yaml` 的 `version:` 是**唯一真实版本来源**，格式为
+`<semantic version>+<build number>`，例如 `2.0.0-beta.4+168`。维护者只修改这一处：
+
+| 用途 | 取值 |
+| --- | --- |
+| 运行时显示版本（About） | 语义版本部分，即去掉 `+buildNumber` 的 `2.0.0-beta.4`；
+来源是构建产物的 package metadata（`package_info_plus`），Dart 不保留第二份真实版本 |
+| 更新比较 | 语义版本，按 SemVer precedence；`+buildNumber` 不参与，只增 build number 不会提示升级 |
+| Release tag | `v<semantic version>`，不含 `+buildNumber`，例如 `v2.0.0-beta.4` |
+| Release asset 文件名 | `venera-<semantic version>-android-arm64-<mode>.apk`，不含 `+buildNumber` |
+| Android 内部 versionCode | 继续按 `pubspec.yaml` 的完整版本派生：release 无 ABI split 时为 buildNumber × 10，debug 为 buildNumber × 10 + 4 |
+
+`flutter build` 仍读取完整 `pubspec` 版本，因此 build number 与内部 versionCode 派生规则不变；
+本次只移除 Release asset 文件名中的 `+buildNumber`。
+
+标准发版步骤：
+
+1. 在 `pubspec.yaml` 更新 `version:`（需要用户收到更新时提升 semantic version；仅重跑 CI 不必改）。
+2. 将该版本连同代码合并到 `master`（正式 Release 之前 `master` 必须已包含目标版本）。
+3. 在 GitHub Releases 创建 target=`master`、tag=`v<semantic version>` 的 Release 并 Publish。
+4. workflow 自动校验 tag、构建签名 ARM64 APK 并上传；`release: published` 时若
+   `github.event.release.tag_name` 不等于 `v` + `pubspec.yaml` 的语义版本，会在任何产物
+   发布之前失败。`workflow_dispatch` 的手工 debug/release 构建不受该 tag 校验约束。
+5. CI 单纯失败可直接 Re-run（`gh release upload ... --clobber` 会覆盖同名 asset），不需要改版本；
+   如果发布内容真正变化并需要用户收到更新，应提升 semantic version，而不是只增加 `+buildNumber`。
 
 ## 产物和本地构建
 
 显式使用 `--target-platform android-arm64`，检查 APK 原生库只有 arm64-v8a。
-文件名为 `venera-<version>-android-arm64-<mode>.apk`，Artifacts 保留 14 天，
+文件名为 `venera-<semantic version>-android-arm64-<mode>.apk`，Artifacts 保留 14 天，
 Release 附件不受此期限影响。
 
 本地 Android 使用 build_android.ps1 和被 Git 忽略的 android/key.properties。
