@@ -9,6 +9,7 @@ import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_updates.dart';
+import 'package:venera/foundation/follow_updates_query.dart';
 import 'package:venera/foundation/follow_updates_service.dart';
 import 'package:venera/foundation/global_state.dart';
 import 'package:venera/foundation/tracking/judgment_service.dart';
@@ -16,16 +17,11 @@ import 'package:venera/pages/comic_details_page/comic_page.dart';
 import 'package:venera/utils/translations.dart';
 
 /// Debug builds may bypass the pre-condition gate (Contract F2.6).
-///
-/// Kept as a top-level flag so the bypass survives page rebuilds, and gated on
-/// [kDebugMode] so a release build cannot reach the toggle at all.
 bool _debugGateBypass = false;
 
-/// The entry badge.
-///
-/// Reads the **same** source as the list (Contract F3.2): a count that came
-/// from anywhere else could disagree with the list, which is exactly the
-/// "badge says 3, list is empty" failure.
+Set<String> _allowedSources(FollowUpdateGate gate) =>
+    kDebugMode && _debugGateBypass ? gate.sourceKeys : gate.satisfiedSourceKeys;
+
 class FollowUpdatesWidget extends StatefulWidget {
   const FollowUpdatesWidget({super.key});
 
@@ -37,46 +33,36 @@ class _FollowUpdatesWidgetState
     extends AutomaticGlobalState<FollowUpdatesWidget> {
   int _count = 0;
   int _requestId = 0;
+  Timer? _cacheRefreshDebounce;
   StreamSubscription<void>? _judgmentBatches;
+  late final NetworkFavoriteCacheManager _cache;
+  Set<String> _lastAllowedSourceKeys = <String>{};
 
   bool get _enabled => followUpdatesEnabled;
 
-  /// Reads the count asynchronously, discarding a response whose request is no
-  /// longer current (Contract F7).
-  ///
-  /// The judgment store is asynchronous while the old local cache was not, so
-  /// "call and it is done" no longer holds: two overlapping reads can return
-  /// out of order and leave the older one displayed.
-  ///
-  /// A failed read leaves the badge at zero rather than showing a stale count,
-  /// and the page itself reports the unreadable state explicitly — the badge is
-  /// a decoration, and the page is where "we could not read it" belongs.
-  ///
-  /// The count applies the **same per-source rule as the list** (Contract F3.2):
-  /// a flagged comic whose source is still caching is not on screen, so counting
-  /// it would produce the "badge says 3, list shows 1" failure this contract
-  /// exists to prevent.
+  FollowUpdateGate get gate => followUpdateCoordinator.evaluateGate();
+
   Future<void> getCount() async {
+    final requestId = ++_requestId;
     if (!_enabled) {
-      _count = 0;
+      if (mounted) setState(() => _count = 0);
       return;
     }
-    final requestId = ++_requestId;
+    final sources = _allowedSources(gate);
+    if (sources.isEmpty) {
+      if (mounted) setState(() => _count = 0);
+      return;
+    }
+    final scopeAtStart = Set<String>.of(sources);
     try {
-      await judgmentService.repository.ensureOpen();
-      final snapshot = await judgmentService.repository.readSnapshot();
-      if (!mounted || requestId != _requestId) return;
-      final sources = followUpdateCoordinator
-          .evaluateGate()
-          .satisfiedSourceKeys;
-      setState(() {
-        _count = snapshot.values
-            .where(
-              (state) =>
-                  state.hasNewUpdate && sources.contains(state.sourceKey),
-            )
-            .length;
-      });
+      final identities = await followUpdatesQueryService
+          .readVisibleUnreadIdentities(allowedSourceKeys: sources);
+      if (!mounted ||
+          requestId != _requestId ||
+          !setEquals(scopeAtStart, _allowedSources(gate))) {
+        return;
+      }
+      setState(() => _count = identities.length);
     } catch (_) {
       if (!mounted || requestId != _requestId) return;
       setState(() => _count = 0);
@@ -88,35 +74,48 @@ class _FollowUpdatesWidgetState
   @override
   void initState() {
     super.initState();
+    _cache = NetworkFavoriteCacheManager();
+    _cache.addListener(_onCacheChanged);
+    _lastAllowedSourceKeys = _allowedSources(gate);
     updateCount();
     followUpdateCoordinator.progress.addListener(_onProgress);
-    // FR-009: the UI side consumes the judgment batch event.  The count can
-    // only change when judgment commits, so this is the precise moment to
-    // re-read; the per-task progress frames are for the bar, not for the count.
     _judgmentBatches = judgmentService.events.listen((_) => updateCount());
   }
 
   @override
   void dispose() {
+    _cacheRefreshDebounce?.cancel();
+    _cache.removeListener(_onCacheChanged);
     followUpdateCoordinator.progress.removeListener(_onProgress);
     unawaited(_judgmentBatches?.cancel());
     super.dispose();
   }
 
-  /// Re-reads the count only when a round (or a cache run) has ended.
-  ///
-  /// Nothing the badge shows can change in between, and a read per task would
-  /// scan the whole judgment table per task.
   void _onProgress() {
     if (!mounted) return;
     if (followUpdateCoordinator.currentProgress.isRoundEnd) updateCount();
+  }
+
+  void _onCacheChanged() {
+    if (!mounted) return;
+    final allowed = _allowedSources(gate);
+    if (!setEquals(allowed, _lastAllowedSourceKeys)) {
+      _lastAllowedSourceKeys = Set<String>.of(allowed);
+      _requestId++;
+      setState(() => _count = 0);
+    }
+    _cacheRefreshDebounce?.cancel();
+    _cacheRefreshDebounce = Timer(
+      const Duration(milliseconds: 100),
+      updateCount,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return SliverToBoxAdapter(
       child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        margin: const EdgeInsets.all(8),
         decoration: BoxDecoration(
           border: Border.all(
             color: Theme.of(context).colorScheme.outlineVariant,
@@ -202,172 +201,448 @@ class FollowUpdatesPage extends StatefulWidget {
   State<FollowUpdatesPage> createState() => FollowUpdatesPageState();
 }
 
-/// Public so [updateFollowUpdatesUI] can reach it through [GlobalState].
-class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
-  /// The single update list (Contract F3.1).
-  List<FavoriteItemWithUpdateInfo> updatedComics = [];
+class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage>
+    with SingleTickerProviderStateMixin {
+  static const _pageSize = 30;
+  static const _searchDebounce = Duration(milliseconds: 250);
 
-  bool _loading = true;
-  bool _unreadable = false;
-  int _requestId = 0;
+  late final TabController _tabController;
+  late final NetworkFavoriteCacheManager _cache;
+  late final Map<FollowUpdatesTab, _FollowUpdatesTabView> _views;
+  FollowUpdatesTab _activeTab = FollowUpdatesTab.unread;
+  Set<String> _lastAllowedSourceKeys = <String>{};
+  int _scopeGeneration = 0;
+  bool _markingAllAsRead = false;
+  Timer? _cacheRefreshDebounce;
   StreamSubscription<void>? _judgmentBatches;
 
   bool get _enabled => followUpdatesEnabled;
 
-  /// The gate, read from configuration (Contract F2).
-  ///
-  /// The coordinator's own criterion set is used, so the gate judges exactly the
-  /// sources a round would scan, and the coordinator's cache reader, so the
-  /// completeness answer comes from the same store.
   FollowUpdateGate get gate => followUpdateCoordinator.evaluateGate();
 
-  bool get _gateBypassed => kDebugMode && _debugGateBypass;
-
-  /// The source whose account-switch clear explains an unsatisfied gate.
-  ///
-  /// Read once per build from the process-lifetime marker the cache manager
-  /// sets, so the page can attribute the empty cache to an account change
-  /// (FR-034) rather than presenting it as "never cached".
   String? get _accountSwitchSourceKey =>
       NetworkFavoriteCacheManager.accountSwitchClearedSourceKey;
 
-  bool get _showList => !_enabled || _gateBypassed || gate.isSatisfied;
+  bool get _showList => !_enabled || _allowedSources(gate).isNotEmpty;
 
-  /// The entries the gate currently allows on screen (F2.3, revised).
-  ///
-  /// Per source: a source's entries are shown only once **that source's** own
-  /// cache is complete, because a partial cache would render a partial answer
-  /// as if it were the whole one.  Applied at build time rather than when the
-  /// snapshot is read, so a source that finishes caching appears as soon as the
-  /// next frame arrives instead of waiting for another store read.
-  ///
-  /// The debug bypass (F2.6) is exactly the switch that removes this rule, so it
-  /// returns everything.
-  List<FavoriteItemWithUpdateInfo> get visibleComics {
-    if (_gateBypassed) return updatedComics;
-    final sources = gate.satisfiedSourceKeys;
-    return updatedComics
-        .where((comic) => sources.contains(comic.sourceKeyValue))
-        .toList();
-  }
+  _FollowUpdatesTabView get _activeView => _views[_activeTab]!;
 
   @override
   void initState() {
     super.initState();
-    unawaited(updateComics());
+    _tabController = TabController(length: 2, vsync: this)
+      ..addListener(_onTabChanged);
+    _views = {
+      FollowUpdatesTab.unread: _FollowUpdatesTabView(
+        tab: FollowUpdatesTab.unread,
+      ),
+      FollowUpdatesTab.recent: _FollowUpdatesTabView(
+        tab: FollowUpdatesTab.recent,
+      ),
+    };
+    for (final entry in _views.entries) {
+      entry.value.scrollController.addListener(() {
+        if (_activeTab != entry.key) return;
+        final controller = entry.value.scrollController;
+        if (controller.hasClients) {
+          entry.value.scrollOffset = controller.offset;
+        }
+      });
+    }
+    _cache = NetworkFavoriteCacheManager();
+    _cache.addListener(_onCacheChanged);
+    _lastAllowedSourceKeys = _currentAllowedSourceKeys();
     followUpdateCoordinator.progress.addListener(_onProgress);
-    // FR-009: the judgment batch event is consumed by the UI side as well as
-    // by the schedule.  It is the signal that actually corresponds to content
-    // changing, so it — rather than the per-task progress frames — decides when
-    // the list is re-read.
-    _judgmentBatches = judgmentService.events.listen((_) {
-      unawaited(updateComics());
-    });
+    followUpdateCoordinator.scheduleRevision.addListener(_onScheduleChanged);
+    _judgmentBatches = judgmentService.events.listen(
+      (_) => _markTabNeedsRefresh(FollowUpdatesTab.unread),
+    );
+    unawaited(_reloadTab(FollowUpdatesTab.unread));
   }
 
   @override
   void dispose() {
+    for (final view in _views.values) {
+      view.searchDebounce?.cancel();
+      view.searchController.dispose();
+      view.scrollController.dispose();
+    }
+    _cacheRefreshDebounce?.cancel();
+    _cache.removeListener(_onCacheChanged);
     followUpdateCoordinator.progress.removeListener(_onProgress);
+    followUpdateCoordinator.scheduleRevision.removeListener(_onScheduleChanged);
+    _tabController.removeListener(_onTabChanged);
+    _tabController.dispose();
     unawaited(_judgmentBatches?.cancel());
     super.dispose();
   }
 
-  /// Repaints the bar on every frame; re-reads the list only at a boundary.
-  ///
-  /// The bar has to move as each task settles (F5.4), while a read is a join of
-  /// the whole judgment table with the favorite cache: reading per task would
-  /// make the page's cost grow with the number of comics.
+  Set<String> _currentAllowedSourceKeys() => _allowedSources(gate);
+
+  _FollowUpdatesTabView _view(FollowUpdatesTab tab) => _views[tab]!;
+
+  void _onTabChanged() {
+    final next = FollowUpdatesTab.values[_tabController.index];
+    if (next == _activeTab) return;
+    final current = _activeView;
+    if (current.scrollController.hasClients) {
+      current.scrollOffset = current.scrollController.offset;
+    }
+    setState(() => _activeTab = next);
+    final view = _view(next);
+    final expired = _hasExpiredRecentWindow(view);
+    if (!view.hasLoaded || view.needsRefresh || expired) {
+      unawaited(_reloadTab(next, clearContent: expired, resetScroll: false));
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final controller = _view(next).scrollController;
+      if (!mounted || !controller.hasClients) return;
+      final target = _view(next).scrollOffset.clamp(
+        controller.position.minScrollExtent,
+        controller.position.maxScrollExtent,
+      );
+      controller.jumpTo(target);
+    });
+  }
+
+  bool _hasExpiredRecentWindow(_FollowUpdatesTabView view) {
+    final deadline = view.earliestAutoHotUntil;
+    return view.tab == FollowUpdatesTab.recent &&
+        view.hasLoaded &&
+        deadline != null &&
+        !deadline.isAfter(DateTime.now());
+  }
+
+  DateTime? _earliestHotDeadline(Iterable<FollowUpdatesEntry> entries) {
+    DateTime? earliest;
+    for (final entry in entries) {
+      earliest = _earlierHotDeadline(earliest, entry.autoHotUntil);
+    }
+    return earliest;
+  }
+
+  DateTime? _earlierHotDeadline(DateTime? left, DateTime? right) {
+    if (left == null) return right;
+    if (right == null) return left;
+    return right.isBefore(left) ? right : left;
+  }
+
   void _onProgress() {
     if (!mounted) return;
-    if (followUpdateCoordinator.currentProgress.isRoundEnd) {
-      unawaited(updateComics());
+    if (!followUpdateCoordinator.currentProgress.isRoundEnd) {
+      setState(() {});
       return;
+    }
+    _refreshCommittedStores();
+  }
+
+  void _onScheduleChanged() {
+    _markTabNeedsRefresh(FollowUpdatesTab.recent);
+  }
+
+  void _onCacheChanged() {
+    if (!mounted) return;
+    final scopeChanged = _syncSourceScope();
+    if (scopeChanged) {
+      for (final view in _views.values) {
+        view.needsRefresh = true;
+      }
+      setState(() {});
+    }
+    _cacheRefreshDebounce?.cancel();
+    _cacheRefreshDebounce = Timer(
+      const Duration(milliseconds: 100),
+      _refreshAfterCacheChange,
+    );
+  }
+
+  void _refreshAfterCacheChange() {
+    if (!mounted) return;
+    final scopeChanged = _syncSourceScope();
+    for (final view in _views.values) {
+      view.needsRefresh = true;
     }
     setState(() {});
+    if (_showList) {
+      unawaited(
+        _reloadTab(
+          _activeTab,
+          clearContent: scopeChanged,
+          resetScroll: scopeChanged,
+        ),
+      );
+    }
   }
 
-  /// Reads the visible update set and joins it to the presentation cache.
-  ///
-  /// Asynchronous, with a sequencing guard: the page is refreshed from progress
-  /// and cache events as well as from the first build, and an older response
-  /// arriving late must not overwrite a newer one.
+  void _refreshCommittedStores() {
+    final scopeChanged = _syncSourceScope();
+    for (final view in _views.values) {
+      view.needsRefresh = true;
+    }
+    setState(() {});
+    if (_showList) {
+      unawaited(
+        _reloadTab(
+          _activeTab,
+          clearContent: scopeChanged,
+          resetScroll: scopeChanged,
+        ),
+      );
+    }
+  }
+
+  void _markTabNeedsRefresh(FollowUpdatesTab tab) {
+    if (!mounted) return;
+    final view = _view(tab);
+    view.needsRefresh = true;
+    if (_activeTab == tab && _showList) {
+      unawaited(_reloadTab(tab));
+    }
+  }
+
+  bool _syncSourceScope() {
+    final allowed = _currentAllowedSourceKeys();
+    final changed = !setEquals(allowed, _lastAllowedSourceKeys);
+    _lastAllowedSourceKeys = Set<String>.of(allowed);
+    if (changed) {
+      _scopeGeneration++;
+      for (final view in _views.values) {
+        view
+          ..requestId = view.requestId + 1
+          ..comics.clear()
+          ..nextCursor = null
+          ..loading = false
+          ..loadingMore = false
+          ..loadError = false
+          ..moreError = false
+          ..hasLoaded = false
+          ..needsRefresh = true
+          ..scrollOffset = 0
+          ..earliestAutoHotUntil = null;
+      }
+      _jumpToTop(_activeTab);
+    }
+    return changed;
+  }
+
   Future<void> updateComics() async {
     if (!mounted) return;
-    final requestId = ++_requestId;
-    if (!_enabled) {
+    final scopeChanged = _syncSourceScope();
+    if (!_showList) {
       setState(() {
-        updatedComics = [];
-        _loading = false;
-        _unreadable = false;
+        for (final view in _views.values) {
+          view
+            ..requestId = view.requestId + 1
+            ..comics.clear()
+            ..loading = false
+            ..loadError = false
+            ..hasLoaded = false
+            ..earliestAutoHotUntil = null;
+        }
       });
       return;
     }
+    await _reloadTab(
+      _activeTab,
+      clearContent: scopeChanged,
+      resetScroll: scopeChanged,
+    );
+  }
+
+  Future<void> _reloadTab(
+    FollowUpdatesTab tab, {
+    bool clearContent = false,
+    bool resetScroll = false,
+  }) async {
+    if (!mounted) return;
+    final view = _view(tab);
+    final requestId = ++view.requestId;
+    final scopeGeneration = _scopeGeneration;
+    final query = view.searchController.text;
+    final allowedAtStart = _currentAllowedSourceKeys();
+    view
+      ..needsRefresh = false
+      ..nextCursor = null
+      ..loadingMore = false
+      ..moreError = false
+      ..loadError = false
+      ..loading = clearContent || view.comics.isEmpty;
+    if (clearContent) {
+      view
+        ..comics.clear()
+        ..earliestAutoHotUntil = null;
+    }
+    if (resetScroll) {
+      view.scrollOffset = 0;
+      _jumpToTop(tab);
+    }
+    setState(() {});
+
     try {
-      await judgmentService.repository.ensureOpen();
-      final snapshot = await judgmentService.repository.readSnapshot();
-      if (!mounted || requestId != _requestId) return;
+      final result = await followUpdatesQueryService.queryPage(
+        allowedSourceKeys: allowedAtStart,
+        now: DateTime.now(),
+        tab: tab,
+        query: query,
+        pageSize: _pageSize,
+      );
+      if (!mounted ||
+          requestId != view.requestId ||
+          scopeGeneration != _scopeGeneration ||
+          !setEquals(allowedAtStart, _currentAllowedSourceKeys()) ||
+          query != view.searchController.text) {
+        return;
+      }
       setState(() {
-        updatedComics = _resolvePresentation(
-          snapshot.values
-              .where((state) => state.hasNewUpdate)
-              .map((state) => (state.sourceKey, state.comicId))
-              .toList(),
-        );
-        _loading = false;
-        _unreadable = false;
+        view
+          ..comics = result.items.map((entry) => entry.comic).toList()
+          ..nextCursor = result.nextCursor
+          ..loading = false
+          ..hasLoaded = true
+          ..loadError = false
+          ..earliestAutoHotUntil = tab == FollowUpdatesTab.recent
+              ? _earliestHotDeadline(result.items)
+              : null;
       });
+    } on FollowUpdatesCursorExpiredException {
+      if (mounted && requestId == view.requestId) {
+        await _reloadTab(tab, clearContent: true, resetScroll: true);
+      }
     } catch (_) {
-      if (!mounted || requestId != _requestId) return;
+      if (!mounted || requestId != view.requestId) return;
       setState(() {
-        updatedComics = [];
-        _loading = false;
-        _unreadable = true;
+        view
+          ..loading = false
+          ..hasLoaded = true
+          ..loadError = true;
       });
     }
   }
 
-  /// Joins each flagged identity to its cached favorite entry.
-  ///
-  /// The judgment store deliberately carries no title or cover; those live in
-  /// the favorite cache.  Contract F3.3 requires every listed entry to render,
-  /// so this returns only identities the cache can describe — which is
-  /// precisely why the gate exists: the cache is guaranteed complete for a
-  /// criterion source before the list is shown at all.
-  List<FavoriteItemWithUpdateInfo> _resolvePresentation(
-    List<(String, String)> identities,
-  ) {
-    if (identities.isEmpty) return const [];
-    final cache = NetworkFavoriteCacheManager();
-    final result = <FavoriteItemWithUpdateInfo>[];
+  Future<void> _loadNextPage(FollowUpdatesTab tab) async {
+    final view = _view(tab);
+    final cursor = view.nextCursor;
+    if (cursor == null || view.loading || view.loadingMore) return;
+    final requestId = view.requestId;
+    final scopeGeneration = _scopeGeneration;
+    final query = view.searchController.text;
+    final allowedAtStart = _currentAllowedSourceKeys();
+    setState(() {
+      view
+        ..loadingMore = true
+        ..moreError = false;
+    });
     try {
-      final foldersBySource = <String, List<NetworkFavoriteFolderRef>>{};
-      for (final folder in cache.getAllCachedFolders()) {
-        foldersBySource.putIfAbsent(folder.sourceKey, () => []).add(folder);
+      final result = await followUpdatesQueryService.queryPage(
+        allowedSourceKeys: allowedAtStart,
+        now: DateTime.now(),
+        tab: tab,
+        query: query,
+        pageSize: _pageSize,
+        cursor: cursor,
+      );
+      if (!mounted ||
+          requestId != view.requestId ||
+          scopeGeneration != _scopeGeneration ||
+          !setEquals(allowedAtStart, _currentAllowedSourceKeys()) ||
+          query != view.searchController.text) {
+        return;
       }
-      for (final (sourceKey, comicId) in identities) {
-        for (final folder in foldersBySource[sourceKey] ?? const []) {
-          final item = cache.getComicUpdateInfo(
-            sourceKey,
-            comicId,
-            folder.folderId,
-          );
-          if (item != null) {
-            result.add(item);
-            break;
-          }
+      final known = {
+        for (final comic in view.comics) '${comic.sourceKey}\u0000${comic.id}',
+      };
+      final nextDeadline = tab == FollowUpdatesTab.recent
+          ? _earlierHotDeadline(
+              view.earliestAutoHotUntil,
+              _earliestHotDeadline(result.items),
+            )
+          : null;
+      setState(() {
+        for (final entry in result.items) {
+          final identity = '${entry.comic.sourceKey}\u0000${entry.comic.id}';
+          if (known.add(identity)) view.comics.add(entry.comic);
         }
+        view
+          ..nextCursor = result.nextCursor
+          ..loadingMore = false
+          ..moreError = false
+          ..earliestAutoHotUntil = nextDeadline;
+      });
+    } on FollowUpdatesCursorExpiredException {
+      if (mounted && requestId == view.requestId) {
+        await _reloadTab(tab, clearContent: true, resetScroll: true);
       }
     } catch (_) {
-      return const [];
+      if (!mounted || requestId != view.requestId) return;
+      setState(() {
+        view
+          ..loadingMore = false
+          ..moreError = true;
+      });
     }
-    result.sort((a, b) => a.name.compareTo(b.name));
-    return result;
+  }
+
+  void _scheduleLoadMore(FollowUpdatesTab tab) {
+    final view = _view(tab);
+    if (view.loadMoreScheduled ||
+        view.nextCursor == null ||
+        view.loading ||
+        view.loadingMore ||
+        view.moreError) {
+      return;
+    }
+    view.loadMoreScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      view.loadMoreScheduled = false;
+      if (mounted && _activeTab == tab) unawaited(_loadNextPage(tab));
+    });
+  }
+
+  void _jumpToTop(FollowUpdatesTab tab) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final controller = _view(tab).scrollController;
+      if (mounted && _activeTab == tab && controller.hasClients) {
+        controller.jumpTo(controller.position.minScrollExtent);
+      }
+    });
+  }
+
+  void _onSearchChanged(FollowUpdatesTab tab) {
+    final view = _view(tab);
+    view
+      ..requestId = view.requestId + 1
+      ..searchDebounce?.cancel()
+      ..comics.clear()
+      ..nextCursor = null
+      ..loading = _showList
+      ..loadingMore = false
+      ..loadError = false
+      ..moreError = false
+      ..hasLoaded = false
+      ..needsRefresh = false
+      ..scrollOffset = 0
+      ..earliestAutoHotUntil = null;
+    setState(() {});
+    if (!_showList) return;
+    view.searchDebounce = Timer(
+      _searchDebounce,
+      () => _reloadTab(tab, clearContent: true, resetScroll: true),
+    );
+  }
+
+  void _submitSearch(FollowUpdatesTab tab) {
+    final view = _view(tab);
+    view.searchDebounce?.cancel();
+    unawaited(_reloadTab(tab, clearContent: true, resetScroll: true));
   }
 
   @override
   Widget build(BuildContext context) {
+    final view = _activeView;
     return Scaffold(
       body: SmoothCustomScrollView(
+        key: ValueKey(_activeTab),
+        controller: view.scrollController,
         slivers: [
           SliverAppbar(
             title: Text('Follow Updates'.tl),
@@ -403,11 +678,159 @@ class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
             buildDisabled(context)
           else ...[
             buildProgressArea(context),
-            if (!_showList) buildGateNotice(context) else buildUpdatedComics(),
+            if (!_showList)
+              buildGateNotice(context)
+            else
+              ..._buildTabSlivers(context),
           ],
         ],
       ),
     );
+  }
+
+  List<Widget> _buildTabSlivers(BuildContext context) {
+    final view = _activeView;
+    return [
+      SliverPersistentHeader(
+        pinned: true,
+        delegate: _PinnedTabBarDelegate(
+          controller: _tabController,
+          tabs: [
+            Tab(text: 'Unread updates'.tl),
+            Tab(text: 'Recent updates'.tl),
+          ],
+        ),
+      ),
+      SliverToBoxAdapter(
+        child: Row(
+          children: [
+            if (followUpdateCoordinator.isRunning)
+              Expanded(
+                child: Text('Follow-up scan in progress'.tl, style: ts.s12),
+              )
+            else
+              const Spacer(),
+            IconButton(
+              tooltip: 'Check Now'.tl,
+              onPressed: startRefresh,
+              icon: const Icon(Icons.refresh),
+            ),
+            if (_activeTab == FollowUpdatesTab.unread &&
+                view.searchController.text.isEmpty &&
+                view.comics.isNotEmpty)
+              IconButton(
+                tooltip: 'Mark all as read'.tl,
+                icon: _markingAllAsRead
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.clear_all),
+                onPressed: _markingAllAsRead ? null : markAllAsRead,
+              ),
+          ],
+        ).paddingHorizontal(12),
+      ),
+      SliverToBoxAdapter(
+        child: TextField(
+          key: ValueKey('follow-up-search-${_activeTab.name}'),
+          controller: view.searchController,
+          decoration: InputDecoration(
+            hintText: 'Search title, author, or tag'.tl,
+            prefixIcon: const Icon(Icons.search),
+            suffixIcon: view.searchController.text.isEmpty
+                ? null
+                : IconButton(
+                    tooltip: 'Clear'.tl,
+                    icon: const Icon(Icons.close),
+                    onPressed: () {
+                      view.searchController.clear();
+                      _onSearchChanged(_activeTab);
+                    },
+                  ),
+            border: const OutlineInputBorder(),
+            isDense: true,
+          ),
+          onChanged: (_) => _onSearchChanged(_activeTab),
+          onSubmitted: (_) => _submitSearch(_activeTab),
+        ).paddingHorizontal(12).paddingVertical(8),
+      ),
+      if (gate.hasPendingSources)
+        SliverToBoxAdapter(
+          child: Row(
+            children: [
+              Icon(
+                Icons.info_outline,
+                size: 14,
+                color: Theme.of(context).colorScheme.outline,
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  '@c sources are not fully cached yet, so they are not followed'
+                      .tlParams({'c': gate.pendingSourceKeys.length}),
+                  style: ts.s12,
+                ),
+              ),
+            ],
+          ).paddingHorizontal(16).paddingVertical(4),
+        ),
+      if (_activeTab == FollowUpdatesTab.unread && view.comics.isNotEmpty)
+        SliverToBoxAdapter(
+          child: Text(
+            'Updates are marked read when you start reading.'.tl,
+          ).paddingHorizontal(16).paddingVertical(4),
+        ),
+      ..._buildTabContent(context, view),
+    ];
+  }
+
+  List<Widget> _buildTabContent(
+    BuildContext context,
+    _FollowUpdatesTabView view,
+  ) {
+    if (view.loading && view.comics.isEmpty) {
+      return const [
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: EdgeInsets.symmetric(vertical: 48),
+            child: Center(child: CircularProgressIndicator()),
+          ),
+        ),
+      ];
+    }
+    if (view.loadError && view.comics.isEmpty) {
+      return [SliverToBoxAdapter(child: _buildUnreadableNotice(context, view))];
+    }
+    if (view.comics.isEmpty) {
+      return [SliverToBoxAdapter(child: _buildEmptyState(context, view))];
+    }
+    return [
+      if (view.loadError)
+        SliverToBoxAdapter(child: _buildUnreadableNotice(context, view)),
+      SliverGridComics(
+        comics: view.comics,
+        onLastItemBuild: () => _scheduleLoadMore(view.tab),
+        onTap: (comic, heroID) => _openFromList(comic, heroID),
+      ),
+      if (view.loadingMore)
+        const SliverToBoxAdapter(
+          child: Padding(
+            padding: EdgeInsets.all(16),
+            child: Center(child: CircularProgressIndicator()),
+          ),
+        )
+      else if (view.moreError)
+        SliverToBoxAdapter(
+          child: Center(
+            child: TextButton.icon(
+              onPressed: () => unawaited(_loadNextPage(view.tab)),
+              icon: const Icon(Icons.refresh),
+              label: Text('Retry'.tl),
+            ),
+          ),
+        ),
+    ];
   }
 
   Widget buildDisabled(BuildContext context) => SliverFillRemaining(
@@ -434,12 +857,6 @@ class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
     ),
   );
 
-  /// The gate's presentation (Contract F2.3/F2.4).
-  ///
-  /// Shows an explanation and an entry point to the full cache, and **no list
-  /// in any form** — not a partial one and not a placeholder one.  A partial
-  /// list would look like a complete answer, and the whole reason the gate
-  /// exists is that the presentation data is not complete yet.
   Widget buildGateNotice(BuildContext context) {
     final currentGate = gate;
     final noSources = !currentGate.hasSources;
@@ -484,8 +901,6 @@ class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
                 ),
                 if (_accountSwitchSourceKey != null) ...[
                   const SizedBox(height: 8),
-                  // FR-034: the user must be told the results are missing
-                  // *because the account changed*, not because something broke.
                   Text('Account switched'.tl, style: ts.s14),
                   Text(
                     'Follow-up needs a complete favorite cache again after '
@@ -505,8 +920,10 @@ class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
                 const SizedBox(height: 24),
                 SwitchListTile(
                   value: _debugGateBypass,
-                  onChanged: (value) =>
-                      setState(() => _debugGateBypass = value),
+                  onChanged: (value) {
+                    setState(() => _debugGateBypass = value);
+                    _refreshAfterCacheChange();
+                  },
                   title: Text('Bypass the follow-up gate (debug)'.tl),
                   subtitle: Text(
                     'Shows the list even when the cache is incomplete.'.tl,
@@ -520,7 +937,6 @@ class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
     );
   }
 
-  /// The in-progress state of a full cache, or of a round (Contract F2.3).
   Widget buildProgressArea(BuildContext context) {
     final caching = followUpdateCoordinator.isCachingFavorites;
     final running = followUpdateCoordinator.isRunning;
@@ -537,13 +953,8 @@ class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // A full cache is named as such: it is the step that unblocks the
-            // gate, so presenting it as an ordinary update check would leave
-            // the user waiting for a list that is still withheld (F2.3/F2.5).
             Text(caching ? 'Caching favorites'.tl : 'Checking updates'.tl),
             const SizedBox(height: 8),
-            // A determinate bar, never an indeterminate spinner: both counts
-            // are known before the work starts (Contract F5.2).
             LinearProgressIndicator(value: progress.fraction),
             const SizedBox(height: 4),
             Text(followUpdateProgressLabel(progress), style: ts.s12),
@@ -552,8 +963,6 @@ class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
               Text('Caching is not finished yet'.tl, style: ts.s12),
             ],
             const SizedBox(height: 8),
-            // Non-modal: the page stays fully operable while work runs
-            // (Contract F1.3 / FR-005).
             OutlinedButton.icon(
               onPressed: caching
                   ? followUpdateCoordinator.cancelFullCache
@@ -567,12 +976,6 @@ class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
     );
   }
 
-  /// The transition once a full cache has finished (Contract F2.3).
-  ///
-  /// The gate has just opened, so the list is available for the first time.  A
-  /// refresh entry point is shown rather than silently swapping the page's
-  /// content: the user pressed "cache completely", so they should be able to see
-  /// that it worked and that the results are now theirs to look at.
   Widget buildPostCacheTransition(BuildContext context) {
     if (!followUpdateCoordinator.favoritesJustCached) {
       return const SliverToBoxAdapter();
@@ -593,7 +996,7 @@ class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
             TextButton(
               onPressed: () {
                 followUpdateCoordinator.acknowledgeFavoritesCached();
-                unawaited(updateComics());
+                _refreshCommittedStores();
               },
               child: Text('Show updates'.tl),
             ),
@@ -603,130 +1006,10 @@ class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
     );
   }
 
-  Widget buildUpdatedComics() {
-    final comics = visibleComics;
-    return SliverMainAxisGroup(
-      slivers: [
-        SliverToBoxAdapter(
-          child: Container(
-            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            padding: const EdgeInsets.symmetric(vertical: 4),
-            decoration: BoxDecoration(
-              border: Border(
-                bottom: BorderSide(
-                  color: Theme.of(context).colorScheme.outlineVariant,
-                  width: 0.6,
-                ),
-              ),
-            ),
-            child: Row(
-              children: [
-                const Icon(Icons.update),
-                const SizedBox(width: 8),
-                Text('Updates'.tl, style: ts.s18),
-                const Spacer(),
-                if (followUpdateCoordinator.isRunning)
-                  Text('Follow-up scan in progress'.tl, style: ts.s12),
-                IconButton(
-                  tooltip: 'Check Now'.tl,
-                  onPressed: startRefresh,
-                  icon: const Icon(Icons.refresh),
-                ),
-                if (comics.isNotEmpty)
-                  IconButton(
-                    tooltip: 'Mark all as read'.tl,
-                    icon: const Icon(Icons.clear_all),
-                    onPressed: markAllAsRead,
-                  ),
-              ],
-            ),
-          ),
-        ),
-        // The partial case (F2.7): results are shown, but not from every
-        // tracked source.  Without this line the list would simply be missing
-        // entries with nothing to explain why — the failure mode the old
-        // all-or-nothing gate avoided by showing nothing at all.
-        if (gate.hasPendingSources)
-          SliverToBoxAdapter(
-            child: Row(
-              children: [
-                Icon(
-                  Icons.info_outline,
-                  size: 14,
-                  color: Theme.of(context).colorScheme.outline,
-                ),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    '@c sources are not fully cached yet, so they are not followed'
-                        .tlParams({'c': gate.pendingSourceKeys.length}),
-                    style: ts.s12,
-                  ),
-                ),
-              ],
-            ).paddingHorizontal(16).paddingVertical(4),
-          ),
-        if (comics.isNotEmpty)
-          SliverToBoxAdapter(
-            child: Text(
-              'Updates are marked read when you start reading.'.tl,
-            ).paddingHorizontal(16).paddingVertical(4),
-          ),
-        if (_loading)
-          const SliverToBoxAdapter(
-            child: Padding(
-              padding: EdgeInsets.symmetric(vertical: 48),
-              child: Center(child: CircularProgressIndicator()),
-            ),
-          )
-        else if (_unreadable)
-          SliverToBoxAdapter(child: buildUnreadableNotice(context))
-        else if (comics.isNotEmpty)
-          SliverGridComics(
-            comics: comics,
-            // Entering from the follow-up list counts as read (Contract F4), so
-            // the entry clears the flag on the way through.  The navigation is
-            // still the default one: the clear is a side effect, not a
-            // replacement for opening the comic.
-            onTap: (comic, heroID) => _openFromList(comic, heroID),
-          )
-        else
-          SliverToBoxAdapter(child: buildEmptyState(context)),
-      ],
-    );
-  }
-
-  /// Opens one comic from the list, clearing its flag first (Contract F4).
-  ///
-  /// The clear is awaited before navigating so the list behind the pushed page
-  /// is already correct when the user comes back — no manual refresh, and no
-  /// window in which the comic is both open and still listed.
-  Future<void> _openFromList(Comic comic, int? heroID) async {
-    try {
-      await judgmentService.clearVisibleFlag(comic.sourceKey, comic.id);
-    } catch (_) {
-      // A storage problem must not stop the comic from opening; the flag will
-      // be cleared on the next entry instead.
-    }
-    if (!mounted) return;
-    // Refresh the list and the badge before the push, so returning shows the
-    // comic already gone.
-    await updateComics();
-    updateFollowUpdatesUI();
-    if (!mounted) return;
-    context.to(
-      () => ComicPage(
-        id: comic.id,
-        sourceKey: comic.sourceKey,
-        cover: comic.cover,
-        title: comic.title,
-        heroID: heroID,
-      ),
-    );
-  }
-
-  /// Unreadable is reported, never rendered as an empty list (Contract F3.4).
-  Widget buildUnreadableNotice(BuildContext context) => Container(
+  Widget _buildUnreadableNotice(
+    BuildContext context,
+    _FollowUpdatesTabView view,
+  ) => Container(
     margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
     padding: const EdgeInsets.all(12),
     decoration: BoxDecoration(
@@ -739,32 +1022,71 @@ class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
         const SizedBox(width: 8),
         Expanded(child: Text('Update state could not be read'.tl)),
         TextButton(
-          onPressed: () => unawaited(updateComics()),
+          onPressed: () => unawaited(
+            _reloadTab(view.tab, clearContent: view.comics.isEmpty),
+          ),
           child: Text('Retry'.tl),
         ),
       ],
     ),
   );
 
-  Widget buildEmptyState(BuildContext context) => SizedBox(
-    height: math.max(240, MediaQuery.sizeOf(context).height * 0.5),
-    child: Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            Icons.notifications_none,
-            size: 40,
-            color: Theme.of(context).colorScheme.outline,
+  Widget _buildEmptyState(BuildContext context, _FollowUpdatesTabView view) =>
+      SizedBox(
+        height: math.max(240, MediaQuery.sizeOf(context).height * 0.5),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                view.tab == FollowUpdatesTab.recent
+                    ? Icons.history
+                    : Icons.notifications_none,
+                size: 40,
+                color: Theme.of(context).colorScheme.outline,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                view.searchController.text.isNotEmpty
+                    ? 'No matching updates found'.tl
+                    : view.tab == FollowUpdatesTab.recent
+                    ? 'No recent updates found'.tl
+                    : 'No updates found'.tl,
+                style: ts.s16,
+              ),
+            ],
           ),
-          const SizedBox(height: 8),
-          Text('No updates found'.tl, style: ts.s16),
-        ],
+        ),
+      );
+
+  Future<void> _openFromList(Comic comic, int? heroID) async {
+    try {
+      await judgmentService.clearVisibleFlag(comic.sourceKey, comic.id);
+    } catch (_) {}
+    if (!mounted) return;
+    _view(FollowUpdatesTab.unread).needsRefresh = true;
+    if (_activeTab == FollowUpdatesTab.unread) {
+      await _reloadTab(FollowUpdatesTab.unread);
+    }
+    updateFollowUpdatesUI(refreshPage: false);
+    if (!mounted) return;
+    context.to(
+      () => ComicPage(
+        id: comic.id,
+        sourceKey: comic.sourceKey,
+        cover: comic.cover,
+        title: comic.title,
+        heroID: heroID,
       ),
-    ),
-  );
+    );
+  }
 
   void markAllAsRead() {
+    if (_activeTab != FollowUpdatesTab.unread ||
+        _activeView.searchController.text.isNotEmpty ||
+        _markingAllAsRead) {
+      return;
+    }
     showConfirmDialog(
       context: App.rootContext,
       title: 'Mark all as read'.tl,
@@ -776,20 +1098,48 @@ class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
   }
 
   Future<void> _markAllAsReadNow() async {
-    // Only what the user can actually see: marking a hidden source's entries
-    // read would silently discard flags they were never shown (F2.3, revised).
-    // One single-row clear per entry; never a whole-table rewrite (Contract E6).
-    for (final comic in List.of(visibleComics)) {
-      await judgmentService.clearVisibleFlag(comic.sourceKey, comic.id);
+    if (_markingAllAsRead) return;
+    setState(() => _markingAllAsRead = true);
+    final scopeGeneration = _scopeGeneration;
+    final scopeAtStart = _currentAllowedSourceKeys();
+    try {
+      final identities = await followUpdatesQueryService
+          .readVisibleUnreadIdentities(allowedSourceKeys: scopeAtStart);
+      if (!mounted ||
+          scopeGeneration != _scopeGeneration ||
+          !setEquals(scopeAtStart, _currentAllowedSourceKeys())) {
+        return;
+      }
+      for (final identity in identities) {
+        if (!mounted ||
+            scopeGeneration != _scopeGeneration ||
+            !setEquals(scopeAtStart, _currentAllowedSourceKeys())) {
+          return;
+        }
+        await judgmentService.clearVisibleFlag(
+          identity.sourceKey,
+          identity.comicId,
+        );
+      }
+      if (!mounted ||
+          scopeGeneration != _scopeGeneration ||
+          !setEquals(scopeAtStart, _currentAllowedSourceKeys())) {
+        return;
+      }
+      await _reloadTab(FollowUpdatesTab.unread);
+      updateFollowUpdatesUI(refreshPage: false);
+    } catch (_) {
+      if (mounted) context.showMessage(message: 'Failed'.tl);
+    } finally {
+      if (mounted) setState(() => _markingAllAsRead = false);
     }
-    await updateComics();
-    updateFollowUpdatesUI();
   }
 
   void enable() {
     appdata.settings['followUpdatesEnabled'] = true;
     appdata.saveData();
-    updateFollowUpdatesUI();
+    setState(() {});
+    updateFollowUpdatesUI(refreshPage: false);
     unawaited(followUpdateCoordinator.onProcessStart());
   }
 
@@ -798,20 +1148,25 @@ class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
     appdata.settings['followUpdatesEnabled'] = false;
     appdata.settings['followUpdatesFolder'] = null;
     appdata.saveData();
-    updateFollowUpdatesUI();
+    setState(() {
+      for (final view in _views.values) {
+        view
+          ..requestId = view.requestId + 1
+          ..comics.clear()
+          ..loading = false
+          ..loadError = false
+          ..hasLoaded = false
+          ..earliestAutoHotUntil = null;
+      }
+    });
+    updateFollowUpdatesUI(refreshPage: false);
   }
 
-  /// The manual entry point.
-  ///
-  /// Goes through the coordinator's single range rule, so it is a
-  /// schedule-respecting check and **not** a forced full scan (Contract F1).
   void startRefresh() {
     if (!_enabled) return;
     unawaited(followUpdateCoordinator.runRound(FollowUpdateTrigger.manual));
   }
 
-  /// Starts (or reports) the full favorite cache, which is what unblocks the
-  /// gate (Contract F2.5: cache first, then check).
   void startFullCache() {
     final coordinator = followUpdateCoordinator;
     if (coordinator.startFullFavoriteCache()) {
@@ -821,7 +1176,6 @@ class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
     }
   }
 
-  /// Reports the current round's progress rather than starting anything.
   void showBaselineProgress() {
     if (!_enabled) return;
     final progress = followUpdateCoordinator.currentProgress;
@@ -836,13 +1190,55 @@ class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
   Object? get key => 'FollowUpdatesPage';
 }
 
-/// The one wording for "how far along the round is".
-///
-/// Shared by the progress area and the app-bar entry so the two cannot
-/// disagree, and so that "0 / 0" cannot be shown for a round that has not
-/// finished finding out what it has to do: before target enumeration completes
-/// there is no denominator, only an unknown one, and reporting that as zero is
-/// what made a running check look stuck at zero (Contract F5.4).
+class _PinnedTabBarDelegate extends SliverPersistentHeaderDelegate {
+  const _PinnedTabBarDelegate({required this.controller, required this.tabs});
+
+  final TabController controller;
+  final List<Tab> tabs;
+
+  static const double _height = 48;
+
+  @override
+  double get minExtent => _height;
+
+  @override
+  double get maxExtent => _height;
+
+  @override
+  Widget build(
+    BuildContext context,
+    double shrinkOffset,
+    bool overlapsContent,
+  ) => Material(
+    color: Theme.of(context).colorScheme.surface,
+    child: TabBar(controller: controller, tabs: tabs),
+  );
+
+  @override
+  bool shouldRebuild(covariant _PinnedTabBarDelegate oldDelegate) => true;
+}
+
+class _FollowUpdatesTabView {
+  _FollowUpdatesTabView({required this.tab});
+
+  final FollowUpdatesTab tab;
+  final TextEditingController searchController = TextEditingController();
+  final ScrollController scrollController = ScrollController();
+  List<FavoriteItem> comics = [];
+  FollowUpdatesCursor? nextCursor;
+  Timer? searchDebounce;
+  int requestId = 0;
+  double scrollOffset = 0;
+  DateTime? earliestAutoHotUntil;
+  bool loading = true;
+  bool loadingMore = false;
+  bool loadError = false;
+  bool moreError = false;
+  bool hasLoaded = false;
+  bool needsRefresh = false;
+  bool loadMoreScheduled = false;
+}
+
 String followUpdateProgressLabel(FollowUpdateProgress progress) =>
     progress.discovered > 0 || progress.isComplete
     ? '@done/@total tasks'.tlParams({
@@ -851,10 +1247,8 @@ String followUpdateProgressLabel(FollowUpdateProgress progress) =>
       })
     : 'Finding what to check'.tl;
 
-void updateFollowUpdatesUI() {
+void updateFollowUpdatesUI({bool refreshPage = true}) {
   GlobalState.findOrNull<_FollowUpdatesWidgetState>()?.updateCount();
-  // `updateComics` is asynchronous now, so `unawaited` makes the intent
-  // explicit rather than leaving a discarded future for the linter to find.
   final page = GlobalState.findOrNull<FollowUpdatesPageState>();
-  if (page != null) unawaited(page.updateComics());
+  if (refreshPage && page != null) unawaited(page.updateComics());
 }

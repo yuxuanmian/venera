@@ -12,6 +12,8 @@ import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_updates_service.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/foundation/scan/models.dart';
+import 'package:venera/foundation/schedule/schedule_state.dart';
+import 'package:venera/foundation/schedule/sqlite_schedule_repository.dart';
 import 'package:venera/foundation/tracking/judgment.dart';
 import 'package:venera/foundation/tracking/judgment_state.dart';
 import 'package:venera/foundation/tracking/sqlite_judgment_repository.dart';
@@ -41,7 +43,9 @@ void main() {
     String key = sourceKey,
     String folderId = 'remote',
   }) async {
-    final db = sqlite3.open('${tempDir.path}${Platform.pathSeparator}cache.db');
+    final db = sqlite3.open(
+      '${tempDir.path}${Platform.pathSeparator}network_favorite_cache.db',
+    );
     try {
       db.execute(
         '''UPDATE favorite_folders SET full_cache_at = ?
@@ -205,7 +209,8 @@ void main() {
 
     final cache = NetworkFavoriteCacheManager();
     await cache.init(
-      databasePath: '${tempDir.path}${Platform.pathSeparator}cache.db',
+      databasePath:
+          '${tempDir.path}${Platform.pathSeparator}network_favorite_cache.db',
       migrateLegacy: false,
     );
     final source = buildSource();
@@ -229,6 +234,7 @@ void main() {
 
   tearDown(() async {
     await judgmentStateRepository.close();
+    await scheduleStateRepository.close();
     ComicSourceManager().remove(sourceKey);
     appdata.settings['enabledSources'] = previousEnabledSources;
     appdata.settings['favorites'] = previousFavorites;
@@ -252,8 +258,7 @@ void main() {
         home: const FollowUpdatesPage(),
       ),
     );
-    await tester.pump();
-    await tester.pump();
+    await tester.pumpAndSettle();
   }
 
   testWidgets('an incomplete cache shows the gate and no list at all', (
@@ -272,7 +277,7 @@ void main() {
     // historical notice (Contract F2.3).
     expect(find.text('Comic one'.tl), findsNothing);
     expect(find.text('No updates found'.tl), findsNothing);
-    expect(find.text('Updates'.tl), findsNothing);
+    expect(find.text('Unread updates'.tl), findsNothing);
   });
 
   testWidgets('a complete cache opens the gate and the flagged comic renders', (
@@ -283,7 +288,7 @@ void main() {
     await pumpPage(tester);
 
     expect(find.text('Favorites are not fully cached yet'.tl), findsNothing);
-    expect(find.text('Updates'.tl), findsOneWidget);
+    expect(find.text('Unread updates'.tl), findsOneWidget);
     expect(
       find.text('Comic one'.tl),
       findsOneWidget,
@@ -302,7 +307,7 @@ void main() {
     await markCacheComplete();
     await pumpPage(tester);
 
-    expect(find.text('Updates'.tl), findsOneWidget);
+    expect(find.text('Unread updates'.tl), findsOneWidget);
     expect(
       find.text('No updates found'.tl),
       findsOneWidget,
@@ -310,6 +315,78 @@ void main() {
     );
     expect(find.byType(CircularProgressIndicator), findsNothing);
   });
+
+  testWidgets(
+    'defaults to unread and recent keeps its own committed search and scroll state',
+    (tester) async {
+      await markCacheComplete();
+      await flagUpdate('one');
+      await scheduleStateRepository.ensureOpen();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await scheduleStateRepository.applyBatch([
+        ScheduleState(
+          sourceKey: sourceKey,
+          comicId: 'one',
+          autoHotUntilMs: now + const Duration(days: 1).inMilliseconds,
+        ),
+        ScheduleState(
+          sourceKey: sourceKey,
+          comicId: 'two',
+          autoHotUntilMs: now + const Duration(hours: 12).inMilliseconds,
+        ),
+      ]);
+      appdata.settings['language'] = 'zh-CN';
+
+      await pumpPage(tester);
+
+      Finder title(String value) => find.byWidgetPredicate(
+        (widget) => widget is Text && widget.data == value,
+      );
+      final unreadTab = find.descendant(
+        of: find.byType(TabBar),
+        matching: find.text('Unread updates'.tl),
+      );
+
+      expect(unreadTab, findsOneWidget);
+      expect(find.text('追更'), findsNWidgets(2));
+      expect(find.text('更新'), findsNothing);
+      expect(find.text('Recent updates'.tl), findsOneWidget);
+      expect(title('Comic one'.tl), findsOneWidget);
+      expect(
+        title('Comic two'.tl),
+        findsNothing,
+        reason: 'recent-only schedule rows do not enter the default unread tab',
+      );
+
+      await tester.tap(find.text('Recent updates'.tl));
+      await tester.pumpAndSettle();
+      expect(title('Comic one'.tl), findsOneWidget);
+      expect(title('Comic two'.tl), findsOneWidget);
+
+      final recentSearch = find.byKey(
+        const ValueKey('follow-up-search-recent'),
+      );
+      await tester.enterText(recentSearch, 'Comic two');
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pumpAndSettle();
+      expect(title('Comic two'.tl), findsOneWidget);
+      expect(title('Comic one'.tl), findsNothing);
+
+      await tester.tap(unreadTab);
+      await tester.pumpAndSettle();
+      final unreadSearch = tester.widget<TextField>(
+        find.byKey(const ValueKey('follow-up-search-unread')),
+      );
+      expect(unreadSearch.controller!.text, isEmpty);
+
+      await tester.tap(find.text('Recent updates'.tl));
+      await tester.pumpAndSettle();
+      final restoredRecentSearch = tester.widget<TextField>(recentSearch);
+      expect(restoredRecentSearch.controller!.text, 'Comic two');
+      expect(title('Comic two'.tl), findsOneWidget);
+      expect(title('Comic one'.tl), findsNothing);
+    },
+  );
 
   testWidgets('the progress entry never starts a round (F1.2)', (tester) async {
     await markCacheComplete();
@@ -321,7 +398,7 @@ void main() {
 
     // The entry reports; it does not trigger.  Nothing about the page's content
     // changes as a result of tapping it.
-    expect(find.text('Updates'.tl), findsOneWidget);
+    expect(find.text('Unread updates'.tl), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsNothing);
   });
 
@@ -342,8 +419,7 @@ void main() {
         ),
       ),
     );
-    await tester.pump();
-    await tester.pump();
+    await tester.pumpAndSettle();
 
     expect(
       find.text('@c updates'.tlParams({'c': 2})),
@@ -372,8 +448,7 @@ void main() {
         ),
       ),
     );
-    await tester.pump();
-    await tester.pump();
+    await tester.pumpAndSettle();
 
     expect(find.text('@c updates'.tlParams({'c': 0})), findsNothing);
     expect(find.text('Follow Updates'.tl), findsOneWidget);
@@ -396,8 +471,7 @@ void main() {
         ),
       ),
     );
-    await tester.pump();
-    await tester.pump();
+    await tester.pumpAndSettle();
 
     expect(
       find.text('@c updates'.tlParams({'c': 1})),
@@ -437,8 +511,7 @@ void main() {
         ),
       ),
     );
-    await tester.pump();
-    await tester.pump();
+    await tester.pumpAndSettle();
 
     expect(find.text('@c updates'.tlParams({'c': 1})), findsNothing);
     expect(find.text('Follow updates disabled'.tl), findsOneWidget);
@@ -547,8 +620,7 @@ void main() {
           ),
         ),
       );
-      await tester.pump();
-      await tester.pump();
+      await tester.pumpAndSettle();
     }
 
     testWidgets('an incompletely cached source is urged to cache', (
@@ -664,8 +736,7 @@ void main() {
           ),
         ),
       );
-      await tester.pump();
-      await tester.pump();
+      await tester.pumpAndSettle();
 
       expect(
         find.text('@c updates'.tlParams({'c': 1})),

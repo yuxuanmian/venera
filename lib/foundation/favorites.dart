@@ -7,6 +7,7 @@ import 'package:sqlite3/sqlite3.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_type.dart';
+import 'package:venera/foundation/favorite_search.dart';
 import 'package:venera/foundation/follow_updates.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';
@@ -946,7 +947,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         _db.execute(
           'UPDATE favorite_items SET search_text = ? WHERE rowid = ?',
           [
-            _buildSearchText(
+            buildFavoriteSearchText(
               row['comic_id'] as String,
               FavoriteItem._readComicJson(row),
             ),
@@ -1120,7 +1121,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     NetworkFavoriteFolderRef folder,
     String query,
   ) {
-    final tokens = _searchTokens(query);
+    final tokens = favoriteSearchTokens(query);
     if (tokens.isEmpty) return const [];
     final conditions = <String>[
       'source_key = ?',
@@ -1128,7 +1129,9 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       ...List.filled(tokens.length, "search_text LIKE ? ESCAPE '\\'"),
     ];
     final parameters = <Object>[folder.sourceKey, folder.folderId];
-    parameters.addAll(tokens.map((token) => '%${_escapeLikeToken(token)}%'));
+    parameters.addAll(
+      tokens.map((token) => '%${escapeFavoriteSearchLikeToken(token)}%'),
+    );
     final rows = _db.select('''SELECT * FROM favorite_items
          WHERE ${conditions.join(' AND ')}
          ORDER BY page_index, display_order''', parameters);
@@ -1139,35 +1142,6 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       if (seenIds.add(item.id)) comics.add(item);
     }
     return comics;
-  }
-
-  static List<String> _searchTokens(String query) => _normalizeSearchText(
-    query,
-  ).split(' ').where((token) => token.isNotEmpty).toList();
-
-  static String _escapeLikeToken(String value) => value
-      .replaceAll('\\', '\\\\')
-      .replaceAll('%', '\\%')
-      .replaceAll('_', '\\_');
-
-  static String _normalizeSearchText(String value) => value
-      .toLowerCase()
-      .replaceAll(RegExp(r'[\s\-_.\\/:|,，。；;、（）()\[\]{}]+'), ' ')
-      .trim();
-
-  static String _buildSearchText(String comicId, Map<String, dynamic> json) {
-    final tags = json['tags'];
-    final tagValues = tags is Iterable
-        ? tags.map((tag) => tag.toString())
-        : const Iterable<String>.empty();
-    return _normalizeSearchText(
-      [
-        comicId,
-        json['title']?.toString() ?? '',
-        json['subTitle']?.toString() ?? json['subtitle']?.toString() ?? '',
-        ...tagValues,
-      ].join(' '),
-    );
   }
 
   /// Makes sure [folder] has a row in `favorite_folders`.
@@ -1516,7 +1490,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
             jsonEncode(item.toCacheJson()),
             item.favoriteId,
             item.time,
-            _buildSearchText(item.id, item.toCacheJson()),
+            buildFavoriteSearchText(item.id, item.toCacheJson()),
           ],
         );
       }
@@ -2472,7 +2446,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
              AND comic_id = ?''',
         [
           jsonEncode(json),
-          _buildSearchText(comicId, json),
+          buildFavoriteSearchText(comicId, json),
           folder.sourceKey,
           folder.folderId,
           row['page_index'],

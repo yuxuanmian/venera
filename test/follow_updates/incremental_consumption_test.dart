@@ -8,6 +8,7 @@ import 'package:venera/foundation/scan/models.dart';
 import 'package:venera/foundation/scan/scan_result_repository.dart';
 import 'package:venera/foundation/scan/scan_service.dart';
 import 'package:venera/foundation/tracking/judgment.dart';
+import 'package:venera/foundation/tracking/judgment_event.dart';
 import 'package:venera/foundation/tracking/judgment_service.dart';
 
 import '../tracking/fakes.dart';
@@ -45,18 +46,20 @@ void main() {
     await schedule.close();
   });
 
-  FollowUpdateCoordinator buildCoordinator({int batchThreshold = 50}) =>
-      FollowUpdateCoordinator(
-        followUpdatesEnabledReader: () => true,
-        judgmentService: judgment,
-        scanService: scan,
-        scheduleService: schedule,
-        scanRepository: scanItems,
-        criterionSourceKeys: () => const {'src'},
-        completeSourceKeys: () => const {'src'},
-        clock: () => DateTime.utc(2026, 9, 10, 12),
-        batchThreshold: batchThreshold,
-      );
+  FollowUpdateCoordinator buildCoordinator({
+    int batchThreshold = 50,
+    ScheduleService? scheduleService,
+  }) => FollowUpdateCoordinator(
+    followUpdatesEnabledReader: () => true,
+    judgmentService: judgment,
+    scanService: scan,
+    scheduleService: scheduleService ?? schedule,
+    scanRepository: scanItems,
+    criterionSourceKeys: () => const {'src'},
+    completeSourceKeys: () => const {'src'},
+    clock: () => DateTime.utc(2026, 9, 10, 12),
+    batchThreshold: batchThreshold,
+  );
 
   /// Lands one observation **through the broadcast**, as acquisition does.
   Future<void> persistOne(String comicId) async {
@@ -214,6 +217,100 @@ void main() {
     );
   });
 
+  group('schedule batches are ordered and notify after persistence', () {
+    test('a queued batch waits and each commit publishes a revision', () async {
+      final firstCommit = Completer<void>();
+      var started = 0;
+      var committed = 0;
+      final revisions = <int>[];
+      final controlled = _ControlledScheduleService((event) async {
+        started++;
+        if (started == 1) await firstCommit.future;
+        committed++;
+        return event.rows.length;
+      });
+      final coordinator = buildCoordinator(scheduleService: controlled)
+        ..attachScheduleService(controlled);
+      addTearDown(() async {
+        await coordinator.dispose();
+        await controlled.close();
+      });
+      coordinator.scheduleRevision.addListener(() {
+        expect(coordinator.scheduleRevision.value, committed);
+        revisions.add(committed);
+      });
+
+      await persistOne('a');
+      await judgment.run();
+      await pumpEventQueue();
+      await persistOne('b');
+      await judgment.run();
+      await pumpEventQueue();
+
+      expect(started, 1, reason: 'the second batch must wait for persistence');
+      expect(coordinator.scheduleRevision.value, 0);
+      firstCommit.complete();
+      await pumpEventQueue();
+      expect(started, 2);
+      expect(revisions, [1, 2]);
+    });
+
+    test(
+      'a failed batch leaves the next batch and notification usable',
+      () async {
+        var started = 0;
+        final controlled = _ControlledScheduleService((event) async {
+          if (++started == 1) throw StateError('persistence failed');
+          return event.rows.length;
+        });
+        final coordinator = buildCoordinator(scheduleService: controlled)
+          ..attachScheduleService(controlled);
+        addTearDown(() async {
+          await coordinator.dispose();
+          await controlled.close();
+        });
+
+        await persistOne('a');
+        await judgment.run();
+        await pumpEventQueue();
+        expect(coordinator.scheduleRevision.value, 0);
+
+        await persistOne('b');
+        await judgment.run();
+        await pumpEventQueue();
+        expect(started, 2);
+        expect(coordinator.scheduleRevision.value, 1);
+      },
+    );
+
+    test(
+      'an in-flight commit does not notify a disposed coordinator',
+      () async {
+        final commit = Completer<void>();
+        var committed = false;
+        final controlled = _ControlledScheduleService((event) async {
+          await commit.future;
+          committed = true;
+          return event.rows.length;
+        });
+        final coordinator = buildCoordinator(scheduleService: controlled)
+          ..attachScheduleService(controlled);
+        addTearDown(controlled.close);
+        var notifications = 0;
+        coordinator.scheduleRevision.addListener(() => notifications++);
+
+        await persistOne('a');
+        await judgment.run();
+        await pumpEventQueue();
+        await coordinator.dispose();
+        commit.complete();
+        await pumpEventQueue();
+        expect(committed, isTrue);
+        expect(notifications, 0);
+      },
+    );
+  });
+
   group('an acquisition failure advances nothing (F1.3)', () {
     test('it produces no judgment row and no schedule row', () async {
       // The acquisition side stores failures in the same per-comic store as
@@ -270,6 +367,19 @@ void main() {
       },
     );
   });
+}
+
+class _ControlledScheduleService extends ScheduleService {
+  _ControlledScheduleService(this.recompute)
+    : super(
+        repository: SqliteScheduleRepository(databasePath: ':memory:'),
+        events: const Stream<JudgmentBatchEvent>.empty(),
+      );
+
+  final Future<int> Function(JudgmentBatchEvent) recompute;
+
+  @override
+  Future<int> recomputeFromEvent(JudgmentBatchEvent event) => recompute(event);
 }
 
 /// An item store whose broadcast the test drives directly.
