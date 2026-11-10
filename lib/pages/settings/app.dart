@@ -1,7 +1,9 @@
 part of 'settings_page.dart';
 
 class AppSettings extends StatefulWidget {
-  const AppSettings({super.key});
+  const AppSettings({super.key, this.controller});
+
+  final CatalogController? controller;
 
   @override
   State<AppSettings> createState() => _AppSettingsState();
@@ -139,11 +141,18 @@ class _AppSettingsState extends State<AppSettings> {
           actionTitle: 'Set'.tl,
         ).toSliver(),
         _CallbackSetting(
-          title: "Venera Server".tl,
-          subtitle: _serverSummary(),
+          title: "配置仓库".tl,
+          subtitle: _repositorySummary(),
           actionTitle: "Set".tl,
           callback: () async {
-            await context.to(() => const ServerSettings());
+            final controller = widget.controller;
+            if (controller == null) {
+              context.showMessage(message: "配置服务尚未准备好".tl);
+              return;
+            }
+            await context.to(
+              () => CatalogRepositorySettings(controller: controller),
+            );
             if (mounted) setState(() {});
           },
         ).toSliver(),
@@ -196,10 +205,15 @@ class _AppSettingsState extends State<AppSettings> {
     );
   }
 
-  String _serverSummary() {
-    final value = appdata.settings['serverUrl'];
-    if (value is String && value.trim().isNotEmpty) return value.trim();
-    return "Not configured".tl;
+  String _repositorySummary() {
+    final controller = widget.controller;
+    if (controller == null) return "配置服务尚未准备好".tl;
+    try {
+      final source = controller.repositorySource;
+      return '${source.repositoryUrl}\n${source.branch}';
+    } on CatalogRepositorySourceException {
+      return "保存的配置仓库来源无效".tl;
+    }
   }
 }
 

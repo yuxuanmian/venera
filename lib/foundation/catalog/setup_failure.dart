@@ -1,14 +1,27 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'http_client.dart';
+import 'models.dart';
 
 enum CatalogSetupFailureKind {
-  invalidServerAddress,
   connectionFailed,
-  incompatibleServer,
-  catalogNotActivated,
   contentPreparationFailed,
+  invalidRepositorySource,
+  repositoryHeadUnavailable,
+  invalidRepositoryHead,
+  storageUnavailable,
+  operationInProgress,
+  cancelled,
 }
 
-enum CatalogSetupStage { authority, snapshot, runtime, commit }
+enum CatalogSetupStage {
+  repositoryHead,
+  indexValidation,
+  snapshot,
+  runtime,
+  commit,
+}
 
 class CatalogSetupFailure {
   const CatalogSetupFailure(this.kind, {this.diagnostic});
@@ -19,21 +32,50 @@ class CatalogSetupFailure {
   final String? diagnostic;
 
   static CatalogSetupFailure? fromError(Object error, CatalogSetupStage stage) {
-    final code = error is CatalogHttpException ? error.code : null;
+    final code = switch (error) {
+      CatalogHttpException() => error.code,
+      CatalogRepositorySourceException() => error.code,
+      _ => null,
+    };
     if (code == 'cancelled') return null;
-    final kind = stage != CatalogSetupStage.authority
-        ? CatalogSetupFailureKind.contentPreparationFailed
-        : switch (code) {
-            'invalid_server_url' =>
-              CatalogSetupFailureKind.invalidServerAddress,
-            'timeout' ||
-            'connection_failed' => CatalogSetupFailureKind.connectionFailed,
-            'catalog_not_activated' =>
-              CatalogSetupFailureKind.catalogNotActivated,
-            'catalog_state_invalid' =>
-              CatalogSetupFailureKind.contentPreparationFailed,
-            _ => CatalogSetupFailureKind.incompatibleServer,
-          };
-    return CatalogSetupFailure(kind, diagnostic: '${stage.name}: $error');
+    if (stage == CatalogSetupStage.repositoryHead &&
+        (error is SocketException ||
+            error is HandshakeException ||
+            error is HttpException ||
+            error is TimeoutException)) {
+      return CatalogSetupFailure(
+        CatalogSetupFailureKind.connectionFailed,
+        diagnostic: '${stage.name}:${error.runtimeType}',
+      );
+    }
+    final kind = switch (stage) {
+      CatalogSetupStage.repositoryHead => switch (code) {
+        'invalid_repository_url' ||
+        'invalid_branch' => CatalogSetupFailureKind.invalidRepositorySource,
+        'timeout' ||
+        'connection_failed' => CatalogSetupFailureKind.connectionFailed,
+        'head_query_failed' =>
+          CatalogSetupFailureKind.repositoryHeadUnavailable,
+        'invalid_head_response' ||
+        'response_too_large' => CatalogSetupFailureKind.invalidRepositoryHead,
+        _ => CatalogSetupFailureKind.repositoryHeadUnavailable,
+      },
+      CatalogSetupStage.indexValidation => switch (code) {
+        'timeout' ||
+        'connection_failed' => CatalogSetupFailureKind.connectionFailed,
+        'invalid_pointer' => CatalogSetupFailureKind.invalidRepositorySource,
+        _ => CatalogSetupFailureKind.contentPreparationFailed,
+      },
+      CatalogSetupStage.commit =>
+        error is FileSystemException
+            ? CatalogSetupFailureKind.storageUnavailable
+            : CatalogSetupFailureKind.contentPreparationFailed,
+      CatalogSetupStage.snapshot || CatalogSetupStage.runtime =>
+        CatalogSetupFailureKind.contentPreparationFailed,
+    };
+    return CatalogSetupFailure(
+      kind,
+      diagnostic: '${stage.name}:${code ?? error.runtimeType}',
+    );
   }
 }

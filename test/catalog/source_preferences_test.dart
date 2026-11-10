@@ -21,7 +21,7 @@ void main() {
     );
   });
 
-  test('authority removal is the only transition that prunes old keys', () {
+  test('catalog removal is the only transition that prunes old keys', () {
     final old = index;
     final next = CatalogIndex.fromJson([
       {'name': 'K', 'key': 'Komiic', 'fileName': 'k.js', 'version': '1'},
@@ -31,7 +31,7 @@ void main() {
         enabled: ['Komiic', 'example_source'],
         oldIndex: old,
         newIndex: next,
-        isAuthorityTransition: true,
+        isCatalogTransition: true,
       ),
       ['Komiic'],
     );
@@ -40,7 +40,7 @@ void main() {
         enabled: ['Komiic', 'example_source'],
         oldIndex: old,
         newIndex: next,
-        isAuthorityTransition: false,
+        isCatalogTransition: false,
       ),
       ['Komiic', 'example_source'],
     );

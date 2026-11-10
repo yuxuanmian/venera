@@ -82,7 +82,15 @@ class Appdata with Init {
   /// the same stale value and losing one another's changes.
   Future<List<String>?> updateEnabledSources(
     List<String>? Function(Object? current) mutation,
-  ) async {
+  ) => updateEnabledSourcesAndSettings(mutation);
+
+  /// Applies a source-selection delta and optional page-default patches in one
+  /// appdata write. Both mutations run while holding the shared write lock and
+  /// against the latest on-disk settings.
+  Future<List<String>?> updateEnabledSourcesAndSettings(
+    List<String>? Function(Object? current) mutation, {
+    void Function(Map<String, dynamic> settings)? patchSettings,
+  }) async {
     if (loadError != null) {
       throw StateError('appdata is in recovery: $loadError');
     }
@@ -97,6 +105,7 @@ class Appdata with Init {
       nextSettings['enabledSources'] = result == null
           ? null
           : List<String>.from(result!);
+      patchSettings?.call(nextSettings);
       next['settings'] = nextSettings;
       await _writeDocument(next);
       _installDocumentSilently(next);
@@ -111,6 +120,32 @@ class Appdata with Init {
     return result;
   }
 
+  /// Persists the device-only repository source without mutating live settings
+  /// until the atomic replacement succeeds.
+  Future<void> persistRepositorySource(CatalogRepositorySource source) async {
+    if (loadError != null) {
+      throw StateError('appdata is in recovery: $loadError');
+    }
+    await _withWriteLock(() async {
+      final document = await _readCurrentDocument();
+      final next = Map<String, dynamic>.from(_deepCopy(document) as Map);
+      final nextSettings = Map<String, dynamic>.from(
+        next['settings'] as Map? ?? const {},
+      );
+      nextSettings['catalogRepositoryUrl'] = source.repositoryUrl;
+      nextSettings['catalogRepositoryBranch'] = source.branch;
+      next['settings'] = nextSettings;
+      await _writeDocument(next);
+      _installDocumentSilently(next);
+      try {
+        await _writeSyncProjection(next);
+      } catch (error, stack) {
+        Log.error('Appdata', 'Failed to update sync projection: $error', stack);
+      }
+    });
+    notifyMemoryChanged();
+  }
+
   /// Reads the device-only Catalog pointer without mutating or deleting the
   /// user document. Missing/null means a new installation; malformed means
   /// Recovery and is intentionally surfaced to the controller.
@@ -123,8 +158,9 @@ class Appdata with Init {
   Future<PreparedAppDataCommit> prepareCatalogCommit({
     required AppCatalogState nextState,
     required List<String>? nextEnabled,
-    String? nextServerUrl,
+    CatalogRepositorySource? nextRepositorySource,
     CatalogAttempt? attempt,
+    List<String>? Function(Object? current)? mutateEnabled,
     void Function(Map<String, dynamic> settings)? migrateSourcePages,
   }) => _prepareCatalogDocument((next) {
     final settings = Map<String, dynamic>.from(
@@ -137,13 +173,21 @@ class Appdata with Init {
     settings.addAll(
       Map<String, dynamic>.from(_deepCopy(this.settings._data) as Map),
     );
-    if (nextEnabled == null) {
+    if (mutateEnabled != null) {
+      final enabled = mutateEnabled(settings['enabledSources']);
+      settings['enabledSources'] = enabled == null
+          ? null
+          : (List<String>.from(enabled)..sort());
+    } else if (nextEnabled == null) {
       settings['enabledSources'] = null;
     } else {
       final enabled = List<String>.from(nextEnabled)..sort();
       settings['enabledSources'] = enabled;
     }
-    if (nextServerUrl != null) settings['serverUrl'] = nextServerUrl;
+    if (nextRepositorySource != null) {
+      settings['catalogRepositoryUrl'] = nextRepositorySource.repositoryUrl;
+      settings['catalogRepositoryBranch'] = nextRepositorySource.branch;
+    }
     migrateSourcePages?.call(settings);
     next['settings'] = settings;
     next['catalogRuntime'] = nextState.toJson();
@@ -418,6 +462,8 @@ class Appdata with Init {
     "webdav",
     "deviceId",
     "serverUrl",
+    "catalogRepositoryUrl",
+    "catalogRepositoryBranch",
     "developerMode",
     "cloudTrackingEnabled",
     "cloudTrackingServerUrl",
@@ -677,6 +723,8 @@ class Settings with ChangeNotifier {
     'cloudTrackingServerUrl': '',
     'cloudTrackingAccessToken': '',
     'serverUrl': '',
+    'catalogRepositoryUrl': CatalogRepositorySource.defaultRepositoryUrl,
+    'catalogRepositoryBranch': CatalogRepositorySource.defaultBranch,
     'enabledSources': null,
   };
 

@@ -26,14 +26,14 @@ class _Transport implements CatalogTransport {
     required int maxBytes,
     CatalogCancellationToken? cancellation,
   }) async {
-    if (uri.toString() == 'https://server.example/api/catalog/authority') {
+    if (uri.toString() ==
+        'https://api.github.com/repos/yuxuanmian/venera-configs/git/ref/heads/yxm') {
       return CatalogBytesResponse(
         200,
         utf8.encode(
           jsonEncode({
-            'catalogId': pointer.catalogId,
-            'activeRevision': pointer.revision,
-            'indexUrl': pointer.indexUrl,
+            'ref': 'refs/heads/yxm',
+            'object': {'type': 'commit', 'sha': pointer.revision},
           }),
         ),
       );
@@ -52,8 +52,9 @@ class _ThrowingAppdata extends Appdata {
   Future<PreparedAppDataCommit> prepareCatalogCommit({
     required AppCatalogState nextState,
     required List<String>? nextEnabled,
-    String? nextServerUrl,
+    CatalogRepositorySource? nextRepositorySource,
     CatalogAttempt? attempt,
+    List<String>? Function(Object? current)? mutateEnabled,
     void Function(Map<String, dynamic> settings)? migrateSourcePages,
   }) async {
     throw failure;
@@ -70,25 +71,28 @@ class _ObservingAppdata extends Appdata {
   Future<PreparedAppDataCommit> prepareCatalogCommit({
     required AppCatalogState nextState,
     required List<String>? nextEnabled,
-    String? nextServerUrl,
+    CatalogRepositorySource? nextRepositorySource,
     CatalogAttempt? attempt,
+    List<String>? Function(Object? current)? mutateEnabled,
     void Function(Map<String, dynamic> settings)? migrateSourcePages,
   }) {
     if (!commitEntered.isCompleted) commitEntered.complete();
     return super.prepareCatalogCommit(
       nextState: nextState,
       nextEnabled: nextEnabled,
-      nextServerUrl: nextServerUrl,
+      nextRepositorySource: nextRepositorySource,
       attempt: attempt,
+      mutateEnabled: mutateEnabled,
       migrateSourcePages: migrateSourcePages,
     );
   }
 }
 
 CatalogPointer _pointer(String revision) => CatalogPointer(
-  catalogId: 'owner/repo',
+  catalogId: 'yuxuanmian/venera-configs',
   revision: revision,
-  indexUrl: 'https://raw.githubusercontent.com/owner/repo/$revision/index.json',
+  indexUrl:
+      'https://raw.githubusercontent.com/yuxuanmian/venera-configs/$revision/index.json',
 );
 
 Future<void> _writeSnapshot(
@@ -190,8 +194,12 @@ void main() {
         if (write == 2) repairReplaced.complete();
       };
       final preferences = SourcePreferences(initial: ['demo']);
+      final store = CatalogStore(
+        Directory(p.join(fixture.root.path, 'catalog')),
+      );
+      await store.snapshotDirectory(fixture.active).delete(recursive: true);
       final controller = CatalogController(
-        store: CatalogStore(Directory(p.join(fixture.root.path, 'catalog'))),
+        store: store,
         httpClient: CatalogHttpClient(transport: _Transport(fixture.lkg)),
         runtimeLoader: CatalogRuntimeLoader(
           factory: (entry, source, context) {
@@ -233,8 +241,8 @@ void main() {
           fixture.lkg.identity,
         );
         expect(target.readCatalogState()!.lkg, isNull);
-        expect(contexts, hasLength(1));
-        expect(contexts.single.phase, ManagedSourcePhase.published);
+        expect(contexts, hasLength(2));
+        expect(contexts.last.phase, ManagedSourcePhase.published);
         await target.saveData(false);
         final document = jsonDecode(
           await File(p.join(fixture.root.path, 'appdata.json')).readAsString(),
@@ -251,7 +259,7 @@ void main() {
     });
   }
 
-  test('authority commit still prunes only observed removed keys', () async {
+  test('repository commit still prunes only observed removed keys', () async {
     final target = Appdata.createForTesting(() async => Directory.systemTemp);
     final fixture = await _prepareFixture(
       target,
@@ -290,7 +298,7 @@ void main() {
   });
 
   test(
-    'prepared LKG survives an appdata replace failure without reparsing',
+    'failed candidate falls back to healthy active without publishing LKG',
     () async {
       final target = Appdata.createForTesting(() async => Directory.systemTemp);
       final fixture = await _prepareFixture(target);
@@ -326,9 +334,12 @@ void main() {
 
       expect(result, isA<CatalogReady>());
       expect((result as CatalogReady).usedLocalFallback, isTrue);
-      expect(controller.sessionState?.active?.identity, fixture.lkg.identity);
-      expect(controller.sessionState?.lkg, isNull);
-      expect(factoryCalls, 1);
+      expect(
+        controller.sessionState?.active?.identity,
+        fixture.active.identity,
+      );
+      expect(controller.sessionState?.lkg?.identity, fixture.lkg.identity);
+      expect(factoryCalls, 2);
       expect(
         await File(p.join(fixture.root.path, 'appdata.json')).readAsBytes(),
         appdataBytes,
@@ -337,38 +348,45 @@ void main() {
     },
   );
 
-  test('prepared LKG survives prepareCatalogCommit failure', () async {
-    final target = _ThrowingAppdata(
-      const FileSystemException('prepare failed'),
-    );
-    final fixture = await _prepareFixture(target);
-    addTearDown(() => _removeEventually(fixture.root));
-    var factoryCalls = 0;
-    final loader = CatalogRuntimeLoader(
-      factory: (entry, source, context) {
-        factoryCalls++;
-        return source;
-      },
-    );
-    final controller = CatalogController(
-      store: CatalogStore(Directory(p.join(fixture.root.path, 'catalog'))),
-      httpClient: CatalogHttpClient(transport: _Transport(fixture.lkg)),
-      runtimeLoader: loader,
-      preferences: SourcePreferences(initial: ['demo']),
-      appdata: target,
-      legacyRoot: Directory(p.join(fixture.root.path, 'comic_source')),
-    );
-    addTearDown(controller.preferences.dispose);
+  test(
+    'failed HEAD equal to LKG returns to active after commit failure',
+    () async {
+      final target = _ThrowingAppdata(
+        const FileSystemException('prepare failed'),
+      );
+      final fixture = await _prepareFixture(target);
+      addTearDown(() => _removeEventually(fixture.root));
+      var factoryCalls = 0;
+      final loader = CatalogRuntimeLoader(
+        factory: (entry, source, context) {
+          factoryCalls++;
+          return source;
+        },
+      );
+      final controller = CatalogController(
+        store: CatalogStore(Directory(p.join(fixture.root.path, 'catalog'))),
+        httpClient: CatalogHttpClient(transport: _Transport(fixture.lkg)),
+        runtimeLoader: loader,
+        preferences: SourcePreferences(initial: ['demo']),
+        appdata: target,
+        legacyRoot: Directory(p.join(fixture.root.path, 'comic_source')),
+      );
+      addTearDown(controller.preferences.dispose);
 
-    final result = await controller.boot();
-    expect(result, isA<CatalogReady>());
-    expect((result as CatalogReady).usedLocalFallback, isTrue);
-    expect(controller.sessionState?.active?.identity, fixture.lkg.identity);
-    expect(factoryCalls, 1);
-  });
+      final result = await controller.boot();
+      expect(result, isA<CatalogReady>());
+      expect((result as CatalogReady).usedLocalFallback, isTrue);
+      expect(
+        controller.sessionState?.active?.identity,
+        fixture.active.identity,
+      );
+      expect(controller.sessionState?.lkg?.identity, fixture.lkg.identity);
+      expect(factoryCalls, 2);
+    },
+  );
 
   test(
-    'cancelling while commit preparation waits publishes the same LKG and discards late handle',
+    'cancelling candidate commit returns to active and discards late handle',
     () async {
       final target = _ObservingAppdata();
       final fixture = await _prepareFixture(target);
@@ -396,7 +414,10 @@ void main() {
       final result = await boot;
       expect(result, isA<CatalogReady>());
       expect((result as CatalogReady).usedLocalFallback, isTrue);
-      expect(controller.sessionState?.active?.identity, fixture.lkg.identity);
+      expect(
+        controller.sessionState?.active?.identity,
+        fixture.active.identity,
+      );
       await blocker.discard();
       await Future<void>.delayed(const Duration(milliseconds: 50));
       expect(
@@ -408,7 +429,7 @@ void main() {
     },
   );
 
-  test('commit preparation timeout reuses the already prepared LKG', () async {
+  test('commit preparation timeout returns to healthy active', () async {
     final target = _ObservingAppdata();
     final fixture = await _prepareFixture(target);
     addTearDown(() => _removeEventually(fixture.root));
@@ -431,7 +452,7 @@ void main() {
     final result = await boot;
     expect(result, isA<CatalogReady>());
     expect((result as CatalogReady).usedLocalFallback, isTrue);
-    expect(controller.sessionState?.active?.identity, fixture.lkg.identity);
+    expect(controller.sessionState?.active?.identity, fixture.active.identity);
     await blocker.discard();
   });
 }

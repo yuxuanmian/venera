@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:venera/components/window_frame.dart';
 import 'package:venera/foundation/appdata.dart';
+import 'package:venera/init.dart';
 import 'package:venera/pages/categories_page.dart';
 import 'package:venera/pages/search_page.dart';
 import 'package:venera/pages/settings/settings_page.dart';
@@ -107,7 +108,10 @@ class _MainPageState extends State<MainPage> {
           icon: Icons.settings,
           label: "Settings".tl,
           onTap: () {
-            to(() => const SettingsPage(), preventDuplicate: true);
+            to(
+              () => SettingsPage(controller: catalogController),
+              preventDuplicate: true,
+            );
           },
         ),
       ],

@@ -6,6 +6,7 @@ import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/catalog/controller.dart';
 import 'package:venera/foundation/catalog/http_client.dart';
+import 'package:venera/foundation/catalog/models.dart';
 import 'package:venera/foundation/catalog/runtime_loader.dart';
 import 'package:venera/foundation/catalog/source_preferences.dart';
 import 'package:venera/foundation/catalog/store.dart';
@@ -22,12 +23,10 @@ class _Transport implements CatalogTransport {
     CatalogCancellationToken? cancellation,
   }) async {
     final Object body;
-    if (uri.path.endsWith('/authority')) {
+    if (uri.path == '/repos/yuxuanmian/venera-configs/git/ref/heads/yxm') {
       body = {
-        'catalogId': 'owner/repo',
-        'activeRevision': revision,
-        'indexUrl':
-            'https://raw.githubusercontent.com/owner/repo/$revision/index.json',
+        'ref': 'refs/heads/yxm',
+        'object': {'type': 'commit', 'sha': revision},
       };
     } else if (uri.path.endsWith('/index.json')) {
       body = [
@@ -158,7 +157,9 @@ void main() {
         if (oldPath != null) App.dataPath = oldPath;
         await root.delete(recursive: true);
       });
-      final result = await controller.initialize('https://server.example');
+      final result = await controller.initializeRepository(
+        CatalogRepositorySource.defaults,
+      );
       if (scenario == 'failed commit') {
         expect(result, isA<CatalogNeedsRecovery>());
         expect(target.settings['favorites'], ['unrelated']);
@@ -204,16 +205,18 @@ void main() {
 
       target.settings['favorites'] = <String>['unrelated'];
       await target.saveData();
-      transport.revision = 'b' * 40;
-      expect(await controller.boot(), isA<CatalogReady>());
+      expect(
+        await controller.recoverRepository(CatalogRepositorySource.defaults),
+        same(result),
+      );
       expect(target.readCatalogState()!.active!.revision, transport.revision);
       expect(preferences.enabledSources, ['demo', 'manwa']);
       expect(target.settings['favorites'], ['unrelated']);
       // Even leftover legacy files must not make recovery repeat migration.
       await File('${legacy.path}/manwa.js').writeAsString('source');
       expect(
-        await controller.recover('https://server.example'),
-        isA<CatalogReady>(),
+        await controller.recoverRepository(CatalogRepositorySource.defaults),
+        same(result),
       );
       expect(target.settings['favorites'], ['unrelated']);
     });

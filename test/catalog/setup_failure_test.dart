@@ -18,8 +18,7 @@ import 'package:venera/pages/catalog_bootstrap_page.dart';
 import 'package:venera/utils/translations.dart';
 
 class _Transport implements CatalogTransport {
-  _Transport(this.authority, {this.snapshotError});
-  final Object authority;
+  _Transport({this.snapshotError});
   final Object? snapshotError;
   @override
   Future<CatalogBytesResponse> getBytes(
@@ -28,11 +27,12 @@ class _Transport implements CatalogTransport {
     required int maxBytes,
     CatalogCancellationToken? cancellation,
   }) async {
-    if (uri.path.endsWith('/authority')) {
-      if (authority is CatalogBytesResponse) {
-        return authority as CatalogBytesResponse;
-      }
-      throw authority;
+    if (uri.toString() ==
+        'https://api.github.com/repos/yuxuanmian/venera-configs/git/ref/heads/yxm') {
+      return _body(200, {
+        'ref': 'refs/heads/yxm',
+        'object': {'type': 'commit', 'sha': 'a' * 40},
+      });
     }
     if (snapshotError != null) throw snapshotError!;
     return CatalogBytesResponse(
@@ -46,15 +46,22 @@ class _Transport implements CatalogTransport {
   }
 }
 
+class _AlwaysThrowsTransport implements CatalogTransport {
+  const _AlwaysThrowsTransport(this.error);
+
+  final Object error;
+
+  @override
+  Future<CatalogBytesResponse> getBytes(
+    Uri uri, {
+    required Duration timeout,
+    required int maxBytes,
+    CatalogCancellationToken? cancellation,
+  }) async => throw error;
+}
+
 CatalogBytesResponse _body(int status, Object body) =>
     CatalogBytesResponse(status, utf8.encode(jsonEncode(body)));
-
-CatalogBytesResponse get _authority => _body(200, {
-  'catalogId': 'owner/repo',
-  'activeRevision': 'a' * 40,
-  'indexUrl':
-      'https://raw.githubusercontent.com/owner/repo/${'a' * 40}/index.json',
-});
 
 class _ThrowingDio extends AppDio {
   _ThrowingDio(this.type);
@@ -78,13 +85,19 @@ class _ResultController extends CatalogController {
     : super(
         store: CatalogStore(Directory.systemTemp),
         appdata: target,
-        httpClient: CatalogHttpClient(transport: _Transport(_authority)),
+        httpClient: CatalogHttpClient(transport: _Transport()),
       );
   final CatalogStartupResult result;
   @override
   Future<CatalogStartupResult> boot() async => result;
   @override
-  Future<CatalogStartupResult> initialize(String serverUrl) async => result;
+  Future<CatalogStartupResult> initializeRepository(
+    CatalogRepositorySource source,
+  ) async => result;
+  @override
+  Future<CatalogStartupResult> recoverRepository(
+    CatalogRepositorySource source,
+  ) async => result;
 }
 
 class _ReadOnlyRepairAppdata extends Appdata {
@@ -103,164 +116,95 @@ void main() {
   setUpAll(AppTranslation.init);
 
   for (final useLkg in [false, true]) {
-    test('offline authority still boots ${useLkg ? 'LKG' : 'active'}', () async {
-      final root = await Directory.systemTemp.createTemp('setup-fallback-');
-      final oldPath = App.isInitialized ? App.dataPath : null;
-      App.dataPath = root.path;
-      final target = _ReadOnlyRepairAppdata(root);
-      final store = CatalogStore(Directory('${root.path}/catalog'));
-      final online = CatalogHttpClient(transport: _Transport(_authority));
-      final pointer = await online.getAuthority('https://server.example');
-      final candidate = await online.downloadSnapshot(
-        pointer,
-        store: store,
-        attempt: CatalogAttempt(
-          id: 'seed',
-          deadline: DateTime.now().add(const Duration(seconds: 5)),
-        ),
-      );
-      await store.promoteCandidate(candidate);
-      target.catalogRuntime = AppCatalogState(
-        active: useLkg
-            ? CatalogPointer(
-                catalogId: 'owner/repo',
-                revision: 'b' * 40,
-                indexUrl:
-                    'https://raw.githubusercontent.com/owner/repo/${'b' * 40}/index.json',
-              )
-            : pointer,
-        lkg: useLkg ? pointer : null,
-      ).toJson();
-      target.settings['serverUrl'] = 'https://server.example';
-      target.settings['enabledSources'] = <String>['demo'];
-      final controller = CatalogController(
-        store: store,
-        appdata: target,
-        httpClient: CatalogHttpClient(
-          transport: _Transport(const SocketException('offline')),
-        ),
-      );
-      addTearDown(() async {
-        controller.dispose();
-        if (oldPath != null) App.dataPath = oldPath;
-        await root.delete(recursive: true);
-      });
-      final result = await controller.boot();
-      expect(result, isA<CatalogReady>());
-      expect((result as CatalogReady).usedLocalFallback, isTrue);
-      expect(controller.sessionState?.active, pointer);
-      expect(target.settings['enabledSources'], ['demo']);
-    });
+    test(
+      'offline repository check still boots ${useLkg ? 'LKG' : 'active'}',
+      () async {
+        final root = await Directory.systemTemp.createTemp('setup-fallback-');
+        final oldPath = App.isInitialized ? App.dataPath : null;
+        App.dataPath = root.path;
+        final target = _ReadOnlyRepairAppdata(root);
+        final store = CatalogStore(Directory('${root.path}/catalog'));
+        final pointer = CatalogRepositorySource.defaults.pointerForRevision(
+          'a' * 40,
+        );
+        final online = CatalogHttpClient(transport: _Transport());
+        final candidate = await online.downloadSnapshot(
+          pointer,
+          store: store,
+          attempt: CatalogAttempt(
+            id: 'seed',
+            deadline: DateTime.now().add(const Duration(seconds: 5)),
+          ),
+        );
+        await store.promoteCandidate(candidate);
+        target.catalogRuntime = AppCatalogState(
+          active: useLkg
+              ? CatalogPointer(
+                  catalogId: 'owner/repo',
+                  revision: 'b' * 40,
+                  indexUrl:
+                      'https://raw.githubusercontent.com/owner/repo/${'b' * 40}/index.json',
+                )
+              : pointer,
+          lkg: useLkg ? pointer : null,
+        ).toJson();
+        target.settings['serverUrl'] = 'https://server.example';
+        target.settings['enabledSources'] = <String>['demo'];
+        final controller = CatalogController(
+          store: store,
+          appdata: target,
+          httpClient: CatalogHttpClient(
+            transport: const _AlwaysThrowsTransport(SocketException('offline')),
+          ),
+        );
+        addTearDown(() async {
+          controller.dispose();
+          if (oldPath != null) App.dataPath = oldPath;
+          await root.delete(recursive: true);
+        });
+        final result = await controller.boot();
+        expect(result, isA<CatalogReady>());
+        expect((result as CatalogReady).usedLocalFallback, isTrue);
+        expect(controller.sessionState?.active, pointer);
+        expect(target.settings['enabledSources'], ['demo']);
+      },
+    );
   }
 
-  final cases = <(String, Object, CatalogSetupFailureKind)>[
-    ('invalid-url', _authority, CatalogSetupFailureKind.invalidServerAddress),
-    (
-      'https://server.example',
-      const SocketException('private host'),
-      CatalogSetupFailureKind.connectionFailed,
-    ),
-    (
-      'https://server.example',
-      const HandshakeException('private TLS'),
-      CatalogSetupFailureKind.connectionFailed,
-    ),
-    (
-      'https://server.example',
-      const HttpException('private HTTP'),
-      CatalogSetupFailureKind.connectionFailed,
-    ),
-    (
-      'https://server.example',
-      TimeoutException('private timeout'),
-      CatalogSetupFailureKind.connectionFailed,
-    ),
-    (
-      'https://server.example',
-      _body(404, {}),
-      CatalogSetupFailureKind.incompatibleServer,
-    ),
-    (
-      'https://server.example',
-      _body(200, {'hello': 'world'}),
-      CatalogSetupFailureKind.incompatibleServer,
-    ),
-    (
-      'https://server.example',
-      CatalogBytesResponse(200, utf8.encode('<html>private</html>')),
-      CatalogSetupFailureKind.incompatibleServer,
-    ),
-    for (final status in [502, 503, 504])
-      (
-        'https://server.example',
-        _body(status, {}),
-        CatalogSetupFailureKind.connectionFailed,
-      ),
-    (
-      'https://server.example',
-      _body(503, {
-        'error': {
-          'code': 'catalog_not_activated',
-          'message': 'UNTRUSTED MESSAGE',
-        },
-      }),
-      CatalogSetupFailureKind.catalogNotActivated,
-    ),
-    (
-      'https://server.example',
-      _body(503, {
-        'error': {'code': 'catalog_state_invalid', 'message': 'private'},
-      }),
-      CatalogSetupFailureKind.contentPreparationFailed,
-    ),
-  ];
-  for (var i = 0; i < cases.length; i++) {
-    final (url, response, kind) = cases[i];
-    test('setup classification $i: ${kind.name}', () async {
-      final root = await Directory.systemTemp.createTemp('setup-failure-');
-      final target = Appdata.createForTesting(() async => root);
-      final controller = CatalogController(
-        store: CatalogStore(root),
-        appdata: target,
-        httpClient: CatalogHttpClient(transport: _Transport(response)),
-      );
-      addTearDown(() async {
-        controller.dispose();
-        await root.delete(recursive: true);
-      });
-      final result = await controller.initialize(url);
-      expect(result, isA<CatalogNeedsInitialization>());
-      expect((result as CatalogNeedsInitialization).failure?.kind, kind);
+  final repositoryCases =
+      <(Object, CatalogSetupFailureKind, CatalogSetupStage)>[
+        (
+          const CatalogRepositorySourceException(
+            'invalid_repository_url',
+            'invalid',
+          ),
+          CatalogSetupFailureKind.invalidRepositorySource,
+          CatalogSetupStage.repositoryHead,
+        ),
+        (
+          const SocketException('private host'),
+          CatalogSetupFailureKind.connectionFailed,
+          CatalogSetupStage.repositoryHead,
+        ),
+        (
+          const CatalogHttpException('head_query_failed', 'private'),
+          CatalogSetupFailureKind.repositoryHeadUnavailable,
+          CatalogSetupStage.repositoryHead,
+        ),
+        (
+          const CatalogHttpException('invalid_head_response', 'private'),
+          CatalogSetupFailureKind.invalidRepositoryHead,
+          CatalogSetupStage.repositoryHead,
+        ),
+      ];
+  for (var i = 0; i < repositoryCases.length; i++) {
+    final (error, kind, stage) = repositoryCases[i];
+    test('repository setup classification $i: ${kind.name}', () {
+      final failure = CatalogSetupFailure.fromError(error, stage);
+      expect(failure?.kind, kind);
+      expect(failure?.diagnostic, isNot(contains('private')));
     });
   }
-
-  test(
-    'HTTP preserves structured code without trusting remote message',
-    () async {
-      final client = CatalogHttpClient(
-        transport: _Transport(
-          _body(503, {
-            'error': {
-              'code': 'catalog_not_activated',
-              'message': 'UNTRUSTED MESSAGE',
-            },
-          }),
-        ),
-      );
-      await expectLater(
-        client.getAuthority('https://server.example'),
-        throwsA(
-          isA<CatalogHttpException>()
-              .having((e) => e.code, 'code', 'catalog_not_activated')
-              .having(
-                (e) => e.toString(),
-                'details',
-                isNot(contains('UNTRUSTED MESSAGE')),
-              ),
-        ),
-      );
-    },
-  );
 
   for (final type in [
     DioExceptionType.connectionError,
@@ -306,7 +250,6 @@ void main() {
         appdata: target,
         httpClient: CatalogHttpClient(
           transport: _Transport(
-            _authority,
             snapshotError: phase == 'download'
                 ? TimeoutException('download')
                 : null,
@@ -324,7 +267,9 @@ void main() {
         if (oldPath != null) App.dataPath = oldPath;
         await root.delete(recursive: true);
       });
-      final result = await controller.initialize('https://server.example');
+      final result = await controller.initializeRepository(
+        CatalogRepositorySource.defaults,
+      );
       if (phase == 'commit') {
         expect(result, isA<CatalogNeedsRecovery>());
       } else {
@@ -344,7 +289,7 @@ void main() {
       final target = Appdata.createForTesting(() async => Directory.systemTemp);
       final controller = _ResultController(
         CatalogNeedsInitialization(
-          serverDraft: '',
+          repositorySource: CatalogRepositorySource.defaults,
           failure: CatalogSetupFailure(
             kind,
             diagnostic: 'UNTRUSTED MESSAGE SocketException C:/private SHA',
@@ -360,31 +305,34 @@ void main() {
         MaterialApp(
           home: CatalogBootstrapPage(
             controller: controller,
-            serverDraft: 'https://server.example',
+            repositorySource: CatalogRepositorySource.defaults,
             onReady: (_) {},
           ),
         ),
       );
-      await tester.tap(find.text('连接并初始化'));
+      await tester.tap(find.text('重试准备'));
       await tester.pumpAndSettle();
-      final title = [
-        '服务器地址无效',
-        '无法连接服务器',
-        '不是兼容的 Venera Server',
-        '服务器尚未发布漫画源配置',
-        '漫画源配置准备失败',
-      ][kind.index];
+      final title = switch (kind) {
+        CatalogSetupFailureKind.connectionFailed => '无法连接配置仓库',
+        CatalogSetupFailureKind.contentPreparationFailed => '漫画源配置准备失败',
+        CatalogSetupFailureKind.invalidRepositorySource => '配置来源无效',
+        CatalogSetupFailureKind.repositoryHeadUnavailable => '无法获取配置分支的最新版本',
+        CatalogSetupFailureKind.invalidRepositoryHead => '配置仓库返回的分支信息无效',
+        CatalogSetupFailureKind.storageUnavailable => '无法保存或读取本地配置',
+        CatalogSetupFailureKind.operationInProgress => '另一个配置操作正在进行',
+        CatalogSetupFailureKind.cancelled => '配置操作已取消',
+      };
       expect(find.textContaining(title), findsOneWidget);
       expect(find.textContaining('UNTRUSTED'), findsNothing);
       expect(find.textContaining('SocketException'), findsNothing);
-      expect(find.byType(TextField), findsOneWidget);
+      expect(find.byType(TextField), findsNWidgets(2));
     });
   }
 
   testWidgets('cancelled setup has no failure UI', (tester) async {
     final target = Appdata.createForTesting(() async => Directory.systemTemp);
     final controller = _ResultController(
-      const CatalogNeedsInitialization(serverDraft: ''),
+      const CatalogNeedsInitialization(),
       target,
     );
     addTearDown(controller.dispose);
@@ -392,24 +340,26 @@ void main() {
       MaterialApp(
         home: CatalogBootstrapPage(
           controller: controller,
-          serverDraft: 'https://server.example',
+          repositorySource: CatalogRepositorySource.defaults,
           onReady: (_) {},
         ),
       ),
     );
-    await tester.tap(find.text('连接并初始化'));
+    await tester.tap(find.text('重试准备'));
     await tester.pumpAndSettle();
     expect(find.textContaining('初始化未完成'), findsNothing);
     expect(find.textContaining('失败'), findsNothing);
   });
 
-  testWidgets('recovery retains saved server and hides internal error', (
+  testWidgets('recovery retains saved repository and hides internal error', (
     tester,
   ) async {
     final target = Appdata.createForTesting(() async => Directory.systemTemp);
-    target.settings['serverUrl'] = 'https://saved.example';
+    final source = CatalogRepositorySource(branch: 'saved-branch');
+    target.settings['catalogRepositoryUrl'] = source.repositoryUrl;
+    target.settings['catalogRepositoryBranch'] = source.branch;
     final controller = _ResultController(
-      const CatalogNeedsRecovery('SECRET C:/private SHA'),
+      CatalogNeedsRecovery('SECRET C:/private SHA', repositorySource: source),
       target,
     );
     addTearDown(controller.dispose);
@@ -422,10 +372,11 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(
-      tester.widget<TextField>(find.byType(TextField)).controller!.text,
-      'https://saved.example',
-    );
+    final fields = tester
+        .widgetList<TextField>(find.byType(TextField))
+        .map((field) => field.controller!.text)
+        .toList();
+    expect(fields, [source.repositoryUrl, 'saved-branch']);
     expect(find.textContaining('SECRET'), findsNothing);
   });
 }

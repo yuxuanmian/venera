@@ -534,7 +534,9 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
       // getter above for the revisit trigger.
       _infoRow(
         "Supports Detail Check",
-        _usesRetiredUpdateCheckDeclaration ? '-' : _yesNo(source?.loadComicInfo != null),
+        _usesRetiredUpdateCheckDeclaration
+            ? '-'
+            : _yesNo(source?.loadComicInfo != null),
       ),
       _infoRow(
         "Update Check Strategy",
@@ -548,14 +550,16 @@ class _ComicDebugPageState extends State<ComicDebugPage> {
   }
 
   List<Widget> _buildOwnershipSection() {
+    final pointer = appdata.sessionCatalogState?.active;
     return [
       ListTile(title: Text("Catalog Runtime".tl)),
       _infoRow("Source", widget.sourceKey),
+      _infoRow("Repository", pointer?.catalogId ?? "Not configured".tl),
       _infoRow(
-        "Server",
-        (appdata.settings['serverUrl'] as String?)?.isNotEmpty == true
-            ? appdata.settings['serverUrl'] as String
-            : "Not configured".tl,
+        "Commit",
+        pointer == null || pointer.revision.length <= 8
+            ? pointer?.revision ?? '-'
+            : pointer.revision.substring(0, 8),
       ),
       _infoRow("Loaded", _yesNo(ComicSource.find(widget.sourceKey) != null)),
     ];

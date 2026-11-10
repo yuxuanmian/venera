@@ -255,9 +255,13 @@ void main() {
       source.indexOf('final categories = <String>['),
       source.indexOf('final icons = <IconData>['),
     );
+    final initStateMatch = RegExp(
+      r'@override\r?\n\s+void initState\(\)',
+    ).firstMatch(source);
+    expect(initStateMatch, isNotNull);
     final icons = source.substring(
       source.indexOf('final icons = <IconData>['),
-      source.indexOf('@override\n  void initState()'),
+      initStateMatch!.start,
     );
     String firstIdentifier(String line) {
       final match = RegExp(

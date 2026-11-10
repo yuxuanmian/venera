@@ -41,8 +41,17 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   late Directory dataDirectory;
+  late String? previousPackageVersion;
 
   setUpAll(() async {
+    // flutter test has no built package metadata. Supply the version that a
+    // packaged build would expose so this exercises the real parser gate.
+    previousPackageVersion = App.packageVersion;
+    final pubspec = await File('pubspec.yaml').readAsString();
+    App.packageVersion = RegExp(
+      r'^version:\s+([^+\s]+)',
+      multiLine: true,
+    ).firstMatch(pubspec)!.group(1);
     await AppTranslation.init();
     dataDirectory = await Directory.systemTemp.createTemp(
       'venera-semantic-version-gate-',
@@ -52,6 +61,7 @@ void main() {
   });
 
   tearDownAll(() async {
+    App.packageVersion = previousPackageVersion;
     if (await dataDirectory.exists()) {
       await dataDirectory.delete(recursive: true);
     }
@@ -199,7 +209,7 @@ class SemanticGateSource extends ComicSource {
       );
       final appdataBytesBefore = await appdataFile.readAsBytes();
 
-      _authority(fixture.responses, candidate);
+      _repositoryHead(fixture.responses, candidate);
       _availableRevision(
         fixture.responses,
         candidate,
@@ -294,7 +304,7 @@ class SemanticGateSource extends ComicSource {
       fixture.appdata.settings['serverUrl'] = _hostServerUrl;
       fixture.appdata.settings['enabledSources'] = <String>[_picacgKey];
 
-      _authority(fixture.responses, candidate);
+      _repositoryHead(fixture.responses, candidate);
       _availableRevision(
         fixture.responses,
         candidate,
@@ -361,7 +371,7 @@ class SemanticGateSource extends ComicSource {
         await ComicSourceParser().parse(otherScript, '$_otherKey.js'),
       );
 
-      _authority(fixture.responses, candidate);
+      _repositoryHead(fixture.responses, candidate);
       _availableRevision(
         fixture.responses,
         candidate,
@@ -371,14 +381,19 @@ class SemanticGateSource extends ComicSource {
       );
 
       final controller = fixture.controller();
-      final result = await controller.initialize(_hostServerUrl);
+      final result = await controller.initializeRepository(
+        CatalogRepositorySource.defaults,
+      );
 
       // A brand-new installation has no active and no LKG, so the incompatible
       // candidate cannot be answered from anywhere: the install is refused.
       expect(fixture.appdata.readCatalogState(), isNull);
       expect(result, isA<CatalogNeedsInitialization>());
       final needsInit = result as CatalogNeedsInitialization;
-      expect(needsInit.serverDraft, _hostServerUrl);
+      expect(
+        needsInit.repositorySource.repositoryUrl,
+        CatalogRepositorySource.defaultRepositoryUrl,
+      );
       expect(needsInit.failure, isNotNull);
       expect(
         needsInit.failure!.kind,
@@ -406,7 +421,7 @@ class SemanticGateSource extends ComicSource {
   );
 
   test(
-    'the 1.0.9 candidate is published when the Host satisfies its gate',
+    'a compatible script is published even when the index version lags',
     () async {
       final fixture = await _createPublishFixture(enabled: const [_picacgKey]);
       final installed = _pointer('a' * 40);
@@ -445,13 +460,14 @@ class SemanticGateSource extends ComicSource {
       fixture.appdata.settings['serverUrl'] = _hostServerUrl;
       fixture.appdata.settings['enabledSources'] = <String>[_picacgKey];
 
-      _authority(fixture.responses, candidate);
+      _repositoryHead(fixture.responses, candidate);
       _availableRevision(
         fixture.responses,
         candidate,
         candidateScript,
         key: _picacgKey,
-        version: _candidateVersion,
+        // The release index can lag the source script's declared version.
+        version: _installedVersion,
       );
 
       final controller = fixture.controller();
@@ -461,6 +477,7 @@ class SemanticGateSource extends ComicSource {
       final ready = result as CatalogReady;
       expect(ready.usedLocalFallback, isFalse);
       expect(ready.snapshot.manifest.pointer.identity, candidate.identity);
+      expect(ready.snapshot.index.find(_picacgKey)!.version, _installedVersion);
       expect(controller.sessionState?.active?.identity, candidate.identity);
       expect(controller.sessionState?.lkg?.identity, installed.identity);
       expect(
@@ -515,7 +532,6 @@ class SemanticGateSource extends ComicSource {
 // ---------------------------------------------------------------------------
 
 const _hostServerUrl = 'https://server.example';
-const _authorityUrl = 'https://server.example/api/catalog/authority';
 const _picacgKey = 'picacg';
 const _otherKey = 'other';
 const _installedVersion = '1.0.8';
@@ -624,9 +640,10 @@ Future<_PublishFixture> _createPublishFixture({
 }
 
 CatalogPointer _pointer(String revision) => CatalogPointer(
-  catalogId: 'owner/repo',
+  catalogId: 'yuxuanmian/venera-configs',
   revision: revision,
-  indexUrl: 'https://raw.githubusercontent.com/owner/repo/$revision/index.json',
+  indexUrl:
+      'https://raw.githubusercontent.com/yuxuanmian/venera-configs/$revision/index.json',
 );
 
 Map<String, dynamic> _indexEntry(String key, String version) => {
@@ -669,20 +686,20 @@ $tagSearchDeclaration  };
 ''';
 }
 
-void _authority(
+void _repositoryHead(
   Map<String, CatalogBytesResponse> responses,
   CatalogPointer pointer,
 ) {
-  responses[_authorityUrl] = CatalogBytesResponse(
-    200,
-    utf8.encode(
-      jsonEncode({
-        'catalogId': pointer.catalogId,
-        'activeRevision': pointer.revision,
-        'indexUrl': pointer.indexUrl,
-      }),
-    ),
-  );
+  responses['https://api.github.com/repos/yuxuanmian/venera-configs/git/ref/heads/yxm'] =
+      CatalogBytesResponse(
+        200,
+        utf8.encode(
+          jsonEncode({
+            'ref': 'refs/heads/yxm',
+            'object': {'type': 'commit', 'sha': pointer.revision},
+          }),
+        ),
+      );
 }
 
 /// Serves one revision exactly like the pinned raw GitHub layout: an index plus
@@ -698,7 +715,7 @@ void _availableRevision(
     200,
     utf8.encode(jsonEncode([_indexEntry(key, version)])),
   );
-  responses['https://raw.githubusercontent.com/owner/repo/${pointer.revision}/$key.js'] =
+  responses['https://raw.githubusercontent.com/yuxuanmian/venera-configs/${pointer.revision}/$key.js'] =
       CatalogBytesResponse(200, utf8.encode(source));
 }
 

@@ -2,12 +2,30 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/widgets.dart';
+import 'package:venera/foundation/catalog/controller.dart';
 import 'package:venera/foundation/follow_update_availability.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/init.dart';
 import 'package:venera/utils/data_sync.dart';
 
 const _missingUpdateComicArguments = 'Missing comic id or source key.';
+
+Map<String, dynamic> headlessCatalogUnavailablePayload(
+  CatalogStartupResult? result,
+) {
+  final failureKind = switch (result) {
+    CatalogNeedsInitialization(:final failure) => failure?.kind,
+    CatalogNeedsRecovery(:final failure) => failure?.kind,
+    _ => null,
+  };
+  return {
+    'status': 'error',
+    'code': 'catalog_runtime_unavailable',
+    'reason': failureKind?.name ?? 'not_ready',
+    'message':
+        'Catalog Runtime is not ready; check the repository source or retry preparation.',
+  };
+}
 
 ({int exitCode, Map<String, dynamic> payload})? unavailableHeadlessScanResult(
   List<String> args,
@@ -64,11 +82,7 @@ Future<void> runHeadlessMode(List<String> args) async {
 
   // Need to initialize the app for the remaining headless features.
   if (!await init()) {
-    cliPrint({
-      'status': 'error',
-      'message':
-          'Catalog Runtime is not ready; initialize Venera Server first.',
-    });
+    cliPrint(headlessCatalogUnavailablePayload(catalogController?.lastResult));
     exit(2);
   }
 

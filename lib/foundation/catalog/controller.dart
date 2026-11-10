@@ -22,34 +22,89 @@ sealed class CatalogStartupResult {
   const CatalogStartupResult();
 }
 
+enum CatalogLocalFallbackReason {
+  userSelected,
+  repositoryCheckFailed,
+  updatePreparationFailed,
+}
+
+enum CatalogRepositoryCheckStatus { success, failed, cancelled }
+
+class CatalogRepositoryCheck {
+  const CatalogRepositoryCheck({
+    this.source,
+    required this.checkedAt,
+    required this.status,
+    this.latest,
+    this.failure,
+  });
+
+  final CatalogRepositorySource? source;
+  final DateTime checkedAt;
+  final CatalogRepositoryCheckStatus status;
+  final CatalogPointer? latest;
+  final CatalogSetupFailure? failure;
+
+  bool get succeeded =>
+      status == CatalogRepositoryCheckStatus.success && latest != null;
+}
+
+class CatalogRepositoryVerification {
+  const CatalogRepositoryVerification({
+    required this.source,
+    required this.check,
+    required this.saved,
+    this.failure,
+  });
+
+  final CatalogRepositorySource source;
+  final CatalogRepositoryCheck check;
+  final bool saved;
+  final CatalogSetupFailure? failure;
+
+  bool get succeeded => saved && check.succeeded && failure == null;
+}
+
 class CatalogReady extends CatalogStartupResult {
   const CatalogReady({
     required this.snapshot,
     this.usedLocalFallback = false,
+    this.localFallbackReason,
+    this.needsSourceSelection = false,
+    this.repositorySource,
     this.notice,
   });
 
   final CatalogSnapshot snapshot;
   final bool usedLocalFallback;
+  final CatalogLocalFallbackReason? localFallbackReason;
+  final bool needsSourceSelection;
+  final CatalogRepositorySource? repositorySource;
   final String? notice;
 }
 
 class CatalogNeedsInitialization extends CatalogStartupResult {
   const CatalogNeedsInitialization({
-    required this.serverDraft,
+    this.repositorySource = CatalogRepositorySource.defaults,
     this.hasLegacy = false,
     this.failure,
   });
 
-  final String serverDraft;
+  final CatalogRepositorySource repositorySource;
   final bool hasLegacy;
   final CatalogSetupFailure? failure;
 }
 
 class CatalogNeedsRecovery extends CatalogStartupResult {
-  const CatalogNeedsRecovery(this.error);
+  const CatalogNeedsRecovery(
+    this.error, {
+    this.repositorySource = CatalogRepositorySource.defaults,
+    this.failure,
+  });
 
   final String error;
+  final CatalogRepositorySource repositorySource;
+  final CatalogSetupFailure? failure;
 }
 
 class CatalogController extends ChangeNotifier {
@@ -89,10 +144,13 @@ class CatalogController extends ChangeNotifier {
 
   CatalogStartupResult? lastResult;
   String? lastDiagnostic;
+  CatalogRepositoryCheck? latestRepositoryCheck;
   PreparedRuntime? _publishedRuntime;
   bool _busy = false;
   CatalogAttempt? _currentAttempt;
   bool _preferLocal = false;
+  CatalogLocalFallbackReason? _localFallbackReason;
+  CatalogSetupFailure? _lastTryFailure;
   String progressPhase = '';
   int progressCompleted = 0;
   int progressTotal = 0;
@@ -104,6 +162,66 @@ class CatalogController extends ChangeNotifier {
   AppCatalogState? get sessionState => _sessionState;
 
   CatalogAttempt? get currentAttempt => _currentAttempt;
+
+  CatalogPointer? get runtimePointer {
+    final state = _sessionState;
+    if (state?.active != null) return state!.active;
+    final result = lastResult;
+    return result is CatalogReady ? result.snapshot.manifest.pointer : null;
+  }
+
+  bool get usingLocalFallback {
+    final result = lastResult;
+    return result is CatalogReady && result.usedLocalFallback;
+  }
+
+  CatalogLocalFallbackReason? get localFallbackReason {
+    final result = lastResult;
+    return result is CatalogReady ? result.localFallbackReason : null;
+  }
+
+  bool get hasRepositoryUpdate {
+    final check = latestRepositoryCheck;
+    final runtime = runtimePointer;
+    if (check == null ||
+        !check.succeeded ||
+        check.latest == null ||
+        runtime == null) {
+      return false;
+    }
+    try {
+      if (check.source != repositorySource) return false;
+    } on CatalogRepositorySourceException {
+      return false;
+    }
+    final latest = check.latest!;
+    return latest.catalogId != runtime.catalogId ||
+        latest.revision != runtime.revision;
+  }
+
+  CatalogRepositorySource get repositorySource {
+    final rawUrl = appdata.settings['catalogRepositoryUrl'];
+    final rawBranch = appdata.settings['catalogRepositoryBranch'];
+    final repositoryUrl =
+        rawUrl == null || rawUrl is String && rawUrl.trim().isEmpty
+        ? CatalogRepositorySource.defaultRepositoryUrl
+        : rawUrl is String
+        ? rawUrl
+        : throw const CatalogRepositorySourceException(
+            'invalid_repository_url',
+            '配置仓库地址无效',
+          );
+    final branch =
+        rawBranch == null || rawBranch is String && rawBranch.trim().isEmpty
+        ? CatalogRepositorySource.defaultBranch
+        : rawBranch is String
+        ? rawBranch
+        : throw const CatalogRepositorySourceException(
+            'invalid_branch',
+            '配置分支无效',
+          );
+    return CatalogRepositorySource.parse(repositoryUrl, branch: branch);
+  }
 
   bool get canUseLocalVersion =>
       _currentAttempt?.allowLocalFallback == true &&
@@ -117,11 +235,12 @@ class CatalogController extends ChangeNotifier {
     }
   }
 
-  /// Stops the in-flight Authority attempt and lets boot continue through
-  /// the already-known local choices.
+  /// Stops the in-flight repository check and lets boot continue through the
+  /// already-known local choices.
   void useLocalVersion() {
     if (!canUseLocalVersion) return;
     _preferLocal = true;
+    _localFallbackReason = CatalogLocalFallbackReason.userSelected;
     final attempt = _currentAttempt;
     if (attempt?.isOpen == true) attempt!.close();
     notifyListeners();
@@ -135,63 +254,296 @@ class CatalogController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<CatalogRepositoryCheck> checkRepositoryUpdate({
+    CatalogRepositorySource? source,
+  }) async {
+    final checkedAt = DateTime.now().toUtc();
+    CatalogRepositorySource? selectedSource = source;
+    CatalogSetupFailure? sourceFailure;
+    if (selectedSource == null) {
+      try {
+        selectedSource = repositorySource;
+      } catch (error) {
+        sourceFailure = _failureFor(error, CatalogSetupStage.repositoryHead);
+      }
+    }
+    if (selectedSource == null) {
+      final check = CatalogRepositoryCheck(
+        checkedAt: checkedAt,
+        status: CatalogRepositoryCheckStatus.failed,
+        failure: sourceFailure,
+      );
+      latestRepositoryCheck = check;
+      lastDiagnostic = sourceFailure?.diagnostic;
+      notifyListeners();
+      return check;
+    }
+    if (_busy) {
+      final check = CatalogRepositoryCheck(
+        source: selectedSource,
+        checkedAt: checkedAt,
+        status: CatalogRepositoryCheckStatus.failed,
+        failure: const CatalogSetupFailure(
+          CatalogSetupFailureKind.operationInProgress,
+          diagnostic: 'repositoryHead:operationInProgress',
+        ),
+      );
+      latestRepositoryCheck = check;
+      notifyListeners();
+      return check;
+    }
+    _busy = true;
+    final attempt = CatalogAttempt(
+      id: 'repository-check-${DateTime.now().microsecondsSinceEpoch}',
+      deadline: DateTime.now().add(catalogHeadTimeout),
+    );
+    _currentAttempt = attempt;
+    try {
+      _reportProgress('查询配置仓库', 0, 0);
+      final pointer = await httpClient.resolveRepositoryHead(
+        selectedSource,
+        attempt: attempt,
+      );
+      final check = CatalogRepositoryCheck(
+        source: selectedSource,
+        checkedAt: checkedAt,
+        status: CatalogRepositoryCheckStatus.success,
+        latest: pointer,
+      );
+      latestRepositoryCheck = check;
+      lastDiagnostic = 'Repository ${pointer.identity}';
+      return check;
+    } catch (error) {
+      final cancelled =
+          error is CatalogHttpException && error.code == 'cancelled';
+      final failure = _failureFor(error, CatalogSetupStage.repositoryHead);
+      final check = CatalogRepositoryCheck(
+        source: selectedSource,
+        checkedAt: checkedAt,
+        status: cancelled
+            ? CatalogRepositoryCheckStatus.cancelled
+            : CatalogRepositoryCheckStatus.failed,
+        failure: failure,
+      );
+      latestRepositoryCheck = check;
+      lastDiagnostic = failure.diagnostic;
+      return check;
+    } finally {
+      if (identical(_currentAttempt, attempt)) _currentAttempt = null;
+      _busy = false;
+      notifyListeners();
+    }
+  }
+
+  /// Validates a repository HEAD and root index, then atomically saves the
+  /// source. It never downloads scripts or replaces the active Runtime.
+  Future<CatalogRepositoryVerification> verifyAndSaveRepositorySource(
+    CatalogRepositorySource source,
+  ) async {
+    final checkedAt = DateTime.now().toUtc();
+    if (_busy) {
+      final check = CatalogRepositoryCheck(
+        source: source,
+        checkedAt: checkedAt,
+        status: CatalogRepositoryCheckStatus.failed,
+        failure: const CatalogSetupFailure(
+          CatalogSetupFailureKind.operationInProgress,
+          diagnostic: 'repositoryHead:operationInProgress',
+        ),
+      );
+      latestRepositoryCheck = check;
+      notifyListeners();
+      return CatalogRepositoryVerification(
+        source: source,
+        check: check,
+        saved: false,
+        failure: check.failure,
+      );
+    }
+    _busy = true;
+    final attempt = CatalogAttempt(
+      id: 'repository-verify-${DateTime.now().microsecondsSinceEpoch}',
+      deadline: DateTime.now().add(catalogBootstrapPrepareBudget),
+    );
+    _currentAttempt = attempt;
+    CatalogPointer? pointer;
+    var stage = CatalogSetupStage.repositoryHead;
+    try {
+      _reportProgress('查询配置仓库', 0, 0);
+      pointer = await httpClient.resolveRepositoryHead(
+        source,
+        attempt: attempt,
+      );
+      var check = CatalogRepositoryCheck(
+        source: source,
+        checkedAt: checkedAt,
+        status: CatalogRepositoryCheckStatus.success,
+        latest: pointer,
+      );
+      latestRepositoryCheck = check;
+      stage = CatalogSetupStage.indexValidation;
+      _reportProgress('验证漫画源配置索引', 0, 0);
+      await httpClient.readIndex(pointer, attempt: attempt);
+      await appdata.persistRepositorySource(source);
+      check = CatalogRepositoryCheck(
+        source: source,
+        checkedAt: checkedAt,
+        status: CatalogRepositoryCheckStatus.success,
+        latest: pointer,
+      );
+      latestRepositoryCheck = check;
+      lastDiagnostic = 'Repository ${pointer.identity} verified';
+      notifyListeners();
+      return CatalogRepositoryVerification(
+        source: source,
+        check: check,
+        saved: true,
+      );
+    } catch (error) {
+      final cancelled =
+          error is CatalogHttpException && error.code == 'cancelled';
+      final failure = _failureFor(error, stage);
+      final check = CatalogRepositoryCheck(
+        source: source,
+        checkedAt: checkedAt,
+        status: cancelled
+            ? CatalogRepositoryCheckStatus.cancelled
+            : CatalogRepositoryCheckStatus.failed,
+        latest: pointer,
+        failure: failure,
+      );
+      latestRepositoryCheck = check;
+      lastDiagnostic = failure.diagnostic;
+      notifyListeners();
+      return CatalogRepositoryVerification(
+        source: source,
+        check: check,
+        saved: false,
+        failure: failure,
+      );
+    } finally {
+      attempt.close();
+      if (identical(_currentAttempt, attempt)) _currentAttempt = null;
+      _busy = false;
+      notifyListeners();
+    }
+  }
+
   Future<CatalogStartupResult> boot() async {
+    final previousResult = lastResult;
+    if (previousResult is CatalogReady) return previousResult;
     if (_busy) return const CatalogNeedsRecovery('Catalog 启动正在进行');
     _busy = true;
     try {
       if (appdata.loadError != null) {
-        return _remember(CatalogNeedsRecovery('用户数据无法读取：${appdata.loadError}'));
+        lastDiagnostic = 'commit:storageUnavailable';
+        return _remember(
+          const CatalogNeedsRecovery(
+            '用户数据无法读取',
+            failure: CatalogSetupFailure(
+              CatalogSetupFailureKind.storageUnavailable,
+              diagnostic: 'commit:storageUnavailable',
+            ),
+          ),
+        );
       }
       AppCatalogState? state;
       try {
         state = appdata.readCatalogState();
       } catch (error) {
-        return _remember(CatalogNeedsRecovery('Catalog 状态无法读取：$error'));
-      }
-      final serverUrl = _savedServerUrl;
-      if (state == null || (state.active == null && state.lkg == null)) {
-        final inventory = await migration.discover();
+        lastDiagnostic = 'commit:storageUnavailable';
         return _remember(
-          CatalogNeedsInitialization(
-            serverDraft: serverUrl,
-            hasLegacy:
-                inventory.matched.isNotEmpty || inventory.summary.isNotEmpty,
+          CatalogNeedsRecovery(
+            'Catalog 状态无法读取',
+            failure: const CatalogSetupFailure(
+              CatalogSetupFailureKind.storageUnavailable,
+              diagnostic: 'commit:storageUnavailable',
+            ),
           ),
         );
       }
+      CatalogRepositorySource? source;
+      CatalogSetupFailure? sourceFailure;
+      try {
+        source = repositorySource;
+      } catch (error) {
+        sourceFailure = _failureFor(error, CatalogSetupStage.repositoryHead);
+      }
+      if (state == null || (state.active == null && state.lkg == null)) {
+        if (source == null) {
+          lastDiagnostic = sourceFailure?.diagnostic;
+          return _remember(CatalogNeedsInitialization(failure: sourceFailure));
+        }
+        return _remember(await _initializeRepository(source, bootstrap: true));
+      }
 
-      CatalogPointer? authority;
-      final authorityAttempt = CatalogAttempt(
-        id: 'authority-${DateTime.now().microsecondsSinceEpoch}',
-        deadline: DateTime.now().add(catalogAuthorityTimeout),
+      CatalogPointer? latest;
+      CatalogSetupFailure? headFailure = sourceFailure;
+      final checkedAt = DateTime.now().toUtc();
+      final repositoryAttempt = CatalogAttempt(
+        id: 'repository-${DateTime.now().microsecondsSinceEpoch}',
+        deadline: DateTime.now().add(catalogHeadTimeout),
         allowLocalFallback: true,
       );
-      _currentAttempt = authorityAttempt;
-      if (serverUrl.isNotEmpty && !_preferLocal) {
+      _currentAttempt = repositoryAttempt;
+      if (source == null) {
+        latestRepositoryCheck = CatalogRepositoryCheck(
+          checkedAt: checkedAt,
+          status: CatalogRepositoryCheckStatus.failed,
+          failure: headFailure,
+        );
+        _localFallbackReason ??=
+            CatalogLocalFallbackReason.repositoryCheckFailed;
+        lastDiagnostic = headFailure?.diagnostic;
+      } else if (!_preferLocal) {
         try {
           _reportProgress('查询漫画源配置', 0, 0);
-          authority = await httpClient.getAuthority(
-            serverUrl,
-            attempt: authorityAttempt,
+          latest = await httpClient.resolveRepositoryHead(
+            source,
+            attempt: repositoryAttempt,
           );
-          lastDiagnostic = 'Authority ${authority.identity}';
+          latestRepositoryCheck = CatalogRepositoryCheck(
+            source: source,
+            checkedAt: checkedAt,
+            status: CatalogRepositoryCheckStatus.success,
+            latest: latest,
+          );
+          lastDiagnostic = 'Repository ${latest.identity}';
         } catch (error) {
-          lastDiagnostic = 'Authority 查询失败：$error';
+          headFailure = _failureFor(error, CatalogSetupStage.repositoryHead);
+          latestRepositoryCheck = CatalogRepositoryCheck(
+            source: source,
+            checkedAt: checkedAt,
+            status: error is CatalogHttpException && error.code == 'cancelled'
+                ? CatalogRepositoryCheckStatus.cancelled
+                : CatalogRepositoryCheckStatus.failed,
+            failure: headFailure,
+          );
+          lastDiagnostic = headFailure.diagnostic;
+          _localFallbackReason ??=
+              CatalogLocalFallbackReason.repositoryCheckFailed;
         }
+      } else {
+        latestRepositoryCheck = CatalogRepositoryCheck(
+          source: source,
+          checkedAt: checkedAt,
+          status: CatalogRepositoryCheckStatus.cancelled,
+          failure: _cancelledFailure(CatalogSetupStage.repositoryHead),
+        );
       }
-      if (authorityAttempt.phase == CatalogAttemptPhase.preparing) {
-        if (authority != null || serverUrl.isEmpty || _preferLocal) {
-          authorityAttempt.finish();
+      if (repositoryAttempt.phase == CatalogAttemptPhase.preparing) {
+        if (latest != null || _preferLocal) {
+          repositoryAttempt.finish();
         } else {
-          authorityAttempt.close();
+          repositoryAttempt.close();
         }
       }
-      if (identical(_currentAttempt, authorityAttempt)) {
+      if (identical(_currentAttempt, repositoryAttempt)) {
         _currentAttempt = null;
       }
       final choices = <_CatalogChoice>[];
-      if (!_preferLocal && authority != null) {
-        choices.add(_CatalogChoice(authority, false));
+      if (!_preferLocal && latest != null) {
+        choices.add(_CatalogChoice(latest, false));
       }
       final local = <String>{};
       for (final pointer in [state.active, state.lkg]) {
@@ -200,15 +552,25 @@ class CatalogController extends ChangeNotifier {
         }
       }
       var index = 0;
+      _lastTryFailure = null;
       for (final choice in choices) {
         index++;
         final result = await _tryChoice(
           choice,
           state,
-          serverUrl: serverUrl,
+          source: source,
           budget: normalPrepareBudget,
+          localFallbackReason: choice.localOnly
+              ? _localFallbackReason ??
+                    CatalogLocalFallbackReason.repositoryCheckFailed
+              : null,
         );
         if (result != null) return _remember(result);
+        if (!choice.localOnly &&
+            _localFallbackReason != CatalogLocalFallbackReason.userSelected) {
+          _localFallbackReason =
+              CatalogLocalFallbackReason.updatePreparationFailed;
+        }
         _reportProgress('尝试本地可用版本', index, choices.length);
       }
       return _remember(
@@ -216,56 +578,115 @@ class CatalogController extends ChangeNotifier {
           state.active == null && state.lkg == null
               ? '没有可用的漫画源配置'
               : '没有可用的本地漫画源版本',
+          repositorySource: source ?? CatalogRepositorySource.defaults,
+          failure:
+              _lastTryFailure ??
+              headFailure ??
+              const CatalogSetupFailure(
+                CatalogSetupFailureKind.contentPreparationFailed,
+                diagnostic: 'runtime:noHealthySnapshot',
+              ),
         ),
       );
     } finally {
       _preferLocal = false;
+      _localFallbackReason = null;
       _busy = false;
     }
   }
 
-  Future<CatalogStartupResult> initialize(String serverUrl) async {
-    return _initializeOrRecover(serverUrl.trim(), bootstrap: true);
+  Future<CatalogStartupResult> initializeRepository(
+    CatalogRepositorySource source,
+  ) async {
+    final previous = lastResult;
+    if (previous is CatalogReady) return previous;
+    if (_busy) {
+      return _remember(
+        CatalogNeedsRecovery(
+          'Catalog 初始化正在进行',
+          repositorySource: source,
+          failure: const CatalogSetupFailure(
+            CatalogSetupFailureKind.operationInProgress,
+            diagnostic: 'repositoryHead:operationInProgress',
+          ),
+        ),
+      );
+    }
+    return _initializeRepository(source, bootstrap: true);
   }
 
-  Future<CatalogStartupResult> recover(String serverUrl) async {
-    return _initializeOrRecover(serverUrl.trim(), bootstrap: true);
+  Future<CatalogStartupResult> recoverRepository(
+    CatalogRepositorySource source,
+  ) async {
+    final previous = lastResult;
+    if (previous is CatalogReady) return previous;
+    if (_busy) {
+      return _remember(
+        CatalogNeedsRecovery(
+          'Catalog 初始化正在进行',
+          repositorySource: source,
+          failure: const CatalogSetupFailure(
+            CatalogSetupFailureKind.operationInProgress,
+            diagnostic: 'repositoryHead:operationInProgress',
+          ),
+        ),
+      );
+    }
+    return _initializeRepository(source, bootstrap: true);
   }
 
-  Future<CatalogStartupResult> _initializeOrRecover(
-    String serverUrl, {
+  Future<CatalogStartupResult> _initializeRepository(
+    CatalogRepositorySource source, {
     required bool bootstrap,
   }) async {
-    if (_busy) return const CatalogNeedsRecovery('Catalog 初始化正在进行');
     if (appdata.loadError != null) {
-      return _remember(CatalogNeedsRecovery('用户数据无法读取：${appdata.loadError}'));
+      return _remember(
+        CatalogNeedsRecovery(
+          '用户数据无法读取',
+          repositorySource: source,
+          failure: const CatalogSetupFailure(
+            CatalogSetupFailureKind.storageUnavailable,
+            diagnostic: 'commit:storageUnavailable',
+          ),
+        ),
+      );
     }
     _busy = true;
     final attempt = CatalogAttempt(
-      id: 'bootstrap-${DateTime.now().microsecondsSinceEpoch}',
+      id: 'repository-bootstrap-${DateTime.now().microsecondsSinceEpoch}',
       deadline: DateTime.now().add(
         bootstrap ? catalogBootstrapPrepareBudget : catalogNormalPrepareBudget,
       ),
     );
     _currentAttempt = attempt;
+    final checkedAt = DateTime.now().toUtc();
     CatalogCandidate? candidate;
     PreparedRuntime? runtime;
     PreparedAppDataCommit? handle;
+    CatalogPointer? resolvedPointer;
+    LegacyInventory? inventory;
+    LegacyCopyEffect? copyEffect;
     var published = false;
     var copyApplied = false;
-    LegacyCopyEffect? copyEffect;
-    var stage = CatalogSetupStage.authority;
+    var stage = CatalogSetupStage.repositoryHead;
     try {
-      final base = CatalogServerUrl.parse(serverUrl);
-      final isLegacyMigration = appdata.catalogRuntime == null;
-      _reportProgress('连接并获取漫画源配置', 0, 0);
-      final pointer = await attempt.waitFor(
-        () => httpClient.getAuthority(base.normalized, attempt: attempt),
-      );
-      stage = CatalogSetupStage.snapshot;
+      final isFresh = appdata.catalogRuntime == null;
       final existingEnabled =
           preferences.enabledSources ?? _readEnabledFromSettings();
-      var inventory = await attempt.waitFor(() => migration.discover());
+      _reportProgress('查询配置仓库', 0, 0);
+      final pointer = await attempt.waitFor(
+        () => httpClient.resolveRepositoryHead(source, attempt: attempt),
+      );
+      resolvedPointer = pointer;
+      latestRepositoryCheck = CatalogRepositoryCheck(
+        source: source,
+        checkedAt: checkedAt,
+        status: CatalogRepositoryCheckStatus.success,
+        latest: pointer,
+      );
+      lastDiagnostic = 'Repository ${pointer.identity}';
+      stage = CatalogSetupStage.snapshot;
+      inventory = await attempt.waitFor(() => migration.discover());
       final downloaded = await attempt.waitFor(
         () => httpClient.downloadSnapshot(
           pointer,
@@ -277,15 +698,11 @@ class CatalogController extends ChangeNotifier {
         onLate: (lateCandidate) => lateCandidate.discard(),
       );
       candidate = downloaded;
-      // Identify the legacy variant before either probe or final preparation.
-      // The multi-account source intentionally shares the old data filename,
-      // so its in-memory copy must already be present when its JS definition
-      // reads settings during construction.
       inventory = await attempt.waitFor(
         () => migration.discover(catalog: downloaded.index),
       );
       final copy = await attempt.waitFor(
-        () => migration.prepareCopyEffect(inventory: inventory),
+        () => migration.prepareCopyEffect(inventory: inventory!),
       );
       copyEffect = copy;
       final downloadedData = _withLegacyCopyData(
@@ -313,36 +730,36 @@ class CatalogController extends ChangeNotifier {
         onLate: (lateRuntime) => lateRuntime.dispose(),
       );
       runtime = preparedRuntime;
-      // Data-copy effects are prepared and persisted before the Catalog
-      // commit. A failed copy keeps the old executable set for retry.
-      // Persist the non-overwriting copy after both preparations succeeded but
-      // before the single appdata commit. A failure leaves the old executable
-      // set in place and the in-memory Runtime is discarded by the outer path.
       if (copy != null) {
         copyApplied = await attempt.waitFor(
           () => migration.applyCopyEffect(copy),
         );
       }
-      final selected = List<String>.from(
-        existingEnabled ??
-            inventory.matched.keys.where(promoted.index.keys.contains),
-      )..sort();
+      final migratedEnabled =
+          inventory!.matched.keys
+              .where(promoted.index.keys.contains)
+              .toSet()
+              .cast<String>()
+              .toList()
+            ..sort();
+      final selected = List<String>.from(existingEnabled ?? migratedEnabled)
+        ..sort();
       final nextState = AppCatalogState(active: pointer, lkg: null);
       stage = CatalogSetupStage.commit;
       final preparedHandle = await attempt.waitFor(
         () => appdata.prepareCatalogCommit(
           nextState: nextState,
           nextEnabled: selected,
-          nextServerUrl: base.normalized,
+          nextRepositorySource: source,
           attempt: attempt,
-          migrateSourcePages: isLegacyMigration
+          migrateSourcePages: isFresh
               ? (settings) {
                   for (final source
                       in preparedRuntime.sources
                           .map((source) => source.value)
                           .whereType<ComicSource>()) {
                     if (selected.contains(source.key) &&
-                        inventory.matched.containsKey(source.key)) {
+                        inventory!.matched.containsKey(source.key)) {
                       settings.addAll(defaultSourcePages(settings, source));
                     }
                   }
@@ -359,7 +776,7 @@ class CatalogController extends ChangeNotifier {
         runtime = null;
         return _remember(
           CatalogNeedsInitialization(
-            serverDraft: base.normalized,
+            repositorySource: source,
             hasLegacy: inventory.matched.isNotEmpty,
           ),
         );
@@ -372,11 +789,23 @@ class CatalogController extends ChangeNotifier {
         preparedRuntime.dispose();
         handle = null;
         runtime = null;
-        lastDiagnostic = 'Catalog commit: $error';
-        return _remember(CatalogNeedsRecovery('本地漫画源配置无法保存'));
+        final failure = _failureFor(error, CatalogSetupStage.commit);
+        lastDiagnostic = failure.diagnostic;
+        latestRepositoryCheck = CatalogRepositoryCheck(
+          source: source,
+          checkedAt: checkedAt,
+          status: CatalogRepositoryCheckStatus.failed,
+          latest: pointer,
+          failure: failure,
+        );
+        return _remember(
+          CatalogNeedsRecovery(
+            '本地漫画源配置无法保存',
+            repositorySource: source,
+            failure: failure,
+          ),
+        );
       }
-      // The commit linearization point is followed by a synchronous memory
-      // install and Runtime publication; no await is inserted between them.
       preparedHandle.installMemorySilently();
       preferences.installSilently(selected);
       preparedRuntime.publish();
@@ -388,45 +817,63 @@ class CatalogController extends ChangeNotifier {
       handle = null;
       runtime = null;
       attempt.finish();
-      // Cleanup is post-publication best effort. It must never turn a
-      // successfully committed and installed Runtime back into initialization.
       try {
         final remaining = await migration.cleanupAfterSuccess(inventory);
         if (remaining.isNotEmpty) lastDiagnostic = '仍有旧执行文件未清理';
-      } catch (error) {
-        lastDiagnostic = '旧执行文件清理失败：$error';
+      } catch (_) {
+        lastDiagnostic = '旧执行文件清理失败';
       }
-      return _remember(CatalogReady(snapshot: promoted));
+      return _remember(
+        CatalogReady(
+          snapshot: promoted,
+          needsSourceSelection: isFresh && selected.isEmpty,
+          repositorySource: source,
+        ),
+      );
     } catch (error) {
       attempt.close();
       if (candidate != null) await candidate.discard();
       if (handle != null && !handle.isReleased) await handle.discard();
       if (!published) {
         runtime?.dispose();
-        // A newly created multi-account data file is part of the same
-        // migration attempt. If the Catalog commit did not publish, remove
-        // only that file so a retry observes the original legacy state.
         if (copyApplied && copyEffect != null) {
           try {
             if (await copyEffect.target.exists()) {
               await copyEffect.target.delete();
             }
-          } catch (cleanupError) {
-            lastDiagnostic = '旧多账号数据回滚失败：$cleanupError';
+          } catch (_) {
+            lastDiagnostic = '旧多账号数据回滚失败';
           }
         }
       }
-      final failure = CatalogSetupFailure.fromError(error, stage);
-      lastDiagnostic = failure?.diagnostic;
-      if (failure != null &&
-          (stage == CatalogSetupStage.commit || error is FileSystemException)) {
-        return _remember(CatalogNeedsRecovery('本地漫画源配置无法保存或读取'));
+      final cancelled =
+          error is CatalogHttpException && error.code == 'cancelled';
+      final failure = _failureFor(error, stage);
+      latestRepositoryCheck = CatalogRepositoryCheck(
+        source: source,
+        checkedAt: checkedAt,
+        status: cancelled
+            ? CatalogRepositoryCheckStatus.cancelled
+            : CatalogRepositoryCheckStatus.failed,
+        latest: resolvedPointer,
+        failure: failure,
+      );
+      lastDiagnostic = failure.diagnostic;
+      if (stage == CatalogSetupStage.commit ||
+          failure.kind == CatalogSetupFailureKind.storageUnavailable) {
+        return _remember(
+          CatalogNeedsRecovery(
+            '本地漫画源配置无法保存或读取',
+            repositorySource: source,
+            failure: failure,
+          ),
+        );
       }
       return _remember(
         CatalogNeedsInitialization(
-          serverDraft: serverUrl,
-          hasLegacy: false,
-          failure: failure,
+          repositorySource: source,
+          hasLegacy: inventory?.matched.isNotEmpty == true,
+          failure: cancelled ? null : failure,
         ),
       );
     } finally {
@@ -438,8 +885,9 @@ class CatalogController extends ChangeNotifier {
   Future<CatalogReady?> _tryChoice(
     _CatalogChoice choice,
     AppCatalogState state, {
-    required String serverUrl,
+    required CatalogRepositorySource? source,
     required Duration budget,
+    required CatalogLocalFallbackReason? localFallbackReason,
   }) async {
     final attempt = CatalogAttempt(
       id: 'boot-${DateTime.now().microsecondsSinceEpoch}',
@@ -450,6 +898,7 @@ class CatalogController extends ChangeNotifier {
     PreparedRuntime? runtime;
     PreparedAppDataCommit? handle;
     var published = false;
+    var failureStage = CatalogSetupStage.snapshot;
     try {
       CatalogSnapshot? snapshot;
       var invalidCachedSnapshot = false;
@@ -457,11 +906,11 @@ class CatalogController extends ChangeNotifier {
         snapshot = await attempt.waitFor(
           () => store.readSnapshot(choice.pointer),
         );
-      } on CatalogStorageException catch (error) {
+      } on CatalogStorageException {
         invalidCachedSnapshot = true;
-        lastDiagnostic = '本地快照损坏（${choice.pointer.identity}）：$error';
+        lastDiagnostic = 'snapshot:invalid';
       }
-      if (snapshot == null && !choice.localOnly && serverUrl.isNotEmpty) {
+      if (snapshot == null && !choice.localOnly) {
         final candidate = await attempt.waitFor(
           () => httpClient.downloadSnapshot(
             choice.pointer,
@@ -498,6 +947,7 @@ class CatalogController extends ChangeNotifier {
       final sourceData = await attempt.waitFor(
         () => _readSourceData(availableSnapshot.index),
       );
+      failureStage = CatalogSetupStage.runtime;
       final preparedRuntime = await attempt.waitFor(
         () => runtimeLoader.prepare(
           availableSnapshot,
@@ -509,6 +959,11 @@ class CatalogController extends ChangeNotifier {
       runtime = preparedRuntime;
       if (choice.localOnly ||
           state.active?.sameIdentity(choice.pointer) == true) {
+        if (!attempt.beginCommit()) {
+          preparedRuntime.dispose();
+          runtime = null;
+          return null;
+        }
         final localState = AppCatalogState(
           active: choice.pointer,
           // Keeping a healthy active snapshot for offline startup must not
@@ -532,14 +987,10 @@ class CatalogController extends ChangeNotifier {
         return CatalogReady(
           snapshot: availableSnapshot,
           usedLocalFallback: choice.localOnly,
+          localFallbackReason: localFallbackReason,
+          repositorySource: source,
         );
       }
-      // Once this Runtime is fully prepared, an Authority equal to the
-      // persisted LKG must remain publishable even when any subsequent
-      // commit-preparation step is cancelled, times out, or fails. Keep that
-      // ownership through the complete read/prepare/replace interval; the
-      // outer catch is only for failures before Runtime completion.
-      final reusePreparedLkg = state.lkg?.sameIdentity(choice.pointer) == true;
       try {
         final oldActive = state.active;
         CatalogSnapshot? oldSnapshot;
@@ -548,8 +999,8 @@ class CatalogController extends ChangeNotifier {
             oldSnapshot = await attempt.waitFor(
               () => store.readSnapshot(oldActive),
             );
-          } on CatalogStorageException catch (error) {
-            lastDiagnostic = '旧 active 快照不可用：$error';
+          } on CatalogStorageException {
+            lastDiagnostic = 'snapshot:oldActiveInvalid';
           }
         }
         final healthyLkg = oldSnapshot == null
@@ -559,26 +1010,28 @@ class CatalogController extends ChangeNotifier {
                 attempt: attempt,
               )
             : null;
-        final nextEnabled = SourcePreferences.afterCatalogTransition(
-          enabled: preferences.enabledSources ?? _readEnabledFromSettings(),
-          oldIndex: oldSnapshot?.index,
-          newIndex: availableSnapshot.index,
-          isAuthorityTransition: true,
-        );
         final nextState = AppCatalogState(
           active: choice.pointer,
           lkg: oldSnapshot == null ? healthyLkg : oldActive,
-          lastAuthority: CatalogLastAuthority(
-            catalog: choice.pointer,
-            serverUrl: serverUrl,
-            checkedAt: DateTime.now().toUtc(),
-          ),
         );
         final preparedHandle = await attempt.waitFor(
           () => appdata.prepareCatalogCommit(
             nextState: nextState,
-            nextEnabled: nextEnabled,
+            nextEnabled: preferences.enabledSources,
+            nextRepositorySource: source,
             attempt: attempt,
+            mutateEnabled: (raw) {
+              final current = SourcePreferences.normalizeOrPrevious(
+                raw,
+                preferences.enabledSources ?? _readEnabledFromSettings(),
+              );
+              return SourcePreferences.afterCatalogTransition(
+                enabled: current,
+                oldIndex: oldSnapshot?.index,
+                newIndex: availableSnapshot.index,
+                isCatalogTransition: true,
+              );
+            },
           ),
           onLate: (lateHandle) => lateHandle.discard(),
         );
@@ -591,7 +1044,14 @@ class CatalogController extends ChangeNotifier {
         _reportProgress('正在完成漫画源配置', 0, 0);
         await preparedHandle.replace();
         preparedHandle.installMemorySilently();
-        preferences.installSilently(nextEnabled);
+        final committedSettings = preparedHandle.document['settings'];
+        final committedEnabled = committedSettings is Map
+            ? SourcePreferences.normalizeOrPrevious(
+                committedSettings['enabledSources'],
+                preferences.enabledSources,
+              )
+            : preferences.enabledSources;
+        preferences.installSilently(committedEnabled);
         preparedRuntime.publish();
         _setPublished(preparedRuntime, state: nextState);
         published = true;
@@ -601,23 +1061,15 @@ class CatalogController extends ChangeNotifier {
         handle = null;
         runtime = null;
         attempt.finish();
-        return CatalogReady(snapshot: availableSnapshot);
+        return CatalogReady(
+          snapshot: availableSnapshot,
+          repositorySource: source,
+        );
       } catch (error) {
         attempt.close();
         if (handle != null && !handle.isReleased) {
           await _rollbackCommitHandle(handle);
           handle = null;
-        }
-        if (reusePreparedLkg && !preparedRuntime.isDisposed) {
-          final fallback = _publishPreparedLkg(
-            preparedRuntime,
-            snapshot: availableSnapshot,
-            previous: state,
-            attempt: attempt,
-          );
-          published = true;
-          runtime = null;
-          return fallback;
         }
         rethrow;
       }
@@ -627,7 +1079,8 @@ class CatalogController extends ChangeNotifier {
         await _rollbackCommitHandle(handle);
       }
       if (!published) runtime?.dispose();
-      lastDiagnostic ??= 'Catalog 启动尝试失败：$error';
+      _lastTryFailure = _failureFor(error, failureStage);
+      lastDiagnostic = _lastTryFailure!.diagnostic;
       return null;
     } finally {
       if (attempt.phase == CatalogAttemptPhase.preparing) attempt.close();
@@ -640,12 +1093,12 @@ class CatalogController extends ChangeNotifier {
     try {
       await handle.rollback();
     } catch (rollbackError) {
-      lastDiagnostic = 'Catalog 提交回滚失败：$rollbackError';
+      lastDiagnostic = 'commit:rollbackFailed';
       if (!handle.isReleased) {
         try {
           await handle.discard();
         } catch (discardError) {
-          lastDiagnostic = 'Catalog 提交清理失败：$discardError';
+          lastDiagnostic = 'commit:cleanupFailed';
         }
       }
     }
@@ -665,28 +1118,10 @@ class CatalogController extends ChangeNotifier {
           ? await store.readSnapshot(pointer)
           : await attempt.waitFor(() => store.readSnapshot(pointer));
       return snapshot == null ? null : pointer;
-    } on CatalogStorageException catch (error) {
-      lastDiagnostic = 'LKG 快照不可用：$error';
+    } on CatalogStorageException {
+      lastDiagnostic = 'snapshot:lkgInvalid';
       return null;
     }
-  }
-
-  CatalogReady _publishPreparedLkg(
-    PreparedRuntime runtime, {
-    required CatalogSnapshot snapshot,
-    required AppCatalogState previous,
-    required CatalogAttempt attempt,
-  }) {
-    final state = AppCatalogState(
-      active: snapshot.manifest.pointer,
-      lkg: null,
-      lastAuthority: previous.lastAuthority,
-    );
-    runtime.publish();
-    _setPublished(runtime, state: state);
-    attempt.finish();
-    _schedulePointerRepair(snapshot.manifest.pointer);
-    return CatalogReady(snapshot: snapshot, usedLocalFallback: true);
   }
 
   void _schedulePointerRepair(CatalogPointer pointer) {
@@ -794,14 +1229,16 @@ class CatalogController extends ChangeNotifier {
       return sourceData;
     }
   }
-
-  String get _savedServerUrl {
-    final current = appdata.settings['serverUrl'];
-    if (current is String && current.trim().isNotEmpty) return current.trim();
-    final legacy = appdata.settings['cloudTrackingServerUrl'];
-    return legacy is String ? legacy.trim() : '';
-  }
 }
+
+CatalogSetupFailure _failureFor(Object error, CatalogSetupStage stage) =>
+    CatalogSetupFailure.fromError(error, stage) ?? _cancelledFailure(stage);
+
+CatalogSetupFailure _cancelledFailure(CatalogSetupStage stage) =>
+    CatalogSetupFailure(
+      CatalogSetupFailureKind.cancelled,
+      diagnostic: '${stage.name}:cancelled',
+    );
 
 Directory _defaultLegacyRoot(CatalogStore store) {
   try {

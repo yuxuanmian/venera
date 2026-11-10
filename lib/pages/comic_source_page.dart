@@ -1,142 +1,571 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' as io;
+import 'package:flutter/foundation.dart' show setEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
-import 'package:venera/foundation/appdata.dart';
+import 'package:venera/foundation/catalog/controller.dart';
 import 'package:venera/foundation/catalog/source_preferences.dart';
 import 'package:venera/foundation/catalog/source_pages.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/log.dart';
+import 'package:venera/init.dart' show catalogController;
 import 'package:venera/network/cookie_jar.dart';
+import 'package:venera/pages/settings/settings_page.dart'
+    show CatalogRepositorySettings;
 import 'package:venera/pages/webview.dart';
 import 'package:venera/utils/translations.dart';
 
+const comicSourcePreviewLimit = 6;
+
 class ComicSourcePage extends StatelessWidget {
-  const ComicSourcePage({super.key, this.preferences});
+  const ComicSourcePage({super.key, this.preferences, this.controller});
 
   @visibleForTesting
   final SourcePreferences? preferences;
+  final CatalogController? controller;
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(body: _Body(preferences: preferences));
+    return Scaffold(
+      body: _EnabledComicSourceHome(
+        preferences: preferences,
+        controller: controller ?? catalogController,
+      ),
+    );
   }
 }
 
-class _Body extends StatefulWidget {
-  const _Body({this.preferences});
+class _EnabledComicSourceHome extends StatefulWidget {
+  const _EnabledComicSourceHome({this.preferences, this.controller});
 
   final SourcePreferences? preferences;
+  final CatalogController? controller;
 
   @override
-  State<_Body> createState() => _BodyState();
+  State<_EnabledComicSourceHome> createState() =>
+      _EnabledComicSourceHomeState();
 }
 
-class _BodyState extends State<_Body> {
+class _EnabledComicSourceHomeState extends State<_EnabledComicSourceHome> {
   late final SourcePreferences _preferences;
   late final bool _ownsPreferences;
-
-  void updateUI() {
-    if (!mounted) return;
-    setState(() {});
-  }
-
-  Set<String> get _effectiveKeys =>
-      _preferences.effectiveKeysFor(ComicSource.all().map((item) => item.key));
 
   @override
   void initState() {
     super.initState();
     _preferences = widget.preferences ?? appSourcePreferences();
     _ownsPreferences = widget.preferences == null;
-    ComicSourceManager().addListener(updateUI);
-    _preferences.addListener(updateUI);
+    ComicSourceManager().addListener(_refresh);
+    _preferences.addListener(_refresh);
   }
 
   @override
   void dispose() {
-    super.dispose();
-    ComicSourceManager().removeListener(updateUI);
-    _preferences.removeListener(updateUI);
+    ComicSourceManager().removeListener(_refresh);
+    _preferences.removeListener(_refresh);
     if (_ownsPreferences) _preferences.dispose();
+    super.dispose();
+  }
+
+  void _refresh() {
+    if (mounted) setState(() {});
+  }
+
+  List<ComicSource> get _enabledSources {
+    final all = ComicSourceManager().all();
+    final effective = _preferences.effectiveKeysFor(
+      all.map((item) => item.key),
+    );
+    return all.where((source) => effective.contains(source.key)).toList();
+  }
+
+  Future<void> _openSelection() async {
+    await context.to(
+      () => ComicSourceSelectionPage(
+        preferences: _preferences,
+        onComplete: () => Navigator.of(context).pop(),
+        onCancel: () => Navigator.of(context).pop(),
+      ),
+    );
+    if (mounted) setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
-    return SmoothCustomScrollView(
+    final enabled = _enabledSources;
+    final visible = enabled.take(comicSourcePreviewLimit).toList();
+    return CustomScrollView(
       slivers: [
-        SliverAppbar(title: Text('Comic Source'.tl), style: AppbarStyle.shadow),
-        buildCard(context),
-        if (ComicSource.all().isNotEmpty)
+        SliverAppbar(
+          title: Text('Comic Source'.tl),
+          style: AppbarStyle.shadow,
+          actions: [
+            if (widget.controller case final controller?)
+              IconButton(
+                tooltip: '配置仓库'.tl,
+                icon: const Icon(Icons.settings_outlined),
+                onPressed: () => context.to(
+                  () => CatalogRepositorySettings(controller: controller),
+                ),
+              ),
+          ],
+        ),
+        SliverToBoxAdapter(
+          child: ListTile(
+            key: const Key('manage-comic-sources'),
+            leading: const Icon(Icons.tune),
+            title: Text('Manage comic sources'.tl),
+            subtitle: Text(
+              'Select sources to show and use for local update tracking'.tl,
+            ),
+            trailing: const Icon(Icons.arrow_right),
+            onTap: _openSelection,
+          ),
+        ),
+        if (enabled.isEmpty)
+          SliverFillRemaining(
+            hasScrollBody: false,
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.source_outlined, size: 48),
+                    const SizedBox(height: 12),
+                    Text('No comic sources enabled'.tl, style: ts.s18),
+                    const SizedBox(height: 12),
+                    FilledButton(
+                      key: const Key('choose-comic-sources-empty'),
+                      onPressed: _openSelection,
+                      child: Text('Choose comic sources'.tl),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          )
+        else ...[
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-              child: Text('可选漫画源'.tl, style: ts.s18),
+              child: Text('Enabled comic sources'.tl, style: ts.s18),
             ),
           ),
-        for (final source in ComicSource.all())
-          _SourceSelectionTile(
-            key: ValueKey('source-selection-${source.key}'),
-            source: source,
-            enabled: _effectiveKeys.contains(source.key),
-            onChanged: (value) => _setSourceEnabled(source, value),
+          SliverList.builder(
+            itemCount: visible.length,
+            itemBuilder: (context, index) {
+              final source = visible[index];
+              return _CompactEnabledSourceRow(
+                key: Key('enabled-source-row-${source.key}'),
+                source: source,
+                onTap: () =>
+                    context.to(() => ComicSourceDetailPage(source: source)),
+              );
+            },
           ),
-        for (var source in ComicSource.all().where(
-          (source) => _effectiveKeys.contains(source.key),
-        ))
-          _SliverComicSource(key: ValueKey(source.filePath), source: source),
+          if (enabled.length > comicSourcePreviewLimit)
+            SliverToBoxAdapter(
+              child: ListTile(
+                key: const Key('view-all-enabled-sources'),
+                title: Text(
+                  'View all (@c sources)'.tlParams({'c': enabled.length}),
+                ),
+                trailing: const Icon(Icons.arrow_right),
+                onTap: () => context.to(
+                  () => EnabledComicSourcesPage(preferences: _preferences),
+                ),
+              ),
+            ),
+        ],
         SliverPadding(padding: EdgeInsets.only(bottom: context.padding.bottom)),
       ],
     );
   }
+}
 
-  Future<void> _setSourceEnabled(ComicSource source, bool enabled) async {
-    try {
-      await _preferences.setEnabledFor(
-        source.key,
-        enabled,
-        ComicSource.all().map((item) => item.key),
-      );
-      if (enabled) {
-        await _ensureDefaultPages(source);
-      }
-    } catch (error) {
-      if (mounted) context.showMessage(message: error.toString());
-    }
-  }
+class _CompactEnabledSourceRow extends StatelessWidget {
+  const _CompactEnabledSourceRow({
+    super.key,
+    required this.source,
+    required this.onTap,
+  });
 
-  Future<void> _ensureDefaultPages(ComicSource source) async {
-    final patch = defaultSourcePages(
-      Map<String, dynamic>.from(appdata.toJson()['settings'] as Map),
-      source,
-    );
-    if (patch.isNotEmpty) {
-      for (final entry in patch.entries) {
-        appdata.settings[entry.key] = entry.value;
-      }
-      await appdata.saveData();
-    }
-  }
+  final ComicSource source;
+  final VoidCallback onTap;
 
-  Widget buildCard(BuildContext context) {
-    return SliverToBoxAdapter(
-      child: SizedBox(
-        width: double.infinity,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              title: Text("Comic Source".tl),
-              subtitle: Text("选择要显示和用于本地追更的漫画源".tl),
-              leading: const Icon(Icons.source_outlined),
+  @override
+  Widget build(BuildContext context) {
+    final showLogin = source.account != null;
+    return ListTile(
+      dense: true,
+      leading: const Icon(Icons.extension_outlined),
+      title: Text(source.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (showLogin)
+            Text(
+              source.isLogged ? 'Logged in'.tl : 'Not logged in'.tl,
+              style: ts.s12.copyWith(
+                color: source.isLogged
+                    ? context.colorScheme.primary
+                    : context.colorScheme.onSurfaceVariant,
+              ),
             ),
-            const SizedBox(height: 8),
+          const Icon(Icons.arrow_right),
+        ],
+      ),
+      onTap: onTap,
+    );
+  }
+}
+
+class EnabledComicSourcesPage extends StatefulWidget {
+  const EnabledComicSourcesPage({super.key, required this.preferences});
+
+  final SourcePreferences preferences;
+
+  @override
+  State<EnabledComicSourcesPage> createState() =>
+      _EnabledComicSourcesPageState();
+}
+
+class _EnabledComicSourcesPageState extends State<EnabledComicSourcesPage> {
+  final _search = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _search.addListener(_refresh);
+    ComicSourceManager().addListener(_refresh);
+    widget.preferences.addListener(_refresh);
+  }
+
+  @override
+  void dispose() {
+    _search
+      ..removeListener(_refresh)
+      ..dispose();
+    ComicSourceManager().removeListener(_refresh);
+    widget.preferences.removeListener(_refresh);
+    super.dispose();
+  }
+
+  void _refresh() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final effective = widget.preferences.effectiveKeysFor(
+      ComicSourceManager().all().map((source) => source.key),
+    );
+    final keyword = _search.text.trim().toLowerCase();
+    final sources = ComicSourceManager()
+        .all()
+        .where((source) => effective.contains(source.key))
+        .where(
+          (source) =>
+              keyword.isEmpty || source.name.toLowerCase().contains(keyword),
+        )
+        .toList();
+    return Scaffold(
+      appBar: Appbar(title: Text('All enabled sources'.tl)),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: TextField(
+              key: const Key('enabled-source-search'),
+              controller: _search,
+              decoration: InputDecoration(
+                prefixIcon: const Icon(Icons.search),
+                hintText: 'Search enabled sources'.tl,
+                border: const OutlineInputBorder(),
+              ),
+            ),
+          ),
+          Expanded(
+            child: sources.isEmpty
+                ? Center(child: Text('No matching enabled sources'.tl))
+                : ListView.builder(
+                    itemCount: sources.length,
+                    itemBuilder: (context, index) {
+                      final source = sources[index];
+                      return _CompactEnabledSourceRow(
+                        key: Key('enabled-list-row-${source.key}'),
+                        source: source,
+                        onTap: () => context.to(
+                          () => ComicSourceDetailPage(source: source),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+enum _SourceSelectionFilter { all, selected }
+
+class ComicSourceSelectionPage extends StatefulWidget {
+  const ComicSourceSelectionPage({
+    super.key,
+    required this.preferences,
+    required this.onComplete,
+    required this.onCancel,
+    this.firstRun = false,
+  });
+
+  final SourcePreferences preferences;
+  final VoidCallback onComplete;
+  final VoidCallback onCancel;
+  final bool firstRun;
+
+  @override
+  State<ComicSourceSelectionPage> createState() =>
+      _ComicSourceSelectionPageState();
+}
+
+class _ComicSourceSelectionPageState extends State<ComicSourceSelectionPage> {
+  final _search = TextEditingController();
+  late final Set<String> _initialSelection;
+  late final Set<String> _draft;
+  var _filter = _SourceSelectionFilter.all;
+  bool _saving = false;
+  bool _confirmingDiscard = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    final activeKeys = ComicSourceManager().all().map((source) => source.key);
+    _initialSelection = widget.preferences.effectiveKeysFor(activeKeys).toSet();
+    _draft = Set<String>.from(_initialSelection);
+    _search.addListener(_refresh);
+  }
+
+  @override
+  void dispose() {
+    _search
+      ..removeListener(_refresh)
+      ..dispose();
+    super.dispose();
+  }
+
+  void _refresh() {
+    if (mounted) setState(() {});
+  }
+
+  bool get _dirty => !setEquals(_draft, _initialSelection);
+
+  Future<bool> _confirmDiscard() async {
+    if (!_dirty) return true;
+    return await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: Text('Discard unsaved changes?'.tl),
+            content: Text(
+              'Search and filters do not change the selection. Returning discards this draft.'
+                  .tl,
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: Text('Continue editing'.tl),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: Text('Discard changes'.tl),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+  }
+
+  Future<void> _leave() async {
+    if (_saving || _confirmingDiscard) return;
+    _confirmingDiscard = true;
+    try {
+      if (await _confirmDiscard() && mounted) widget.onCancel();
+    } finally {
+      _confirmingDiscard = false;
+    }
+  }
+
+  Future<void> _save() async {
+    if (_saving) return;
+    final added = _draft.difference(_initialSelection);
+    final removed = _initialSelection.difference(_draft);
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await widget.preferences.applySelectionChanges(
+        added: added,
+        removed: removed,
+        patchSettings: (settings) {
+          for (final key in added) {
+            final source = ComicSourceManager().find(key);
+            if (source != null) {
+              settings.addAll(defaultSourcePages(settings, source));
+            }
+          }
+        },
+      );
+      if (!mounted) return;
+      widget.onComplete();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _error = 'Failed to save comic source selection. Try again.'.tl;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final keyword = _search.text.trim().toLowerCase();
+    final allSources = ComicSourceManager().all();
+    final visible = allSources.where((source) {
+      final matchesName =
+          keyword.isEmpty || source.name.toLowerCase().contains(keyword);
+      final matchesFilter =
+          _filter == _SourceSelectionFilter.all || _draft.contains(source.key);
+      return matchesName && matchesFilter;
+    }).toList();
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) unawaited(_leave());
+      },
+      child: Scaffold(
+        appBar: Appbar(
+          title: Text(
+            widget.firstRun
+                ? 'Choose comic sources'.tl
+                : 'Manage comic sources'.tl,
+          ),
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: _saving ? null : _leave,
+          ),
+          actions: [
+            Center(
+              child: Text(
+                'Selected @a of @b'.tlParams({
+                  'a': _draft.length,
+                  'b': allSources.length,
+                }),
+                style: ts.s14,
+              ),
+            ),
+            const SizedBox(width: 16),
+          ],
+        ),
+        body: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+              child: TextField(
+                key: const Key('source-selection-search'),
+                controller: _search,
+                enabled: !_saving,
+                decoration: InputDecoration(
+                  prefixIcon: const Icon(Icons.search),
+                  hintText: 'Search comic sources'.tl,
+                  border: const OutlineInputBorder(),
+                ),
+              ),
+            ),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: SegmentedButton<_SourceSelectionFilter>(
+                segments: [
+                  ButtonSegment(
+                    value: _SourceSelectionFilter.all,
+                    label: Text('All'.tl),
+                  ),
+                  ButtonSegment(
+                    value: _SourceSelectionFilter.selected,
+                    label: Text('Selected'.tl),
+                  ),
+                ],
+                selected: {_filter},
+                onSelectionChanged: _saving
+                    ? null
+                    : (selection) {
+                        setState(() => _filter = selection.single);
+                      },
+              ),
+            ),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    _error!,
+                    style: TextStyle(color: context.colorScheme.error),
+                  ),
+                ),
+              ),
+            Expanded(
+              child: visible.isEmpty
+                  ? Center(child: Text('No matching comic sources'.tl))
+                  : ListView.builder(
+                      itemCount: visible.length,
+                      itemBuilder: (context, index) {
+                        final source = visible[index];
+                        return CheckboxListTile(
+                          key: Key('source-selection-${source.key}'),
+                          value: _draft.contains(source.key),
+                          onChanged: _saving
+                              ? null
+                              : (selected) {
+                                  setState(() {
+                                    if (selected == true) {
+                                      _draft.add(source.key);
+                                    } else {
+                                      _draft.remove(source.key);
+                                    }
+                                  });
+                                },
+                          title: Text(
+                            source.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          dense: true,
+                          controlAffinity: ListTileControlAffinity.trailing,
+                        );
+                      },
+                    ),
+            ),
+            SafeArea(
+              top: false,
+              minimum: const EdgeInsets.all(12),
+              child: SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  key: const Key('save-comic-source-selection'),
+                  onPressed: _saving ? null : _save,
+                  child: Text(_saving ? 'Saving…'.tl : 'Save selection'.tl),
+                ),
+              ),
+            ),
           ],
         ),
       ),
@@ -144,29 +573,22 @@ class _BodyState extends State<_Body> {
   }
 }
 
-class _SourceSelectionTile extends StatelessWidget {
-  const _SourceSelectionTile({
-    super.key,
-    required this.source,
-    required this.enabled,
-    required this.onChanged,
-  });
+class ComicSourceDetailPage extends StatelessWidget {
+  const ComicSourceDetailPage({super.key, required this.source});
 
   final ComicSource source;
-  final bool enabled;
-  final ValueChanged<bool> onChanged;
 
   @override
   Widget build(BuildContext context) {
-    return SliverToBoxAdapter(
-      child: ListTile(
-        title: Text(source.name),
-        subtitle: Text(source.version),
-        trailing: Switch(
-          key: Key('source-switch-${source.key}'),
-          value: enabled,
-          onChanged: onChanged,
-        ),
+    return Scaffold(
+      body: CustomScrollView(
+        slivers: [
+          SliverAppbar(title: Text(source.name), style: AppbarStyle.shadow),
+          _SliverComicSource(key: ValueKey(source.filePath), source: source),
+          SliverPadding(
+            padding: EdgeInsets.only(bottom: context.padding.bottom),
+          ),
+        ],
       ),
     );
   }
@@ -236,10 +658,6 @@ class _SliverComicSourceState extends State<_SliverComicSource> {
 
   @override
   Widget build(BuildContext context) {
-    var newVersion = ComicSourceManager().availableUpdates[source.key];
-    bool hasUpdate =
-        newVersion != null && compareSemVer(newVersion, source.version);
-
     return SliverMainAxisGroup(
       slivers: [
         SliverPadding(padding: const EdgeInsets.only(top: 16)),
@@ -247,7 +665,14 @@ class _SliverComicSourceState extends State<_SliverComicSource> {
           child: ListTile(
             title: Row(
               children: [
-                Text(source.name, style: ts.s18),
+                Flexible(
+                  child: Text(
+                    source.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: ts.s18,
+                  ),
+                ),
                 const SizedBox(width: 6),
                 Container(
                   padding: const EdgeInsets.symmetric(
@@ -263,24 +688,6 @@ class _SliverComicSourceState extends State<_SliverComicSource> {
                     style: const TextStyle(fontSize: 13),
                   ),
                 ),
-                if (hasUpdate)
-                  Tooltip(
-                    message: newVersion,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 6,
-                        vertical: 2,
-                      ),
-                      decoration: BoxDecoration(
-                        color: context.colorScheme.primaryContainer,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Text(
-                        "New Version".tl,
-                        style: const TextStyle(fontSize: 13),
-                      ),
-                    ),
-                  ).paddingLeft(4),
               ],
             ),
           ),
@@ -308,7 +715,9 @@ class _SliverComicSourceState extends State<_SliverComicSource> {
 
   Iterable<Widget> buildSourceSettings() sync* {
     // Try to get dynamic settings first (for getters), fall back to cached settings
-    var settingsMap = source.getSettingsDynamic() ?? source.settings;
+    var settingsMap = source.runtimeContext == null
+        ? source.settings
+        : source.getSettingsDynamic() ?? source.settings;
 
     if (settingsMap == null) {
       return;

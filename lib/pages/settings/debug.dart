@@ -1,7 +1,9 @@
 part of 'settings_page.dart';
 
 class DebugPage extends StatefulWidget {
-  const DebugPage({super.key});
+  const DebugPage({super.key, this.controller});
+
+  final CatalogController? controller;
 
   @override
   State<DebugPage> createState() => DebugPageState();
@@ -58,7 +60,9 @@ class DebugPageState extends State<DebugPage> {
         _CallbackSetting(
           title: "Catalog Diagnostics".tl,
           actionTitle: "Open".tl,
-          callback: () => context.to(() => const CatalogDiagnostics()),
+          callback: () => context.to(
+            () => CatalogDiagnostics(controller: widget.controller),
+          ),
         ).toSliver(),
         _CallbackSetting(
           title: "Open Log".tl,

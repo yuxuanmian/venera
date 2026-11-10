@@ -37,7 +37,6 @@ void main() {
       final create = await appdata.prepareCatalogCommit(
         nextState: state,
         nextEnabled: <String>['copy_manga'],
-        nextServerUrl: 'http://127.0.0.1:8080/',
       );
       await create.replace();
       create.installMemorySilently();

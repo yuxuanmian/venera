@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:venera/foundation/catalog/controller.dart';
 import 'package:venera/foundation/follow_update_availability.dart';
 import 'package:venera/headless.dart';
 
@@ -76,4 +77,24 @@ void main() {
       });
     }
   });
+
+  test(
+    'unavailable Catalog reports a stable reason without internal details',
+    () {
+      final payload = headlessCatalogUnavailablePayload(
+        const CatalogNeedsInitialization(
+          failure: CatalogSetupFailure(
+            CatalogSetupFailureKind.connectionFailed,
+            diagnostic: 'private path and URL',
+          ),
+        ),
+      );
+
+      expect(payload['status'], 'error');
+      expect(payload['code'], 'catalog_runtime_unavailable');
+      expect(payload['reason'], 'connectionFailed');
+      expect(payload['message'], isNot(contains('private')));
+      expect(payload['message'], isNot(contains('Venera Server')));
+    },
+  );
 }

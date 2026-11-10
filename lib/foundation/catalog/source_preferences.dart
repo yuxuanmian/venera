@@ -9,12 +9,22 @@ typedef SourcePreferencesUpdater =
     Future<List<String>?> Function(
       List<String>? Function(List<String>? current) mutation,
     );
+typedef SourceSelectionApplier =
+    Future<List<String>?> Function(
+      Set<String> added,
+      Set<String> removed,
+      void Function(Map<String, dynamic> settings)? patchSettings,
+    );
 
 /// User-owned source selection. It never starts or reloads a Runtime.
 class SourcePreferences extends ChangeNotifier {
-  SourcePreferences({List<String>? initial, this.writer, this.updater})
-    : _enabled = initial == null ? null : normalizeSelection(initial),
-      _lastAppdataValue = appdata.settings['enabledSources'] {
+  SourcePreferences({
+    List<String>? initial,
+    this.writer,
+    this.updater,
+    this.selectionApplier,
+  }) : _enabled = initial == null ? null : normalizeSelection(initial),
+       _lastAppdataValue = appdata.settings['enabledSources'] {
     appdata.settings.addListener(_onAppdataChanged);
   }
 
@@ -28,6 +38,7 @@ class SourcePreferences extends ChangeNotifier {
   Object? _lastAppdataValue;
   final SourcePreferencesWriter? writer;
   final SourcePreferencesUpdater? updater;
+  final SourceSelectionApplier? selectionApplier;
   Future<void> _mutationTail = Future<void>.value();
 
   List<String>? get enabledSources =>
@@ -192,15 +203,39 @@ class SourcePreferences extends ChangeNotifier {
     notifyListeners();
   });
 
-  /// Applies removal only when an Authority transition actually succeeded.
+  /// Applies the user's edits relative to the selection shown when the editor
+  /// opened. Keys outside [added] and [removed], including unknown synchronized
+  /// keys, are left untouched in the latest persisted value.
+  Future<void> applySelectionChanges({
+    required Iterable<String> added,
+    required Iterable<String> removed,
+    void Function(Map<String, dynamic> settings)? patchSettings,
+  }) => _enqueue(() async {
+    final addedKeys = added.toSet();
+    final removedKeys = removed.toSet();
+    final applier =
+        selectionApplier ??
+        (added, removed, patch) =>
+            appdata.updateEnabledSourcesAndSettings((raw) {
+              final current = normalizeOrPrevious(raw, _enabled);
+              return _applySelectionDelta(current, added, removed);
+            }, patchSettings: patch);
+    final persisted = await applier(addedKeys, removedKeys, patchSettings);
+    final normalized = normalizeOrPrevious(persisted, _enabled) ?? const [];
+    _enabled = List<String>.from(normalized);
+    _lastAppdataValue = persisted;
+    notifyListeners();
+  });
+
+  /// Applies removal only when a Catalog transition actually succeeded.
   /// Local fallback and failed checks intentionally leave the user's intent.
   static List<String>? afterCatalogTransition({
     required List<String>? enabled,
     required CatalogIndex? oldIndex,
     required CatalogIndex newIndex,
-    required bool isAuthorityTransition,
+    required bool isCatalogTransition,
   }) {
-    if (!isAuthorityTransition || enabled == null || oldIndex == null) {
+    if (!isCatalogTransition || enabled == null || oldIndex == null) {
       return enabled == null ? null : List.unmodifiable(enabled);
     }
     final removed = oldIndex.keys.difference(newIndex.keys);
@@ -235,6 +270,14 @@ SourcePreferences appSourcePreferences() {
       );
       return mutation(current);
     }),
+    selectionApplier: (added, removed, patchSettings) =>
+        appdata.updateEnabledSourcesAndSettings((raw) {
+          final current = SourcePreferences.normalizeOrPrevious(
+            raw,
+            preferences._enabled,
+          );
+          return _applySelectionDelta(current, added, removed);
+        }, patchSettings: patchSettings),
   );
   return preferences;
 }
@@ -257,4 +300,17 @@ List<String> _applyToggle(List<String>? current, String key, bool enabled) {
   next.remove(key);
   if (enabled) next.add(key);
   return SourcePreferences.normalizeSelection(next)!;
+}
+
+List<String>? _applySelectionDelta(
+  List<String>? current,
+  Set<String> added,
+  Set<String> removed,
+) {
+  final next = List<String>.from(current ?? const []);
+  next.removeWhere(removed.contains);
+  for (final key in added) {
+    if (!next.contains(key)) next.add(key);
+  }
+  return SourcePreferences.normalizeSelection(next);
 }

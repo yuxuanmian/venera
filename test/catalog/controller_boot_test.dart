@@ -31,10 +31,7 @@ class _Transport implements CatalogTransport {
 
 void main() {
   test('startup result types make initialization and recovery explicit', () {
-    expect(
-      const CatalogNeedsInitialization(serverDraft: ''),
-      isA<CatalogStartupResult>(),
-    );
+    expect(const CatalogNeedsInitialization(), isA<CatalogStartupResult>());
     expect(
       const CatalogNeedsRecovery('bad state'),
       isA<CatalogStartupResult>(),
@@ -43,7 +40,7 @@ void main() {
     expect(CatalogIndex.fromJson([]).entries, isEmpty);
   });
 
-  test('same-revision damaged cache is rebuilt from the authority', () async {
+  test('same-revision damaged cache is rebuilt from the repository', () async {
     final root = await Directory.systemTemp.createTemp('catalog-boot-repair-');
     addTearDown(() => root.delete(recursive: true));
     final oldDataPath = App.isInitialized ? App.dataPath : null;
@@ -63,11 +60,8 @@ void main() {
     });
 
     final revision = 'c' * 40;
-    final pointer = CatalogPointer(
-      catalogId: 'owner/repo',
-      revision: revision,
-      indexUrl:
-          'https://raw.githubusercontent.com/owner/repo/$revision/index.json',
+    final pointer = CatalogRepositorySource.defaults.pointerForRevision(
+      revision,
     );
     appdata.catalogRuntime = AppCatalogState(active: pointer).toJson();
     final store = CatalogStore(Directory('${root.path}/catalog'));
@@ -78,21 +72,21 @@ void main() {
       {'name': 'Demo', 'key': 'demo', 'fileName': 'demo.js', 'version': '1'},
     ];
     final transport = _Transport({
-      'https://server.example/api/catalog/authority': CatalogBytesResponse(
-        200,
-        utf8.encode(
-          jsonEncode({
-            'catalogId': pointer.catalogId,
-            'activeRevision': revision,
-            'indexUrl': pointer.indexUrl,
-          }),
-        ),
-      ),
+      'https://api.github.com/repos/yuxuanmian/venera-configs/git/ref/heads/yxm':
+          CatalogBytesResponse(
+            200,
+            utf8.encode(
+              jsonEncode({
+                'ref': 'refs/heads/yxm',
+                'object': {'type': 'commit', 'sha': revision},
+              }),
+            ),
+          ),
       pointer.indexUrl: CatalogBytesResponse(
         200,
         utf8.encode(jsonEncode(index)),
       ),
-      'https://raw.githubusercontent.com/owner/repo/$revision/demo.js':
+      'https://raw.githubusercontent.com/yuxuanmian/venera-configs/$revision/demo.js':
           CatalogBytesResponse(200, utf8.encode('source')),
     });
     final controller = CatalogController(

@@ -32,91 +32,87 @@ class _Transport implements CatalogTransport {
 }
 
 void main() {
-  test(
-    'controller cancellation leaves a late prepared runtime revoked',
-    () async {
-      final root = await Directory.systemTemp.createTemp('catalog-attempt-');
-      addTearDown(() => root.delete(recursive: true));
-      final wasInitialized = App.isInitialized;
-      final oldDataPath = wasInitialized ? App.dataPath : null;
-      final oldCachePath = wasInitialized ? App.cachePath : null;
-      App.dataPath = '${root.path}/data';
-      App.cachePath = '${root.path}/cache';
-      addTearDown(() {
-        if (wasInitialized) {
-          App.dataPath = oldDataPath!;
-          App.cachePath = oldCachePath!;
-        } else {
-          App.isInitialized = false;
-        }
-      });
-      appdata.loadError = null;
-      appdata.catalogRuntime = null;
+  test('controller cancellation leaves a late prepared runtime revoked', () async {
+    final root = await Directory.systemTemp.createTemp('catalog-attempt-');
+    addTearDown(() => root.delete(recursive: true));
+    final wasInitialized = App.isInitialized;
+    final oldDataPath = wasInitialized ? App.dataPath : null;
+    final oldCachePath = wasInitialized ? App.cachePath : null;
+    App.dataPath = '${root.path}/data';
+    App.cachePath = '${root.path}/cache';
+    addTearDown(() {
+      if (wasInitialized) {
+        App.dataPath = oldDataPath!;
+        App.cachePath = oldCachePath!;
+      } else {
+        App.isInitialized = false;
+      }
+    });
+    appdata.loadError = null;
+    appdata.catalogRuntime = null;
 
-      final revision = 'a' * 40;
-      final pointer = CatalogPointer(
-        catalogId: 'owner/repo',
-        revision: revision,
-        indexUrl:
-            'https://raw.githubusercontent.com/owner/repo/$revision/index.json',
-      );
-      final index = [
-        {'name': 'Demo', 'key': 'demo', 'fileName': 'demo.js', 'version': '1'},
-      ];
-      final transport = _Transport({
-        'https://server.example/api/catalog/authority': CatalogBytesResponse(
-          200,
-          utf8.encode(
-            jsonEncode({
-              'catalogId': pointer.catalogId,
-              'activeRevision': revision,
-              'indexUrl': pointer.indexUrl,
-            }),
+    final revision = 'a' * 40;
+    final pointer = CatalogRepositorySource.defaults.pointerForRevision(
+      revision,
+    );
+    final index = [
+      {'name': 'Demo', 'key': 'demo', 'fileName': 'demo.js', 'version': '1'},
+    ];
+    final transport = _Transport({
+      'https://api.github.com/repos/yuxuanmian/venera-configs/git/ref/heads/yxm':
+          CatalogBytesResponse(
+            200,
+            utf8.encode(
+              jsonEncode({
+                'ref': 'refs/heads/yxm',
+                'object': {'type': 'commit', 'sha': revision},
+              }),
+            ),
           ),
-        ),
-        pointer.indexUrl: CatalogBytesResponse(
-          200,
-          utf8.encode(jsonEncode(index)),
-        ),
-        'https://raw.githubusercontent.com/owner/repo/$revision/demo.js':
-            CatalogBytesResponse(200, utf8.encode('source')),
-      });
+      pointer.indexUrl: CatalogBytesResponse(
+        200,
+        utf8.encode(jsonEncode(index)),
+      ),
+      'https://raw.githubusercontent.com/yuxuanmian/venera-configs/$revision/demo.js':
+          CatalogBytesResponse(200, utf8.encode('source')),
+    });
 
-      var factoryCalls = 0;
-      final preparationStarted = Completer<void>();
-      final pendingSource = Completer<Object>();
-      ManagedSourceContext? preparingContext;
-      final loader = CatalogRuntimeLoader(
-        factory: (entry, source, context) {
-          factoryCalls++;
-          if (factoryCalls == 2) {
-            preparingContext = context;
-            preparationStarted.complete();
-            return pendingSource.future;
-          }
-          return source;
-        },
-      );
-      final controller = CatalogController(
-        store: CatalogStore(Directory('${root.path}/catalog')),
-        httpClient: CatalogHttpClient(transport: transport),
-        runtimeLoader: loader,
-        preferences: SourcePreferences(initial: []),
-        appdata: appdata,
-        legacyRoot: Directory('${root.path}/comic_source'),
-      );
+    var factoryCalls = 0;
+    final preparationStarted = Completer<void>();
+    final pendingSource = Completer<Object>();
+    ManagedSourceContext? preparingContext;
+    final loader = CatalogRuntimeLoader(
+      factory: (entry, source, context) {
+        factoryCalls++;
+        if (factoryCalls == 2) {
+          preparingContext = context;
+          preparationStarted.complete();
+          return pendingSource.future;
+        }
+        return source;
+      },
+    );
+    final controller = CatalogController(
+      store: CatalogStore(Directory('${root.path}/catalog')),
+      httpClient: CatalogHttpClient(transport: transport),
+      runtimeLoader: loader,
+      preferences: SourcePreferences(initial: []),
+      appdata: appdata,
+      legacyRoot: Directory('${root.path}/comic_source'),
+    );
 
-      final initialization = controller.initialize('https://server.example');
-      await preparationStarted.future.timeout(const Duration(seconds: 5));
-      controller.cancelCurrentAttempt();
-      final result = await initialization;
-      expect(result, isA<CatalogNeedsInitialization>());
-      expect((result as CatalogNeedsInitialization).failure, isNull);
-      expect(preparingContext?.phase, ManagedSourcePhase.preparing);
+    final initialization = controller.initializeRepository(
+      CatalogRepositorySource.defaults,
+    );
+    await preparationStarted.future.timeout(const Duration(seconds: 5));
+    controller.cancelCurrentAttempt();
+    final result = await initialization;
+    expect(result, isA<CatalogNeedsInitialization>());
+    expect((result as CatalogNeedsInitialization).failure, isNull);
+    expect(preparingContext?.phase, ManagedSourcePhase.preparing);
 
-      pendingSource.complete('late source');
-      await Future<void>.delayed(Duration.zero);
-      expect(preparingContext?.phase, ManagedSourcePhase.revoked);
-    },
-  );
+    pendingSource.complete('late source');
+    await Future<void>.delayed(Duration.zero);
+    expect(preparingContext?.phase, ManagedSourcePhase.revoked);
+  });
 }

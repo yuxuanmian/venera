@@ -8,6 +8,125 @@ const catalogMaxSourceBytes = 5 << 20;
 const catalogMaxTotalSourceBytes = 64 << 20;
 const catalogMaxSources = 256;
 
+class CatalogRepositorySourceException implements Exception {
+  const CatalogRepositorySourceException(this.code, this.message);
+
+  final String code;
+  final String message;
+
+  @override
+  String toString() => '$code: $message';
+}
+
+class CatalogRepositorySource {
+  const CatalogRepositorySource._({
+    required this.repositoryUrl,
+    required this.branch,
+    required this.owner,
+    required this.repository,
+  });
+
+  factory CatalogRepositorySource({
+    String repositoryUrl = defaultRepositoryUrl,
+    String branch = defaultBranch,
+  }) => CatalogRepositorySource.parse(repositoryUrl, branch: branch);
+
+  factory CatalogRepositorySource.parse(
+    String repositoryUrl, {
+    String branch = defaultBranch,
+  }) {
+    final trimmed = repositoryUrl.trim();
+    final uri = Uri.tryParse(trimmed);
+    final rawPathMatch = RegExp(
+      r'^https://github\.com/([^/?#]+)/([^/?#]+)$',
+      caseSensitive: false,
+    ).firstMatch(trimmed);
+    if (rawPathMatch == null ||
+        uri == null ||
+        uri.scheme != 'https' ||
+        uri.host != 'github.com' ||
+        uri.authority.toLowerCase() != 'github.com' ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasPort ||
+        uri.hasQuery ||
+        uri.hasFragment ||
+        uri.path.contains('%')) {
+      throw const CatalogRepositorySourceException(
+        'invalid_repository_url',
+        '配置仓库必须是 GitHub 的 HTTPS owner/repo 地址',
+      );
+    }
+    final rawOwner = rawPathMatch.group(1)!;
+    final rawRepository = rawPathMatch.group(2)!;
+    if (!RegExp(
+          r'^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$',
+        ).hasMatch(rawOwner) ||
+        !RegExp(r'^[A-Za-z0-9_.-]{1,100}$').hasMatch(rawRepository)) {
+      throw const CatalogRepositorySourceException(
+        'invalid_repository_url',
+        '配置仓库地址只能包含 owner/repo',
+      );
+    }
+    final owner = rawOwner.toLowerCase();
+    final repository = rawRepository.toLowerCase();
+    if (repository == '.' ||
+        repository == '..' ||
+        repository.endsWith('.git')) {
+      throw const CatalogRepositorySourceException(
+        'invalid_repository_url',
+        '配置仓库名称存在歧义',
+      );
+    }
+    _validateCatalogBranch(branch);
+    return CatalogRepositorySource._(
+      repositoryUrl: 'https://github.com/$owner/$repository',
+      branch: branch,
+      owner: owner,
+      repository: repository,
+    );
+  }
+
+  static const defaultRepositoryUrl =
+      'https://github.com/yuxuanmian/venera-configs';
+  static const defaultBranch = 'yxm';
+  static const defaults = CatalogRepositorySource._(
+    repositoryUrl: defaultRepositoryUrl,
+    branch: defaultBranch,
+    owner: 'yuxuanmian',
+    repository: 'venera-configs',
+  );
+
+  final String repositoryUrl;
+  final String branch;
+  final String owner;
+  final String repository;
+
+  String get catalogId => '$owner/$repository';
+
+  CatalogPointer pointerForRevision(String revision) {
+    final pointer = CatalogPointer(
+      catalogId: catalogId,
+      revision: revision,
+      indexUrl: Uri(
+        scheme: 'https',
+        host: 'raw.githubusercontent.com',
+        pathSegments: [owner, repository, revision, 'index.json'],
+      ).toString(),
+    );
+    pointer.validate();
+    return pointer;
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is CatalogRepositorySource &&
+      repositoryUrl == other.repositoryUrl &&
+      branch == other.branch;
+
+  @override
+  int get hashCode => Object.hash(repositoryUrl, branch);
+}
+
 class CatalogFormatException implements Exception {
   const CatalogFormatException(this.message, [this.cause]);
 
@@ -34,19 +153,6 @@ class CatalogPointer {
       catalogId: _requiredString(json, 'catalogId'),
       revision: _requiredString(json, 'revision'),
       indexUrl: _requiredString(json, 'indexUrl'),
-    )..validate();
-  }
-
-  /// Decodes the App-facing Authority response. The wire response calls the
-  /// revision `activeRevision`; it is deliberately not used elsewhere.
-  factory CatalogPointer.fromAuthorityJson(Map<String, dynamic> json) {
-    final catalogId = _requiredString(json, 'catalogId');
-    final revision = _requiredString(json, 'activeRevision');
-    final indexUrl = _requiredString(json, 'indexUrl');
-    return CatalogPointer(
-      catalogId: catalogId,
-      revision: revision,
-      indexUrl: indexUrl,
     )..validate();
   }
 
@@ -425,4 +531,40 @@ CatalogLastAuthority? _optionalLastAuthority(Object? value) {
   if (value is! Map)
     throw const CatalogFormatException('lastAuthority must be object or null');
   return CatalogLastAuthority.fromJson(Map<String, dynamic>.from(value));
+}
+
+void _validateCatalogBranch(String branch) {
+  const forbidden = '~^:?*[\\';
+  if (branch.isEmpty ||
+      branch == '@' ||
+      branch.startsWith('-') ||
+      branch.startsWith('/') ||
+      branch.endsWith('/') ||
+      branch.endsWith('.') ||
+      branch.contains('//') ||
+      branch.contains('..') ||
+      branch.contains('@{') ||
+      branch.codeUnits.any(forbidden.codeUnits.contains)) {
+    throw const CatalogRepositorySourceException(
+      'invalid_branch',
+      '配置分支不是有效的 Git ref',
+    );
+  }
+  for (final segment in branch.split('/')) {
+    if (segment.isEmpty ||
+        segment.startsWith('.') ||
+        segment.endsWith('.') ||
+        segment.toLowerCase().endsWith('.lock')) {
+      throw const CatalogRepositorySourceException(
+        'invalid_branch',
+        '配置分支不是有效的 Git ref',
+      );
+    }
+  }
+  if (branch.codeUnits.any((unit) => unit <= 0x20 || unit == 0x7f)) {
+    throw const CatalogRepositorySourceException(
+      'invalid_branch',
+      '配置分支不是有效的 Git ref',
+    );
+  }
 }

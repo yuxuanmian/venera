@@ -9,7 +9,7 @@ import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/cache_manager.dart';
-import 'package:venera/foundation/catalog/http_client.dart';
+import 'package:venera/foundation/catalog/controller.dart';
 import 'package:venera/foundation/catalog/models.dart';
 import 'package:venera/foundation/catalog/source_preferences.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
@@ -31,14 +31,15 @@ part 'appearance.dart';
 part 'app.dart';
 part 'about.dart';
 part 'network.dart';
-part 'server.dart';
+part 'repository.dart';
 part 'catalog_diagnostics.dart';
 part 'debug.dart';
 
 class SettingsPage extends StatefulWidget {
-  const SettingsPage({this.initialPage = -1, super.key});
+  const SettingsPage({this.initialPage = -1, this.controller, super.key});
 
   final int initialPage;
+  final CatalogController? controller;
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -50,6 +51,8 @@ class _SettingsPageState extends State<SettingsPage> {
   ColorScheme get colors => Theme.of(context).colorScheme;
 
   bool get enableTwoViews => context.width > 720;
+
+  CatalogController? get controller => widget.controller;
 
   /// The settings categories, in order.
   ///
@@ -214,7 +217,10 @@ class _SettingsPageState extends State<SettingsPage> {
             if (enableTwoViews) {
               setState(() => currentPage = id);
             } else {
-              context.to(() => _SettingsDetailPage(pageIndex: id));
+              context.to(
+                () =>
+                    _SettingsDetailPage(pageIndex: id, controller: controller),
+              );
             }
           },
           child: content,
@@ -250,19 +256,23 @@ class _SettingsPageState extends State<SettingsPage> {
       0 => const ExploreSettings(),
       1 => const ReaderSettings(),
       2 => const AppearanceSettings(),
-      3 => const AppSettings(),
+      3 => AppSettings(controller: controller),
       4 => const NetworkSettings(),
       5 => const AboutSettings(),
-      6 => const DebugPage(),
+      6 => DebugPage(controller: controller),
       _ => throw UnimplementedError(),
     };
   }
 }
 
 class _SettingsDetailPage extends StatelessWidget {
-  const _SettingsDetailPage({required this.pageIndex});
+  const _SettingsDetailPage({
+    required this.pageIndex,
+    required this.controller,
+  });
 
   final int pageIndex;
+  final CatalogController? controller;
 
   @override
   Widget build(BuildContext context) {
@@ -274,10 +284,10 @@ class _SettingsDetailPage extends StatelessWidget {
       0 => const ExploreSettings(),
       1 => const ReaderSettings(),
       2 => const AppearanceSettings(),
-      3 => const AppSettings(),
+      3 => AppSettings(controller: controller),
       4 => const NetworkSettings(),
       5 => const AboutSettings(),
-      6 => const DebugPage(),
+      6 => DebugPage(controller: controller),
       _ => throw UnimplementedError(),
     };
   }

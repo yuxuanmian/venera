@@ -3,6 +3,7 @@ import 'package:sliver_tools/sliver_tools.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
+import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/catalog/source_preferences.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/consts.dart';
@@ -35,7 +36,7 @@ class HomePage extends StatelessWidget {
         const _SyncDataWidget(),
         const _History(),
         const FollowUpdatesWidget(),
-        const _ComicSourceWidget(),
+        const ComicSourcePreviewCard(),
         const ImageFavorites(),
         const _Local(),
         SliverPadding(padding: EdgeInsets.only(top: context.padding.bottom)),
@@ -617,21 +618,20 @@ class _ImportComicsWidgetState extends State<_ImportComicsWidget> {
   }
 }
 
-class _ComicSourceWidget extends StatefulWidget {
-  const _ComicSourceWidget();
+class ComicSourcePreviewCard extends StatefulWidget {
+  const ComicSourcePreviewCard({super.key});
 
   @override
-  State<_ComicSourceWidget> createState() => _ComicSourceWidgetState();
+  State<ComicSourcePreviewCard> createState() => _ComicSourcePreviewCardState();
 }
 
-class _ComicSourceWidgetState extends State<_ComicSourceWidget> {
-  late List<String> comicSources;
+class _ComicSourcePreviewCardState extends State<ComicSourcePreviewCard> {
+  late List<ComicSource> comicSources;
 
   void onComicSourceChange() {
     setState(() {
       comicSources = ComicSource.all()
           .where((source) => isSourceEnabled(source.key))
-          .map((e) => e.name)
           .toList();
     });
   }
@@ -640,29 +640,17 @@ class _ComicSourceWidgetState extends State<_ComicSourceWidget> {
   void initState() {
     comicSources = ComicSource.all()
         .where((source) => isSourceEnabled(source.key))
-        .map((e) => e.name)
         .toList();
     ComicSourceManager().addListener(onComicSourceChange);
+    appdata.settings.addListener(onComicSourceChange);
     super.initState();
   }
 
   @override
   void dispose() {
     ComicSourceManager().removeListener(onComicSourceChange);
+    appdata.settings.removeListener(onComicSourceChange);
     super.dispose();
-  }
-
-  int get _availableUpdates {
-    int c = 0;
-    ComicSourceManager().availableUpdates.forEach((key, version) {
-      var source = ComicSource.find(key);
-      if (source != null) {
-        if (compareSemVer(version, source.version)) {
-          c++;
-        }
-      }
-    });
-    return c;
   }
 
   @override
@@ -716,55 +704,51 @@ class _ComicSourceWidgetState extends State<_ComicSourceWidget> {
                   child: Wrap(
                     runSpacing: 8,
                     spacing: 8,
-                    children: comicSources.map((e) {
-                      return Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 2,
+                    children: [
+                      for (final source in comicSources.take(
+                        comicSourcePreviewLimit,
+                      ))
+                        Container(
+                          constraints: const BoxConstraints(maxWidth: 180),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.secondaryContainer,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Text(
+                            source.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
-                        decoration: BoxDecoration(
-                          color: Theme.of(
-                            context,
-                          ).colorScheme.secondaryContainer,
-                          borderRadius: BorderRadius.circular(8),
+                      if (comicSources.length > comicSourcePreviewLimit)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.surfaceContainerHighest,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Text(
+                            '+${comicSources.length - comicSourcePreviewLimit}',
+                          ),
                         ),
-                        child: Text(e),
-                      );
-                    }).toList(),
+                    ],
                   ).paddingHorizontal(16).paddingBottom(16),
                 ),
-              if (_availableUpdates > 0)
-                Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        border: Border.all(
-                          color: context.colorScheme.outlineVariant,
-                          width: 0.6,
-                        ),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.update,
-                            color: context.colorScheme.primary,
-                            size: 20,
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            "@c updates".tlParams({'c': _availableUpdates}),
-                            style: ts.withColor(context.colorScheme.primary),
-                          ),
-                        ],
-                      ),
-                    )
-                    .toAlign(Alignment.centerLeft)
-                    .paddingHorizontal(16)
-                    .paddingBottom(8),
+              if (comicSources.isEmpty)
+                Text(
+                  'Choose comic sources'.tl,
+                ).paddingHorizontal(16).paddingBottom(16),
             ],
           ),
         ),

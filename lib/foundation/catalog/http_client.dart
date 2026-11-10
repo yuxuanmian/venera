@@ -8,11 +8,11 @@ import 'package:venera/network/app_dio.dart';
 import 'models.dart';
 import 'store.dart';
 
-const catalogAuthorityTimeout = Duration(seconds: 3);
+const catalogHeadTimeout = Duration(seconds: 3);
 const catalogNormalPrepareBudget = Duration(seconds: 30);
 const catalogBootstrapPrepareBudget = Duration(seconds: 120);
 const catalogFileRequestTimeout = Duration(seconds: 15);
-const catalogMaxAuthorityBytes = 64 << 10;
+const catalogMaxGitRefBytes = 64 << 10;
 const catalogMaxConcurrentDownloads = 4;
 
 class CatalogHttpException implements Exception {
@@ -25,42 +25,6 @@ class CatalogHttpException implements Exception {
   @override
   String toString() =>
       cause == null ? '$code: $message' : '$code: $message: $cause';
-}
-
-class CatalogServerUrl {
-  const CatalogServerUrl._(this.uri);
-
-  final Uri uri;
-
-  factory CatalogServerUrl.parse(String input) {
-    final trimmed = input.trim();
-    final uri = Uri.tryParse(trimmed);
-    if (uri == null ||
-        (uri.scheme != 'http' && uri.scheme != 'https') ||
-        uri.host.isEmpty ||
-        uri.userInfo.isNotEmpty ||
-        uri.hasQuery ||
-        uri.hasFragment ||
-        uri.pathSegments.contains('api') &&
-            uri.pathSegments.contains('catalog') ||
-        uri.host == 'raw.githubusercontent.com') {
-      throw const CatalogHttpException(
-        'invalid_server_url',
-        '请输入 Venera Server 基础地址',
-      );
-    }
-    if (uri.pathSegments.any((segment) => segment == '..' || segment == '.')) {
-      throw const CatalogHttpException('invalid_server_url', 'Server 地址路径无效');
-    }
-    return CatalogServerUrl._(uri.replace(path: _basePath(uri.path)));
-  }
-
-  String get normalized => uri.toString();
-
-  Uri get authorityUri => uri.replace(path: '${uri.path}api/catalog/authority');
-
-  @override
-  String toString() => normalized;
 }
 
 class CatalogBytesResponse {
@@ -391,72 +355,110 @@ class CatalogHttpClient {
 
   final CatalogTransport transport;
 
-  Future<CatalogPointer> getAuthority(
-    String serverBaseUrl, {
+  Future<CatalogPointer> resolveRepositoryHead(
+    CatalogRepositorySource source, {
     CatalogAttempt? attempt,
-  }) async {
-    final base = CatalogServerUrl.parse(serverBaseUrl);
-    final remaining = attempt?.remaining;
-    if (remaining != null && remaining <= Duration.zero) {
-      throw const CatalogHttpException('timeout', 'Catalog 准备超时');
+  }) {
+    if (attempt == null) {
+      return _resolveRepositoryHead(source);
     }
-    final timeout = remaining == null || remaining > catalogAuthorityTimeout
-        ? catalogAuthorityTimeout
-        : remaining;
+    _timeoutForAttempt(attempt, catalogHeadTimeout);
+    return attempt.waitFor(() => _resolveRepositoryHead(source, attempt));
+  }
+
+  Future<CatalogPointer> _resolveRepositoryHead(
+    CatalogRepositorySource source, [
+    CatalogAttempt? attempt,
+  ]) async {
+    final timeout = _timeoutForAttempt(attempt, catalogHeadTimeout);
     final response = await transport
         .getBytes(
-          base.authorityUri,
+          _repositoryHeadUri(source),
           timeout: timeout,
-          maxBytes: catalogMaxAuthorityBytes,
+          maxBytes: catalogMaxGitRefBytes,
           cancellation: attempt?.cancellation,
         )
         .timeout(timeout)
         .catchError((error) {
           throw _normalizeTransportError(error);
         });
-    if (response.bytes.length > catalogMaxAuthorityBytes) {
-      throw const CatalogHttpException('response_too_large', 'Server 响应过大');
+    if (response.bytes.length > catalogMaxGitRefBytes) {
+      throw const CatalogHttpException('response_too_large', 'GitHub 分支响应过大');
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      String? serverCode;
-      try {
-        final body = jsonDecode(utf8.decode(response.bytes));
-        final error = body is Map ? body['error'] : null;
-        final code = error is Map ? error['code'] : null;
-        if (code is String &&
-            RegExp(r'^[a-z][a-z0-9_]{0,63}$').hasMatch(code) &&
-            error['message'] is String) {
-          serverCode = code;
-        }
-      } on FormatException {
-        // HTML and malformed error bodies are classified by HTTP status.
-      }
       throw CatalogHttpException(
-        serverCode ??
-            (const [502, 503, 504].contains(response.statusCode)
-                ? 'connection_failed'
-                : response.statusCode == 404
-                ? 'not_found'
-                : 'authority_failed'),
-        'Authority HTTP ${response.statusCode}',
+        'head_query_failed',
+        'GitHub 分支请求失败（HTTP ${response.statusCode}）',
       );
     }
     try {
       final value = jsonDecode(utf8.decode(response.bytes));
-      if (value is! Map) throw const FormatException('object expected');
-      return CatalogPointer.fromAuthorityJson(Map<String, dynamic>.from(value));
-    } on CatalogFormatException catch (error) {
-      throw CatalogHttpException(
-        'invalid_authority',
-        'Server 返回的漫画源配置无效',
-        error,
+      if (value is! Map) {
+        throw const CatalogFormatException('head response must be an object');
+      }
+      final object = value['object'];
+      if (value['ref'] != 'refs/heads/${source.branch}' ||
+          object is! Map ||
+          object['type'] != 'commit' ||
+          object['sha'] is! String) {
+        throw const CatalogFormatException('invalid repository head');
+      }
+      final revision = object['sha'] as String;
+      if (!RegExp(r'^[0-9a-f]{40}$').hasMatch(revision)) {
+        throw const CatalogFormatException('invalid repository head revision');
+      }
+      return source.pointerForRevision(revision);
+    } on CatalogFormatException {
+      throw const CatalogHttpException(
+        'invalid_head_response',
+        'GitHub 分支响应无效',
       );
-    } on Object catch (error) {
-      throw CatalogHttpException(
-        'invalid_authority',
-        'Server 返回的漫画源配置不是有效 JSON',
-        error,
+    } on Object {
+      throw const CatalogHttpException(
+        'invalid_head_response',
+        'GitHub 分支响应不是有效 JSON',
       );
+    }
+  }
+
+  /// Reads and validates only the index declared by [pointer]. This is used to
+  /// validate a repository change without downloading or publishing sources.
+  Future<CatalogIndex> readIndex(
+    CatalogPointer pointer, {
+    required CatalogAttempt attempt,
+  }) {
+    _timeoutForAttempt(attempt, catalogFileRequestTimeout);
+    return attempt.waitFor(() => _readIndex(pointer, attempt));
+  }
+
+  Future<CatalogIndex> _readIndex(
+    CatalogPointer pointer,
+    CatalogAttempt attempt,
+  ) async {
+    try {
+      pointer.validate();
+    } on CatalogFormatException {
+      throw const CatalogHttpException('invalid_pointer', 'Catalog 指针无效');
+    }
+    _timeoutForAttempt(attempt, catalogFileRequestTimeout);
+    final response = await _get(
+      indexUri(pointer),
+      attempt: attempt,
+      maxBytes: catalogMaxIndexBytes,
+    );
+    if (response.bytes.length > catalogMaxIndexBytes) {
+      throw const CatalogHttpException('response_too_large', 'index 响应过大');
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw CatalogHttpException(
+        'index_query_failed',
+        'index 请求失败（HTTP ${response.statusCode}）',
+      );
+    }
+    try {
+      return CatalogIndex.fromBytes(response.bytes);
+    } on CatalogFormatException {
+      throw const CatalogHttpException('invalid_index', '漫画源配置索引无效');
     }
   }
 
@@ -585,6 +587,36 @@ class CatalogHttpClient {
   }
 }
 
+Duration _timeoutForAttempt(CatalogAttempt? attempt, Duration maximum) {
+  if (attempt == null) return maximum;
+  if (attempt.cancellation.isCancelled ||
+      attempt.phase != CatalogAttemptPhase.preparing) {
+    throw const CatalogHttpException('cancelled', 'Catalog 准备已取消');
+  }
+  final remaining = attempt.remaining;
+  if (remaining <= Duration.zero) {
+    throw const CatalogHttpException('timeout', 'Catalog 准备超时');
+  }
+  return remaining < maximum ? remaining : maximum;
+}
+
+Uri _repositoryHeadUri(CatalogRepositorySource source) {
+  final branchSegments = source.branch.split('/');
+  return Uri(
+    scheme: 'https',
+    host: 'api.github.com',
+    pathSegments: [
+      'repos',
+      source.owner,
+      source.repository,
+      'git',
+      'ref',
+      'heads',
+      ...branchSegments,
+    ],
+  );
+}
+
 Object _normalizeTransportError(Object error) {
   if (error is CatalogHttpException) return error;
   if (error is TimeoutException) {
@@ -596,11 +628,6 @@ Object _normalizeTransportError(Object error) {
     return CatalogHttpException('connection_failed', 'Catalog 连接失败', error);
   }
   return error;
-}
-
-String _basePath(String path) {
-  if (path.isEmpty || path == '/') return '/';
-  return '${path.replaceFirst(RegExp(r'/+$'), '')}/';
 }
 
 Future<List<int>> _readLimited(

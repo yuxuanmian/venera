@@ -16,7 +16,7 @@ void main() {
         enabled: ['a'],
         oldIndex: old,
         newIndex: next,
-        isAuthorityTransition: true,
+        isCatalogTransition: true,
       ),
       ['a'],
     );

@@ -15,23 +15,25 @@ void main() {
             as Map<String, dynamic>;
   });
 
-  test('decodes authority wire revision into a pointer', () {
-    final value = fixture['authorityCases'].firstWhere(
-      (item) => item['id'] == 'authority-a',
-    )['value'];
-    final pointer = CatalogPointer.fromAuthorityJson(
-      Map<String, dynamic>.from(value),
-    );
+  test('round trips the pinned pointer wire format', () {
+    final pointer = CatalogPointer.fromJson({
+      'catalogId': 'owner/repo',
+      'revision': 'a' * 40,
+      'indexUrl':
+          'https://raw.githubusercontent.com/owner/repo/${'a' * 40}/index.json',
+    });
     expect(pointer.revision, 'a' * 40);
     expect(pointer.toJson()['revision'], 'a' * 40);
   });
 
-  test('rejects authority identity and URL mismatch', () {
-    final value = fixture['authorityCases'].firstWhere(
-      (item) => item['id'] == 'revision-url-mismatch',
-    )['value'];
+  test('rejects pointer identity and URL mismatch', () {
     expect(
-      () => CatalogPointer.fromAuthorityJson(Map<String, dynamic>.from(value)),
+      () => CatalogPointer.fromJson({
+        'catalogId': 'owner/repo',
+        'revision': 'a' * 40,
+        'indexUrl':
+            'https://raw.githubusercontent.com/other/repo/${'a' * 40}/index.json',
+      }),
       throwsA(isA<CatalogFormatException>()),
     );
   });
