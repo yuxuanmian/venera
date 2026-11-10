@@ -298,6 +298,7 @@ class FollowUpdateCoordinator {
   FollowUpdateProgress _progress = const FollowUpdateProgress.idle();
   final ValueNotifier<FollowUpdateProgress> _progressNotifier =
       ValueNotifier<FollowUpdateProgress>(const FollowUpdateProgress.idle());
+  final ValueNotifier<int> _scheduleRevisionNotifier = ValueNotifier(0);
 
   bool _roundRunning = false;
   bool _cacheRunning = false;
@@ -321,6 +322,13 @@ class FollowUpdateCoordinator {
 
   /// Progress for the current (or last) round.
   ValueListenable<FollowUpdateProgress> get progress => _progressNotifier;
+
+  /// Increments after a judgment batch has been recomputed and committed.
+  ///
+  /// Recent-update presentation reads the separate schedule store, so the
+  /// judgment event itself is too early. This signal fires only after the
+  /// schedule transaction has completed.
+  ValueListenable<int> get scheduleRevision => _scheduleRevisionNotifier;
 
   /// The attached schedule service, or null before [attachScheduleService].
   ///
@@ -396,9 +404,24 @@ class FollowUpdateCoordinator {
   /// is what keeps the domains unaware of each other.
   void attachScheduleService(ScheduleService scheduleService) {
     _scheduleService = scheduleService;
-    _scheduleSubscription ??= _judgmentService.events.listen(
-      scheduleService.recomputeFromEvent,
-    );
+    _scheduleSubscription ??= _judgmentService.events.listen((event) {
+      if (event.rows.isEmpty) return;
+      unawaited(
+        scheduleService
+            .recomputeFromEvent(event)
+            .then<void>(
+              (_) {
+                if (!_disposed) _scheduleRevisionNotifier.value++;
+              },
+              onError: (Object error, StackTrace _) {
+                Log.warning(
+                  'FollowUpSchedule',
+                  'Failed to persist a schedule batch: $error',
+                );
+              },
+            ),
+      );
+    });
   }
 
   /// Begins consuming newly persisted observations and cache changes.
@@ -901,6 +924,7 @@ class FollowUpdateCoordinator {
     await _scheduleSubscription?.cancel();
     _scheduleSubscription = null;
     _progressNotifier.dispose();
+    _scheduleRevisionNotifier.dispose();
   }
 }
 
