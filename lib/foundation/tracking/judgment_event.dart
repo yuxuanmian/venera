@@ -49,6 +49,24 @@ class JudgmentRowResult {
       'observed=$observedAtMs activity=$activityAt)';
 }
 
+class ComicScheduleInput extends JudgmentRowResult {
+  const ComicScheduleInput({
+    required super.sourceKey,
+    required super.comicId,
+    required super.conclusion,
+    required super.observedAtMs,
+    super.activityAt,
+    required this.attemptId,
+  });
+
+  final String attemptId;
+
+  @override
+  String toString() =>
+      'ComicScheduleInput($sourceKey/$comicId attempt=$attemptId '
+      '${conclusion.value} observed=$observedAtMs activity=$activityAt)';
+}
+
 /// One batch of judged identities.
 ///
 /// Granularity is the batch, payload is per row — the two are not a choice.

@@ -79,6 +79,40 @@ class ScanTargetProvider {
     Map<String, Set<String>>? dueComicIdsBySource,
     Set<String>? scopeSourceKeys,
     String? roundLabel,
+  }) => _snapshot(
+    dueComicIdsBySource: dueComicIdsBySource,
+    scopeSourceKeys: scopeSourceKeys,
+    roundLabel: roundLabel,
+  );
+
+  /// Builds the unfiltered snapshot without logging it. The caller logs the
+  /// final prepared result through [logPreparedOverview].
+  Future<ScanTargetSnapshot> snapshotForPreparation({
+    Set<String>? scopeSourceKeys,
+    String? roundLabel,
+  }) => _snapshot(
+    scopeSourceKeys: scopeSourceKeys,
+    roundLabel: roundLabel,
+    deferOverview: true,
+  );
+
+  void logPreparedOverview({
+    required ScanTargetSnapshot snapshot,
+    required ScanTargetSnapshot narrowed,
+    Set<String>? scopeSourceKeys,
+    String? roundLabel,
+  }) => _logPlanOverview(
+    snapshot: snapshot,
+    narrowed: narrowed,
+    roundLabel: roundLabel,
+    scopeSourceKeys: scopeSourceKeys,
+  );
+
+  Future<ScanTargetSnapshot> _snapshot({
+    Map<String, Set<String>>? dueComicIdsBySource,
+    Set<String>? scopeSourceKeys,
+    String? roundLabel,
+    bool deferOverview = false,
   }) async {
     final startGeneration = cache.cacheGeneration;
     final folders = cache.getAllCachedFolders();
@@ -208,24 +242,28 @@ class ScanTargetProvider {
       skippedSources: skipped,
     );
     if (dueComicIdsBySource == null) {
-      _logPlanOverview(
-        snapshot: unfiltered,
-        narrowed: unfiltered,
-        roundLabel: roundLabel,
-        scopeSourceKeys: scopeSourceKeys,
-      );
+      if (!deferOverview) {
+        _logPlanOverview(
+          snapshot: unfiltered,
+          narrowed: unfiltered,
+          roundLabel: roundLabel,
+          scopeSourceKeys: scopeSourceKeys,
+        );
+      }
       return unfiltered;
     }
     final narrowed = filterTargetsByDue(
       snapshot: unfiltered,
       dueComicIdsBySource: dueComicIdsBySource,
     );
-    _logPlanOverview(
-      snapshot: unfiltered,
-      narrowed: narrowed,
-      roundLabel: roundLabel,
-      scopeSourceKeys: scopeSourceKeys,
-    );
+    if (!deferOverview) {
+      _logPlanOverview(
+        snapshot: unfiltered,
+        narrowed: narrowed,
+        roundLabel: roundLabel,
+        scopeSourceKeys: scopeSourceKeys,
+      );
+    }
     return narrowed;
   }
 

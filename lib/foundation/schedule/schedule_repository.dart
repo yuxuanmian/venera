@@ -48,6 +48,17 @@ abstract class ScheduleStateRepository {
   /// Writes the batch inside one transaction and returns the row count.
   Future<int> applyBatch(List<ScheduleState> rows);
 
+  /// Atomically applies schedules and their observation-attempt markers.
+  ///
+  /// The default keeps older in-memory test repositories source compatible.
+  /// The production SQLite repository overrides it with one transaction.
+  Future<Set<String>> applyComicRecovery(
+    Map<String, ({ScheduleState state, String attemptId})> rows,
+  ) async {
+    await applyBatch([for (final row in rows.values) row.state]);
+    return const <String>{};
+  }
+
   /// Deletes every schedule row.  All identities become due again, because
   /// "no schedule record" is itself a due condition (S4).
   Future<void> clear();

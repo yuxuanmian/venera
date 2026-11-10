@@ -4,13 +4,15 @@ import 'package:path/path.dart' as file_path;
 import 'package:sqlite3/sqlite3.dart';
 
 import '../app.dart';
+import '../sqlite_recovery_batch.dart';
 import 'judgment.dart';
+import 'judgment_event.dart';
 import 'judgment_repository.dart';
 import 'judgment_state.dart';
 
-/// SQLite implementation of the single-table judgment state store.
+/// SQLite implementation of the judgment state store.
 ///
-/// Database: `App.dataPath/tracking_state.db`, schema v1.  It sits beside
+/// Database: `App.dataPath/tracking_state.db`. It sits beside
 /// `scan_results.db` and depends on it in no direction: either side can be
 /// deleted or rebuilt without damaging the other (Contract J10, data-model
 /// section 2).
@@ -26,7 +28,7 @@ class SqliteJudgmentRepository implements JudgmentStateRepository {
   Database? _database;
   bool _opened = false;
 
-  static const int schemaVersion = 1;
+  static const int schemaVersion = 2;
 
   /// Columns this writer owns (data-model 2.1-2.3).
   ///
@@ -126,6 +128,19 @@ class SqliteJudgmentRepository implements JudgmentStateRepository {
       )
     ''');
     _migrateSchema();
+    database.execute('''
+      CREATE TABLE IF NOT EXISTS comic_schedule_input (
+        source_key TEXT NOT NULL,
+        comic_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        algorithm_version INTEGER NOT NULL,
+        observed_at_ms INTEGER NOT NULL,
+        activity_at_ms INTEGER,
+        PRIMARY KEY (source_key, comic_id),
+        FOREIGN KEY (source_key, comic_id)
+          REFERENCES judgment_state(source_key, comic_id) ON DELETE CASCADE
+      )
+    ''');
     database.execute('PRAGMA user_version = $schemaVersion');
   }
 
@@ -178,6 +193,82 @@ class SqliteJudgmentRepository implements JudgmentStateRepository {
     }
   }
 
+  Map<String, ({JudgmentState state, ComicScheduleInput input})>
+  readComicRecoveryInputs() {
+    final rows = database.select('''
+      SELECT j.*,
+             i.attempt_id AS schedule_attempt_id,
+             i.observed_at_ms AS schedule_observed_at_ms,
+             i.activity_at_ms
+      FROM judgment_state j
+      JOIN comic_schedule_input i
+        ON i.source_key = j.source_key
+       AND i.comic_id = j.comic_id
+       AND i.attempt_id = j.processed_attempt_id
+       AND i.algorithm_version = j.algorithm_version
+    ''');
+    final result =
+        <String, ({JudgmentState state, ComicScheduleInput input})>{};
+    for (final row in rows) {
+      final state = _stateFromRow(row);
+      final observedAtMs = row['schedule_observed_at_ms'] as int;
+      final activityAtMs = row['activity_at_ms'] as int?;
+      final input = ComicScheduleInput(
+        sourceKey: state.sourceKey,
+        comicId: state.comicId,
+        attemptId: row['schedule_attempt_id'] as String,
+        conclusion: state.lastDecision,
+        observedAtMs: observedAtMs,
+        activityAt: activityAtMs == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(activityAtMs, isUtc: true),
+      );
+      result[state.identity] = (state: state, input: input);
+    }
+    return result;
+  }
+
+  Set<String> applyComicJudgments(
+    Map<String, ({JudgmentState state, ComicScheduleInput? input})> rows,
+  ) {
+    if (rows.isEmpty) return {};
+    return _transaction('applyComicJudgments', () {
+      return writeRecoveryRows(database, rows, (entry) {
+        _writeState(entry.state);
+        final input = entry.input;
+        if (input == null) {
+          database.execute(
+            'DELETE FROM comic_schedule_input '
+            'WHERE source_key = ? AND comic_id = ?',
+            [entry.state.sourceKey, entry.state.comicId],
+          );
+          return;
+        }
+        database.execute(
+          '''
+          INSERT INTO comic_schedule_input (
+            source_key, comic_id, attempt_id, algorithm_version,
+            observed_at_ms, activity_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT (source_key, comic_id) DO UPDATE SET
+            attempt_id = excluded.attempt_id,
+            algorithm_version = excluded.algorithm_version,
+            observed_at_ms = excluded.observed_at_ms,
+            activity_at_ms = excluded.activity_at_ms
+        ''',
+          [
+            input.sourceKey,
+            input.comicId,
+            input.attemptId,
+            entry.state.algorithmVersion,
+            input.observedAtMs,
+            input.activityAt?.millisecondsSinceEpoch,
+          ],
+        );
+      });
+    });
+  }
+
   @override
   Future<int> applyBatch(List<JudgmentState> rows) async {
     await ensureOpen();
@@ -186,43 +277,16 @@ class SqliteJudgmentRepository implements JudgmentStateRepository {
     try {
       _transaction('applyBatch', () {
         for (final row in rows) {
+          _writeState(row);
           database.execute(
-            '''INSERT INTO judgment_state (
-                 source_key, comic_id,
-                 fact_json, fact_observed_at_ms, evidence_schema,
-                 last_decision, last_evidence, last_previous_value,
-                 last_current_value, last_reason, decided_at_ms,
-                 no_common_streak, has_new_update, processed_attempt_id,
-                 algorithm_version
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(source_key, comic_id) DO UPDATE SET
-                 fact_json = excluded.fact_json,
-                 fact_observed_at_ms = excluded.fact_observed_at_ms,
-                 evidence_schema = excluded.evidence_schema,
-                 last_decision = excluded.last_decision,
-                 last_evidence = excluded.last_evidence,
-                 last_previous_value = excluded.last_previous_value,
-                 last_current_value = excluded.last_current_value,
-                 last_reason = excluded.last_reason,
-                 decided_at_ms = excluded.decided_at_ms,
-                 no_common_streak = excluded.no_common_streak,
-                 has_new_update = excluded.has_new_update,
-                 processed_attempt_id = excluded.processed_attempt_id,
-                 algorithm_version = excluded.algorithm_version''',
+            '''
+            DELETE FROM comic_schedule_input
+            WHERE source_key = ? AND comic_id = ?
+              AND (attempt_id IS NOT ? OR algorithm_version IS NOT ?)
+          ''',
             [
               row.sourceKey,
               row.comicId,
-              row.factJson,
-              row.factObservedAtMs,
-              row.evidenceSchema,
-              row.lastDecision.value,
-              row.lastEvidence?.value,
-              row.lastPreviousValue,
-              row.lastCurrentValue,
-              row.lastReason.value,
-              row.decidedAtMs,
-              row.noCommonStreak,
-              row.hasNewUpdate ? 1 : 0,
               row.processedAttemptId,
               row.algorithmVersion,
             ],
@@ -235,6 +299,50 @@ class SqliteJudgmentRepository implements JudgmentStateRepository {
     } catch (error) {
       throw JudgmentStorageException('Unable to apply judgment batch', error);
     }
+  }
+
+  void _writeState(JudgmentState row) {
+    database.execute(
+      '''INSERT INTO judgment_state (
+           source_key, comic_id,
+           fact_json, fact_observed_at_ms, evidence_schema,
+           last_decision, last_evidence, last_previous_value,
+           last_current_value, last_reason, decided_at_ms,
+           no_common_streak, has_new_update, processed_attempt_id,
+           algorithm_version
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(source_key, comic_id) DO UPDATE SET
+           fact_json = excluded.fact_json,
+           fact_observed_at_ms = excluded.fact_observed_at_ms,
+           evidence_schema = excluded.evidence_schema,
+           last_decision = excluded.last_decision,
+           last_evidence = excluded.last_evidence,
+           last_previous_value = excluded.last_previous_value,
+           last_current_value = excluded.last_current_value,
+           last_reason = excluded.last_reason,
+           decided_at_ms = excluded.decided_at_ms,
+           no_common_streak = excluded.no_common_streak,
+           has_new_update = excluded.has_new_update,
+           processed_attempt_id = excluded.processed_attempt_id,
+           algorithm_version = excluded.algorithm_version''',
+      [
+        row.sourceKey,
+        row.comicId,
+        row.factJson,
+        row.factObservedAtMs,
+        row.evidenceSchema,
+        row.lastDecision.value,
+        row.lastEvidence?.value,
+        row.lastPreviousValue,
+        row.lastCurrentValue,
+        row.lastReason.value,
+        row.decidedAtMs,
+        row.noCommonStreak,
+        row.hasNewUpdate ? 1 : 0,
+        row.processedAttemptId,
+        row.algorithmVersion,
+      ],
+    );
   }
 
   @override

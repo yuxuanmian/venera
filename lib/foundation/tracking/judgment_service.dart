@@ -25,6 +25,7 @@ class JudgmentSummary {
     required this.skippedStale,
     this.rejectedAsRunning = false,
     this.errorMessage,
+    this.writeFailures = const <String>{},
   });
 
   const JudgmentSummary.rejected()
@@ -34,7 +35,8 @@ class JudgmentSummary {
       writtenRows = 0,
       skippedStale = 0,
       rejectedAsRunning = true,
-      errorMessage = null;
+      errorMessage = null,
+      writeFailures = const <String>{};
 
   /// Observations handled in this run.
   final int processed;
@@ -55,6 +57,7 @@ class JudgmentSummary {
   final bool rejectedAsRunning;
 
   final String? errorMessage;
+  final Set<String> writeFailures;
 
   bool get isEmptyRun => writtenRows == 0;
 
@@ -95,6 +98,8 @@ class JudgmentService {
   bool _running = false;
   JudgmentSummary? _lastSummary;
   final _eventController = StreamController<JudgmentBatchEvent>.broadcast();
+  Future<void> _comicBatchTail = Future<void>.value();
+  int _waitingRuns = 0;
 
   /// Batch events for incremental consumers (Contract E7).
   ///
@@ -107,6 +112,20 @@ class JudgmentService {
   /// Whether a run is currently in flight.  Debug reads this to report
   /// "already running" instead of silently starting a second run.
   bool get isRunning => _running;
+
+  /// Serializes scan preparation with the incremental observation consumer.
+  Future<T> withComicBatchLock<T>(Future<T> Function() action) {
+    final previous = _comicBatchTail;
+    final released = Completer<void>();
+    _comicBatchTail = released.future;
+    return previous.then((_) async {
+      try {
+        return await action();
+      } finally {
+        released.complete();
+      }
+    });
+  }
 
   /// Summary of the previous completed run, or null when none has run.
   JudgmentSummary? get lastSummary => _lastSummary;
@@ -129,10 +148,34 @@ class JudgmentService {
   /// by this method (data-model section 5).
   Future<JudgmentSummary> run() async {
     // Re-entry is refused outright rather than queued (FR-042).
+    if (_running || _waitingRuns != 0) {
+      return const JudgmentSummary.rejected();
+    }
+    _waitingRuns++;
+    return withComicBatchLock(() async {
+      _waitingRuns--;
+      if (_running) return const JudgmentSummary.rejected();
+      _running = true;
+      try {
+        final summary = await _runOnce();
+        _lastSummary = summary;
+        return summary;
+      } finally {
+        _running = false;
+      }
+    });
+  }
+
+  /// Shares the normal judgment core while the caller owns
+  /// [withComicBatchLock]. The optional identity filter is used by scan
+  /// preparation to consume only the locally frozen recovery candidates.
+  Future<JudgmentSummary> runWithinLock({
+    Set<String>? acceptedIdentities,
+  }) async {
     if (_running) return const JudgmentSummary.rejected();
     _running = true;
     try {
-      final summary = await _runOnce();
+      final summary = await _runOnce(acceptedIdentities: acceptedIdentities);
       _lastSummary = summary;
       return summary;
     } finally {
@@ -140,7 +183,7 @@ class JudgmentService {
     }
   }
 
-  Future<JudgmentSummary> _runOnce() async {
+  Future<JudgmentSummary> _runOnce({Set<String>? acceptedIdentities}) async {
     await repository.ensureOpen();
     final snapshot = await repository.readSnapshot();
     // Freeze the observation set for this run.  Anything landing after this
@@ -155,12 +198,16 @@ class JudgmentService {
 
     for (final stored in items) {
       final result = stored.result;
+      final identity = '${result.sourceKey}\u0000${result.comicId}';
+      if (acceptedIdentities != null &&
+          !acceptedIdentities.contains(identity)) {
+        continue;
+      }
       // A failure carries no observation and produces no judgment at all.
       if (!result.isSuccess) {
         failed++;
         continue;
       }
-      final identity = '${result.sourceKey}\u0000${result.comicId}';
       final previous = snapshot[identity];
       // Skip only when this exact observation was already handled **by the
       // current rules**.  Two separate conditions, because they answer two
@@ -201,14 +248,15 @@ class JudgmentService {
           observedAtMs: stored.observedAtMs,
           conclusion: outcome.conclusion,
           activityAt: outcome.activityAt,
+          producer: result.producer,
+          resumable: result.observation!.sourceUnread == null,
         ),
       );
     }
 
     // Write phase: one transaction, and each identity is re-checked against
     // the frozen snapshot first so a mid-run scan cannot be half-absorbed.
-    final verified = <JudgmentState>[];
-    final published = <JudgmentRowResult>[];
+    final verified = <_PendingJudgment>[];
     var skippedStale = 0;
     if (pending.isNotEmpty) {
       final current = await scanRepository.readAllItems();
@@ -222,8 +270,62 @@ class JudgmentService {
           skippedStale++;
           continue;
         }
-        verified.add(entry.state);
-        published.add(
+        verified.add(entry);
+      }
+    }
+
+    var writtenEntries = verified;
+    var writeError = false;
+    var writeFailures = <String>{};
+    final productionRepository = repository;
+    if (verified.isNotEmpty &&
+        productionRepository is SqliteJudgmentRepository) {
+      final inputs =
+          <String, ({JudgmentState state, ComicScheduleInput? input})>{};
+      for (final entry in verified) {
+        final input = entry.producer == ScanProducer.comic && entry.resumable
+            ? ComicScheduleInput(
+                sourceKey: entry.state.sourceKey,
+                comicId: entry.state.comicId,
+                attemptId: entry.attemptId,
+                conclusion: entry.conclusion,
+                observedAtMs: entry.observedAtMs,
+                activityAt: entry.activityAt,
+              )
+            : null;
+        inputs[entry.state.identity] = (state: entry.state, input: input);
+      }
+      final failed = productionRepository.applyComicJudgments(inputs);
+      if (failed.isNotEmpty) {
+        writeError = true;
+        skippedStale += failed.length;
+        writeFailures = failed;
+        writtenEntries = [
+          for (final entry in verified)
+            if (!failed.contains(entry.state.identity)) entry,
+        ];
+      }
+    } else {
+      await repository.applyBatch([for (final entry in verified) entry.state]);
+    }
+    final written = writtenEntries.length;
+
+    // Publish only after the write committed, and only for rows that were
+    // actually written: a consumer must never see a judgment that is not in the
+    // store.  Nothing pending means no event at all — an empty batch is not a
+    // notification (Contract E2/E3).
+    final eventRows = <JudgmentRowResult>[
+      for (final entry in writtenEntries)
+        if (entry.producer == ScanProducer.comic && entry.resumable)
+          ComicScheduleInput(
+            sourceKey: entry.state.sourceKey,
+            comicId: entry.state.comicId,
+            attemptId: entry.attemptId,
+            conclusion: entry.conclusion,
+            observedAtMs: entry.observedAtMs,
+            activityAt: entry.activityAt,
+          )
+        else
           JudgmentRowResult(
             sourceKey: entry.state.sourceKey,
             comicId: entry.state.comicId,
@@ -231,19 +333,10 @@ class JudgmentService {
             observedAtMs: entry.observedAtMs,
             activityAt: entry.activityAt,
           ),
-        );
-      }
-    }
-
-    final written = await repository.applyBatch(verified);
-
-    // Publish only after the write committed, and only for rows that were
-    // actually written: a consumer must never see a judgment that is not in the
-    // store.  Nothing pending means no event at all — an empty batch is not a
-    // notification (Contract E2/E3).
-    if (published.isNotEmpty) {
+    ];
+    if (eventRows.isNotEmpty) {
       _eventController.add(
-        JudgmentBatchEvent(rows: List.unmodifiable(published)),
+        JudgmentBatchEvent(rows: List.unmodifiable(eventRows)),
       );
     }
 
@@ -253,6 +346,10 @@ class JudgmentService {
       failed: failed,
       writtenRows: written,
       skippedStale: skippedStale,
+      errorMessage: writeError
+          ? 'one or more judgments failed to commit'
+          : null,
+      writeFailures: writeFailures,
     );
   }
 
@@ -350,6 +447,8 @@ class _PendingJudgment {
     required this.observedAtMs,
     required this.conclusion,
     required this.activityAt,
+    required this.producer,
+    required this.resumable,
   });
 
   final JudgmentState state;
@@ -357,6 +456,8 @@ class _PendingJudgment {
   final int observedAtMs;
   final JudgmentConclusion conclusion;
   final DateTime? activityAt;
+  final ScanProducer producer;
+  final bool resumable;
 }
 
 /// The product-owned judgment coordinator.

@@ -141,15 +141,53 @@ class ScheduleService {
   /// source of resumability in the feature (S3).
   Future<int> recomputeFromEvent(JudgmentBatchEvent event) async {
     if (event.rows.isEmpty) return 0;
+    final comicInputs = event.rows.whereType<ComicScheduleInput>().toList();
+    final otherRows = event.rows
+        .where((row) => row is! ComicScheduleInput)
+        .toList();
+    var written = 0;
+    if (comicInputs.isNotEmpty) {
+      written += (await applyComicRecovery(comicInputs)).applied;
+    }
+    if (otherRows.isEmpty) return written;
     await _repository.ensureOpen();
     final previous = await _repository.readAll();
     final recomputed = <ScheduleState>[];
-    for (final row in event.rows) {
+    for (final row in otherRows) {
       recomputed.add(
         recomputeSchedule(row: row, previous: previous[row.identity]),
       );
     }
-    return _repository.applyBatch(recomputed);
+    return written + await _repository.applyBatch(recomputed);
+  }
+
+  /// Applies a prepared comic batch after re-reading its durable side.
+  ///
+  /// [inputs] carry the already committed judgment result. This method never
+  /// judges an observation and never reads or rewrites the user's visible flag.
+  Future<({int applied, Set<String> failed})> applyComicRecovery(
+    List<JudgmentRowResult> inputs, {
+    Set<String>? acceptedSourceKeys,
+    Set<String> excluded = const {},
+  }) async {
+    await _repository.ensureOpen();
+    final previous = await _repository.readAll();
+    final rows = <String, ({ScheduleState state, String attemptId})>{};
+    for (final input in inputs) {
+      if (input is! ComicScheduleInput) continue;
+      if (acceptedSourceKeys != null &&
+          !acceptedSourceKeys.contains(input.sourceKey)) {
+        continue;
+      }
+      if (excluded.contains(input.identity)) continue;
+      final item = input;
+      rows[input.identity] = (
+        state: recomputeSchedule(row: item, previous: previous[input.identity]),
+        attemptId: item.attemptId,
+      );
+    }
+    final failed = await _repository.applyComicRecovery(rows);
+    return (applied: rows.length - failed.length, failed: failed);
   }
 
   /// Reads one identity's stored schedule for **presentation only** (007).

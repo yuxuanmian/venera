@@ -30,7 +30,7 @@ class SqliteScheduleRepository implements ScheduleStateRepository {
   Database? _database;
   bool _opened = false;
 
-  static const int schemaVersion = 1;
+  static const int schemaVersion = 2;
 
   /// Columns this writer owns.  All seven, plus the two identity columns.
   ///
@@ -104,6 +104,14 @@ class SqliteScheduleRepository implements ScheduleStateRepository {
       )
     ''');
     _migrateSchema();
+    database.execute('''
+      CREATE TABLE IF NOT EXISTS comic_schedule_recovery (
+        source_key TEXT NOT NULL,
+        comic_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        PRIMARY KEY (source_key, comic_id)
+      )
+    ''');
     database.execute('PRAGMA user_version = $schemaVersion');
   }
 
@@ -199,31 +207,7 @@ class SqliteScheduleRepository implements ScheduleStateRepository {
     try {
       _transaction('applyBatch', () {
         for (final row in rows) {
-          database.execute(
-            '''INSERT INTO schedule_state (
-                 source_key, comic_id,
-                 next_at, activity_at, auto_hot_until,
-                 manual_hot_enabled, manual_hot_until,
-                 old_schedule_jitter_applied
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(source_key, comic_id) DO UPDATE SET
-                 next_at = excluded.next_at,
-                 activity_at = excluded.activity_at,
-                 auto_hot_until = excluded.auto_hot_until,
-                 manual_hot_enabled = excluded.manual_hot_enabled,
-                 manual_hot_until = excluded.manual_hot_until,
-                 old_schedule_jitter_applied = excluded.old_schedule_jitter_applied''',
-            [
-              row.sourceKey,
-              row.comicId,
-              row.nextAtMs,
-              row.activityAtMs,
-              row.autoHotUntilMs,
-              row.manualHotEnabled ? 1 : 0,
-              row.manualHotUntilMs,
-              row.oldScheduleJitterApplied ? 1 : 0,
-            ],
-          );
+          _writeState(row);
         }
       });
       return rows.length;
@@ -234,11 +218,102 @@ class SqliteScheduleRepository implements ScheduleStateRepository {
     }
   }
 
+  /// Commits each schedule with the observation attempt that produced it.
+  ///
+  /// A row failure is isolated in its own savepoint. Replaying a committed
+  /// attempt is a no-op, so the one-time jitter marker cannot move twice.
+  @override
+  Future<Set<String>> applyComicRecovery(
+    Map<String, ({ScheduleState state, String attemptId})> rows,
+  ) async {
+    if (rows.isEmpty) return const {};
+    try {
+      final result = _transaction<Set<String>>('applyComicRecovery', () {
+        final failed = <String>{};
+        for (final entry in rows.entries) {
+          database.execute('SAVEPOINT recovery_row');
+          try {
+            final marked = database.select(
+              '''
+              SELECT 1 FROM comic_schedule_recovery
+              WHERE source_key = ? AND comic_id = ? AND attempt_id = ?
+            ''',
+              [
+                entry.value.state.sourceKey,
+                entry.value.state.comicId,
+                entry.value.attemptId,
+              ],
+            );
+            if (marked.isEmpty) {
+              _writeState(entry.value.state);
+              database.execute(
+                '''
+                INSERT INTO comic_schedule_recovery (
+                  source_key, comic_id, attempt_id
+                ) VALUES (?, ?, ?)
+                ON CONFLICT (source_key, comic_id) DO UPDATE SET
+                  attempt_id = excluded.attempt_id
+              ''',
+                [
+                  entry.value.state.sourceKey,
+                  entry.value.state.comicId,
+                  entry.value.attemptId,
+                ],
+              );
+            }
+          } catch (_) {
+            database.execute('ROLLBACK TO recovery_row');
+            failed.add(entry.key);
+          }
+          database.execute('RELEASE recovery_row');
+        }
+        return failed;
+      });
+      return result;
+    } on ScheduleStorageException {
+      rethrow;
+    } catch (error) {
+      throw ScheduleStorageException(
+        'Unable to apply comic schedule recovery',
+        error,
+      );
+    }
+  }
+
+  void _writeState(ScheduleState row) {
+    database.execute(
+      '''INSERT INTO schedule_state (
+           source_key, comic_id,
+           next_at, activity_at, auto_hot_until,
+           manual_hot_enabled, manual_hot_until,
+           old_schedule_jitter_applied
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(source_key, comic_id) DO UPDATE SET
+           next_at = excluded.next_at,
+           activity_at = excluded.activity_at,
+           auto_hot_until = excluded.auto_hot_until,
+           manual_hot_enabled = excluded.manual_hot_enabled,
+           manual_hot_until = excluded.manual_hot_until,
+           old_schedule_jitter_applied = excluded.old_schedule_jitter_applied''',
+      [
+        row.sourceKey,
+        row.comicId,
+        row.nextAtMs,
+        row.activityAtMs,
+        row.autoHotUntilMs,
+        row.manualHotEnabled ? 1 : 0,
+        row.manualHotUntilMs,
+        row.oldScheduleJitterApplied ? 1 : 0,
+      ],
+    );
+  }
+
   @override
   Future<void> clear() async {
     await ensureOpen();
     try {
       _transaction('clear', () {
+        database.execute('DELETE FROM comic_schedule_recovery');
         database.execute('DELETE FROM schedule_state');
       });
     } on ScheduleStorageException {

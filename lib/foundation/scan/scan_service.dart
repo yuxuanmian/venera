@@ -18,6 +18,12 @@ import 'scan_result_repository.dart';
 import 'sqlite_scan_result_repository.dart';
 import 'target_provider.dart';
 
+typedef ScanPreparation =
+    Future<ScanTargetSnapshot> Function(
+      ScanTargetSnapshot snapshot,
+      Set<String>? scopeSourceKeys,
+    );
+
 /// The single product-facing coordinator for the full scan.
 ///
 /// It owns the one-run lock, the bounded queue and the only persistent event
@@ -76,6 +82,17 @@ class ScanService {
     Map<String, Set<String>>? dueComicIdsBySource,
     Set<String>? scopeSourceKeys,
     String? roundLabel,
+  }) => _startFullScan(
+    dueComicIdsBySource: dueComicIdsBySource,
+    scopeSourceKeys: scopeSourceKeys,
+    roundLabel: roundLabel,
+  );
+
+  Future<FullScanSummary> _startFullScan({
+    Map<String, Set<String>>? dueComicIdsBySource,
+    Set<String>? scopeSourceKeys,
+    String? roundLabel,
+    ScanPreparation? prepareTargets,
   }) {
     if (_running) {
       return Future<FullScanSummary>.value(
@@ -92,6 +109,7 @@ class ScanService {
       dueComicIdsBySource: dueComicIdsBySource,
       scopeSourceKeys: scopeSourceKeys,
       roundLabel: roundLabel,
+      prepareTargets: prepareTargets,
     );
   }
 
@@ -119,6 +137,7 @@ class ScanService {
     Map<String, Set<String>>? dueComicIdsBySource,
     Set<String>? scopeSourceKeys,
     String? roundLabel,
+    ScanPreparation? prepareTargets,
   }) async {
     ScanProgress current = ScanProgress(phase: ScanProgressPhase.discovering);
     _setProgress(current);
@@ -130,11 +149,33 @@ class ScanService {
         disposition = FullScanDisposition.canceled;
         return _finish(disposition);
       }
-      final snapshot = await targetProvider.snapshot(
-        dueComicIdsBySource: dueComicIdsBySource,
-        scopeSourceKeys: scopeSourceKeys,
-        roundLabel: roundLabel,
-      );
+      late ScanTargetSnapshot snapshot;
+      if (prepareTargets != null) {
+        final unfiltered = await targetProvider.snapshotForPreparation(
+          scopeSourceKeys: scopeSourceKeys,
+          roundLabel: roundLabel,
+        );
+        snapshot = unfiltered;
+      } else {
+        snapshot = await targetProvider.snapshot(
+          dueComicIdsBySource: dueComicIdsBySource,
+          scopeSourceKeys: scopeSourceKeys,
+          roundLabel: roundLabel,
+        );
+      }
+      if (prepareTargets != null) {
+        final unfiltered = snapshot;
+        snapshot = await prepareTargets(snapshot, scopeSourceKeys);
+        if (snapshot.cacheGeneration != targetProvider.cache.cacheGeneration) {
+          throw const ScanControlException(ScanControlReason.cacheInvalidated);
+        }
+        targetProvider.logPreparedOverview(
+          snapshot: unfiltered,
+          narrowed: snapshot,
+          scopeSourceKeys: scopeSourceKeys,
+          roundLabel: roundLabel,
+        );
+      }
       final snapshotCacheGeneration = snapshot.cacheGeneration;
       if (_cancelReason != null) {
         disposition = FullScanDisposition.canceled;
@@ -483,6 +524,32 @@ class ScanService {
   }
 }
 
+/// Production scan service that can prepare a frozen target list locally
+/// before acquisition starts.
+///
+/// Kept as a separate subtype so the existing [ScanService.startFullScan]
+/// method keeps its source-compatible signature for fakes and older callers.
+class PreparedScanService extends ScanService {
+  PreparedScanService({
+    super.repository,
+    super.targetProvider,
+    super.planner,
+    super.limits,
+  });
+
+  Future<FullScanSummary> startPreparedFullScan({
+    Map<String, Set<String>>? dueComicIdsBySource,
+    Set<String>? scopeSourceKeys,
+    String? roundLabel,
+    required ScanPreparation prepareTargets,
+  }) => _startFullScan(
+    dueComicIdsBySource: dueComicIdsBySource,
+    scopeSourceKeys: scopeSourceKeys,
+    roundLabel: roundLabel,
+    prepareTargets: prepareTargets,
+  );
+}
+
 class _PendingEmission {
   _PendingEmission(this.emission, this.context);
 
@@ -493,4 +560,4 @@ class _PendingEmission {
 /// The product-owned scan coordinator.  Tests may replace this single
 /// entry point to exercise the real menu wiring with an isolated repository;
 /// production code never installs a second coordinator.
-ScanService scanService = ScanService();
+ScanService scanService = PreparedScanService();

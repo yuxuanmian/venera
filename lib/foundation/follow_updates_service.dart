@@ -9,13 +9,16 @@ import 'log.dart';
 import 'schedule/schedule_service.dart';
 import 'schedule/sqlite_schedule_repository.dart';
 import 'scan/due_filter.dart';
+import 'scan/full_scan_planner.dart';
 import 'scan/models.dart';
 import 'scan/scan_log.dart';
 import 'scan/scan_result_repository.dart';
 import 'scan/scan_service.dart' as scan_kernel;
 import 'scan/sqlite_scan_result_repository.dart';
+import 'scan/target_provider.dart' as scan_kernel;
 import 'tracking/judgment_event.dart';
 import 'tracking/judgment_service.dart' as tracking;
+import 'tracking/sqlite_judgment_repository.dart';
 
 /// The prefix marking the app-owned scan scope used for follow-up work.
 ///
@@ -315,6 +318,7 @@ class FollowUpdateCoordinator {
   FollowUpdateTrigger? _activeTrigger;
 
   StreamSubscription<JudgmentBatchEvent>? _scheduleSubscription;
+  Future<void> _scheduleTail = Future<void>.value();
   StreamSubscription<ScanRepositoryEvent>? _observationSubscription;
   Timer? _debounce;
   int _observationsSinceJudgment = 0;
@@ -396,9 +400,18 @@ class FollowUpdateCoordinator {
   /// is what keeps the domains unaware of each other.
   void attachScheduleService(ScheduleService scheduleService) {
     _scheduleService = scheduleService;
-    _scheduleSubscription ??= _judgmentService.events.listen(
-      scheduleService.recomputeFromEvent,
-    );
+    _scheduleSubscription ??= _judgmentService.events.listen((event) {
+      _scheduleTail = _scheduleTail.then((_) async {
+        try {
+          await scheduleService.recomputeFromEvent(event);
+        } catch (error) {
+          Log.warning(
+            'Follow update',
+            'schedule event failed: ${error.runtimeType}',
+          );
+        }
+      });
+    });
   }
 
   /// Begins consuming newly persisted observations and cache changes.
@@ -609,13 +622,22 @@ class FollowUpdateCoordinator {
     // computed here and the target snapshot is narrowed before the scan starts.
     // With nothing due this yields an empty work list and the round issues no
     // source request at all.
-    final dueBySource = await _dueComicIdsBySource(nowMs, scope);
-
-    final summary = await _scanService.startFullScan(
-      dueComicIdsBySource: dueBySource,
-      scopeSourceKeys: scope,
-      roundLabel: trigger.name,
-    );
+    final scan = _scanService;
+    final summary = scan is scan_kernel.PreparedScanService
+        ? await scan.startPreparedFullScan(
+            scopeSourceKeys: scope,
+            roundLabel: trigger.name,
+            prepareTargets: (snapshot, targetScope) => _prepareComicRecovery(
+              snapshot: snapshot,
+              scope: targetScope,
+              nowMs: nowMs,
+            ),
+          )
+        : await scan.startFullScan(
+            dueComicIdsBySource: await _dueComicIdsBySource(nowMs, scope),
+            scopeSourceKeys: scope,
+            roundLabel: trigger.name,
+          );
 
     // ---- Settlement ------------------------------------------------------
     //
@@ -639,6 +661,137 @@ class FollowUpdateCoordinator {
         phase: ScanProgressPhase.finished,
       ),
     );
+  }
+
+  Future<scan_kernel.ScanTargetSnapshot> _prepareComicRecovery({
+    required scan_kernel.ScanTargetSnapshot snapshot,
+    required Set<String>? scope,
+    required int nowMs,
+  }) {
+    final judgment = _judgmentService;
+    final sqliteJudgment = judgment.repository;
+    if (sqliteJudgment is! SqliteJudgmentRepository) {
+      return _legacyDueSnapshot(snapshot, scope, nowMs);
+    }
+    return judgment.withComicBatchLock(() async {
+      await _drainScheduleEvents();
+      final schedule = _scheduleService;
+      if (schedule == null) return snapshot;
+      await sqliteJudgment.ensureOpen();
+      final worksByIdentity = <String, ScanWorkSpec>{
+        for (final work in snapshot.works)
+          if (work.comicId != null)
+            '${work.sourceKey}\u0000${work.comicId}': work,
+      };
+      final latestByIdentity = <String, ScanStoredItem>{
+        for (final item in await _scanRepository.readAllItems())
+          if (worksByIdentity.containsKey(
+            '${item.result.sourceKey}\u0000${item.result.comicId}',
+          ))
+            '${item.result.sourceKey}\u0000${item.result.comicId}': item,
+      };
+      final candidates = <String, ScanStoredItem>{
+        for (final entry in latestByIdentity.entries)
+          if (_isRecoveryCandidate(worksByIdentity[entry.key]!, entry.value))
+            entry.key: entry.value,
+      };
+      final existingInputs = sqliteJudgment.readComicRecoveryInputs();
+      final toJudge = candidates.keys
+          .where(
+            (identity) =>
+                existingInputs[identity]?.input.attemptId !=
+                candidates[identity]!.result.attemptId,
+          )
+          .toSet();
+      var writeFailures = <String>{};
+      if (toJudge.isNotEmpty) {
+        final summary = await judgment.runWithinLock(
+          acceptedIdentities: toJudge,
+        );
+        writeFailures = {...summary.writeFailures};
+      }
+      // Judgment publishes its normal UI/schedule event. Drain it before the
+      // direct recovery write so both paths share the same ordered SQLite view.
+      await _drainScheduleEvents();
+
+      final latestAfter = <String, ScanStoredItem>{
+        for (final item in await _scanRepository.readAllItems())
+          if (worksByIdentity.containsKey(
+            '${item.result.sourceKey}\u0000${item.result.comicId}',
+          ))
+            '${item.result.sourceKey}\u0000${item.result.comicId}': item,
+      };
+      final inputsAfter = sqliteJudgment.readComicRecoveryInputs();
+      final inputs = <JudgmentRowResult>[
+        for (final entry in candidates.entries)
+          if (!writeFailures.contains(entry.key) &&
+              _isRecoveryCandidate(
+                worksByIdentity[entry.key]!,
+                latestAfter[entry.key],
+              ) &&
+              latestAfter[entry.key]!.result.attemptId ==
+                  inputsAfter[entry.key]?.input.attemptId)
+            inputsAfter[entry.key]!.input,
+      ];
+      final result = await schedule.applyComicRecovery(
+        inputs,
+        acceptedSourceKeys: scope,
+        excluded: writeFailures,
+      );
+      writeFailures = {...writeFailures, ...result.failed};
+      if (writeFailures.isNotEmpty) {
+        Log.warning(
+          'Follow update',
+          '${writeFailures.length} comic request(s) deferred after '
+              'recovery persistence failure',
+        );
+      }
+      final due = await _dueComicIdsBySource(nowMs, scope);
+      final filtered = due == null
+          ? snapshot
+          : filterTargetsByDue(snapshot: snapshot, dueComicIdsBySource: due);
+      return scan_kernel.ScanTargetSnapshot(
+        works: [
+          for (final work in filtered.works)
+            if (work.comicId == null ||
+                !writeFailures.contains(
+                  '${work.sourceKey}\u0000${work.comicId}',
+                ))
+              work,
+        ],
+        cacheGeneration: filtered.cacheGeneration,
+        skippedSources: filtered.skippedSources,
+      );
+    });
+  }
+
+  bool _isRecoveryCandidate(ScanWorkSpec work, ScanStoredItem? item) {
+    if (item == null) return false;
+    final result = item.result;
+    return work.comicId == result.comicId &&
+        result.producer == ScanProducer.comic &&
+        result.isSuccess &&
+        result.observation!.sourceUnread == null &&
+        result.definitionRevision == work.adapter.definitionRevision &&
+        result.evidenceSchema == work.adapter.evidenceSchema;
+  }
+
+  Future<scan_kernel.ScanTargetSnapshot> _legacyDueSnapshot(
+    scan_kernel.ScanTargetSnapshot snapshot,
+    Set<String>? scope,
+    int nowMs,
+  ) async {
+    final due = await _dueComicIdsBySource(nowMs, scope);
+    if (due == null) return snapshot;
+    return filterTargetsByDue(snapshot: snapshot, dueComicIdsBySource: due);
+  }
+
+  Future<void> _drainScheduleEvents() async {
+    while (true) {
+      final tail = _scheduleTail;
+      await tail;
+      if (identical(tail, _scheduleTail)) return;
+    }
   }
 
   /// One **settlement overview** line per round (007 Contract L2/L6/L8).
