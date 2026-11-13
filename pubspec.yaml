@@ -6,7 +6,7 @@ publish_to: 'none'
 # drives the runtime version, the user-visible update comparison, the release
 # tag and the release asset name; the build number stays in the package
 # metadata and in the derived Android versionCode. See doc/android-actions.md.
-version: 2.0.0-beta.4+168
+version: 2.0.0-beta.5+169
 
 environment:
   sdk: '>=3.8.0 <4.0.0'
