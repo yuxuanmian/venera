@@ -205,15 +205,22 @@ class ScanTargetProvider {
         }
       } else {
         final collectionKeys = <String>{};
+        final collectionItemFailures =
+            capabilities.collection?.itemFailures == true;
         if (source.favoriteData?.multiFolder == false) {
           if (sourceFolders.any(
-            (folder) => cache.countCachedComics(folder) > 0,
+            (folder) =>
+                cache.countCachedComics(folder) > 0 ||
+                (collectionItemFailures &&
+                    cache.getFullCacheStatus(folder).isComplete),
           )) {
             collectionKeys.add('default');
           }
         } else {
           for (final folder in sourceFolders) {
-            if (cache.countCachedComics(folder) > 0) {
+            if (cache.countCachedComics(folder) > 0 ||
+                (collectionItemFailures &&
+                    cache.getFullCacheStatus(folder).isComplete)) {
               collectionKeys.add(folder.folderId);
             }
           }

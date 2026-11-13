@@ -393,6 +393,8 @@ class ScanProgress {
     this.failedWorks = 0,
     this.canceledWorks = 0,
     this.persistedItems = 0,
+    this.failedItems = 0,
+    this.failedCollectionScans = 0,
     Iterable<ScanSourceSkip> skippedSources = const [],
   }) : skippedSources = List.unmodifiable(skippedSources);
 
@@ -403,6 +405,8 @@ class ScanProgress {
   final int failedWorks;
   final int canceledWorks;
   final int persistedItems;
+  final int failedItems;
+  final int failedCollectionScans;
   final List<ScanSourceSkip> skippedSources;
 
   ScanProgress copyWith({
@@ -413,6 +417,8 @@ class ScanProgress {
     int? failedWorks,
     int? canceledWorks,
     int? persistedItems,
+    int? failedItems,
+    int? failedCollectionScans,
     Iterable<ScanSourceSkip>? skippedSources,
   }) => ScanProgress(
     phase: phase ?? this.phase,
@@ -422,6 +428,8 @@ class ScanProgress {
     failedWorks: failedWorks ?? this.failedWorks,
     canceledWorks: canceledWorks ?? this.canceledWorks,
     persistedItems: persistedItems ?? this.persistedItems,
+    failedItems: failedItems ?? this.failedItems,
+    failedCollectionScans: failedCollectionScans ?? this.failedCollectionScans,
     skippedSources: skippedSources ?? this.skippedSources,
   );
 
@@ -433,6 +441,8 @@ class ScanProgress {
     'failedWorks': failedWorks,
     'canceledWorks': canceledWorks,
     'persistedItems': persistedItems,
+    'failedItems': failedItems,
+    'failedCollectionScans': failedCollectionScans,
     'skippedSources': skippedSources.map((item) => item.toJson()).toList(),
   };
 }

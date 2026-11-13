@@ -346,6 +346,8 @@ void main() {
         succeededWorks: 6,
         failedWorks: 2,
         canceledWorks: 2,
+        failedCollectionScans: 1,
+        failedItems: 3,
       );
 
       await coordinator.runRound(FollowUpdateTrigger.manual);
@@ -361,6 +363,8 @@ void main() {
       );
       expect(progress.isComplete, isTrue);
       expect(progress.fraction, 1);
+      expect(progress.incompleteCollectionScans, 1);
+      expect(progress.comicFailures, 3);
     });
 
     test(

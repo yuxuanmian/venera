@@ -7,9 +7,13 @@ import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
+import 'package:venera/foundation/follow_updates.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/foundation/schedule/schedule_state.dart';
+import 'package:venera/foundation/scan/models.dart';
+import 'package:venera/foundation/scan/scan_result_repository.dart';
+import 'package:venera/foundation/scan/source_adapter.dart';
 import 'package:venera/foundation/tracking/judgment.dart';
 import 'package:venera/foundation/tracking/judgment_event.dart';
 import 'package:venera/pages/comic_details_page/comic_page.dart';
@@ -29,7 +33,7 @@ const _comicId = 'indicator-comic';
 const _fireIcon = ValueKey('favorite-hot-window-fire-icon');
 const _splitButton = ValueKey('favorite-hot-window-split-button');
 
-ComicSource _buildSource(String sourceKey) {
+ComicSource _buildSource(String sourceKey, {ScanCapabilities? scan}) {
   final coverPath =
       'file://${Directory.current.path}${Platform.pathSeparator}assets'
       '${Platform.pathSeparator}app_icon.png';
@@ -90,10 +94,57 @@ ComicSource _buildSource(String sourceKey) {
     false,
     null,
     null,
+    scan: scan,
   );
   source.data['account'] = const ['logged-in'];
   return source;
 }
+
+ComicSource _buildCollectionFailureSource(String sourceKey) => _buildSource(
+  sourceKey,
+  scan: ScanCapabilities.supported(
+    primary: ScanProducer.collection,
+    collection: ScanCapability.collection(
+      (_, __, ___) async => const {'items': <Object?>[], 'next': null},
+      evidenceSchema: '{"chapterCount":"epsCount"}',
+      itemFailures: true,
+    ),
+  ),
+);
+
+ScanStoredItem _scanFailure({bool success = false}) => ScanStoredItem(
+  result: success
+      ? ScanItemResult.observed(
+          attemptId: 'success-attempt',
+          scopeAttemptId: 'scope-attempt',
+          sourceKey: _sourceKey,
+          comicId: _comicId,
+          producer: ScanProducer.collection,
+          definitionRevision: '1.0.11',
+          observedAt: '2026-11-13T12:00:00Z',
+          evidenceSchema: '{"chapterCount":"epsCount"}',
+          observation: ScanObservation(
+            update: UpdateDescriptor(chapterCount: 8),
+          ),
+        )
+      : ScanItemResult.failed(
+          attemptId: 'failure-attempt',
+          scopeAttemptId: 'scope-attempt',
+          sourceKey: _sourceKey,
+          comicId: _comicId,
+          producer: ScanProducer.collection,
+          definitionRevision: '1.0.11',
+          observedAt: '2026-11-13T12:00:00Z',
+          evidenceSchema: '{"chapterCount":"epsCount"}',
+          failure: const ScanFailure(
+            sourceCode: 'ERR_EPS_COUNT',
+            message: 'Episode count was invalid',
+          ),
+        ),
+  attemptOrdinal: 1,
+  observedAtMs: DateTime.utc(2026, 11, 13, 12).millisecondsSinceEpoch,
+  committedAtMs: DateTime.utc(2026, 11, 13, 12).millisecondsSinceEpoch,
+);
 
 /// Whether the split button is present at all.
 bool _indicatorShown(WidgetTester tester) =>
@@ -132,6 +183,7 @@ void main() {
 
   late Directory tempDir;
   late StreamController<JudgmentBatchEvent> events;
+  late StreamController<ScanRepositoryEvent> scanEvents;
 
   setUpAll(() async {
     await AppTranslation.init();
@@ -147,18 +199,25 @@ void main() {
 
   setUp(() {
     events = StreamController<JudgmentBatchEvent>.broadcast();
+    scanEvents = StreamController<ScanRepositoryEvent>.broadcast();
     appdata.settings['followUpdatesEnabled'] = true;
+    appdata.settings['favorites'] = const <String>[];
+    NetworkFavoriteCacheManager().clearAllCache();
   });
 
   tearDown(() {
     unawaited(events.close());
+    unawaited(scanEvents.close());
   });
 
   Future<void> pumpPage(
     WidgetTester tester, {
     required Future<ScheduleState?> Function(String, String) reader,
+    ComicSource? source,
+    Future<ScanStoredItem?> Function(String, String)? scanItemReader,
+    bool Function(String)? followUpdateRangeReader,
   }) async {
-    ComicSourceManager().add(_buildSource(_sourceKey));
+    ComicSourceManager().add(source ?? _buildSource(_sourceKey));
     addTearDown(() => ComicSourceManager().remove(_sourceKey));
     await tester.pumpWidget(
       MaterialApp(
@@ -167,10 +226,14 @@ void main() {
           sourceKey: _sourceKey,
           scheduleReader: reader,
           judgmentEvents: events.stream,
+          scanItemReader: scanItemReader,
+          scanEvents: scanEvents.stream,
+          followUpdateRangeReader: followUpdateRangeReader,
         ),
       ),
     );
     // One pump for the details load, one for the schedule point read.
+    await tester.pump();
     await tester.pump();
     await tester.pump();
   }
@@ -187,7 +250,6 @@ void main() {
         return _record(autoHotUntil: until);
       },
     );
-
     expect(
       reads,
       1,
@@ -239,6 +301,141 @@ void main() {
     expect(find.text('Favorite'.tl), findsWidgets);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('an explicit collection failure shows until a success event', (
+    tester,
+  ) async {
+    var scheduleReads = 0;
+    var scanReads = 0;
+    await pumpPage(
+      tester,
+      source: _buildCollectionFailureSource(_sourceKey),
+      followUpdateRangeReader: (sourceKey) => sourceKey == _sourceKey,
+      scanItemReader: (_, __) async {
+        scanReads++;
+        return _scanFailure();
+      },
+      reader: (_, __) async {
+        scheduleReads++;
+        return null;
+      },
+    );
+    await tester.pump(const Duration(milliseconds: 1));
+
+    final activeSource = ComicSource.find(_sourceKey);
+    expect(activeSource, isNotNull);
+    expect(sourceSupportsCollectionItemFailures(activeSource!), isTrue);
+    expect(scanReads, 1);
+    expect(
+      isExplicitCollectionScanFailure(
+        result: _scanFailure().result,
+        sourceOptedIn: true,
+        inFollowUpdateRange: true,
+      ),
+      isTrue,
+    );
+
+    expect(
+      find.byKey(const ValueKey('favorite-hot-window-failure-icon')),
+      findsOneWidget,
+    );
+    expect(
+      _indicatorTooltip(tester),
+      'The latest follow-up check could not confirm this comic. '
+              'The previous update state is unchanged.'
+          .tl,
+    );
+
+    scanEvents.add(ScanRepositoryEvent(item: _scanFailure(success: true)));
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey('favorite-hot-window-failure-icon')),
+      findsNothing,
+    );
+    expect(
+      scheduleReads,
+      1,
+      reason: 'success events do not race a schedule read',
+    );
+  });
+
+  testWidgets('ordinary sources neither read nor display collection failures', (
+    tester,
+  ) async {
+    var scanReads = 0;
+    await pumpPage(
+      tester,
+      scanItemReader: (_, __) async {
+        scanReads++;
+        return _scanFailure();
+      },
+      reader: (_, __) async => null,
+    );
+
+    expect(scanReads, 0);
+    expect(
+      find.byKey(const ValueKey('favorite-hot-window-failure-icon')),
+      findsNothing,
+    );
+  });
+
+  testWidgets('range gates display after an opt-in source has been read', (
+    tester,
+  ) async {
+    var scanReads = 0;
+    var inRange = false;
+    await pumpPage(
+      tester,
+      source: _buildCollectionFailureSource(_sourceKey),
+      followUpdateRangeReader: (_) => inRange,
+      scanItemReader: (_, __) async {
+        scanReads++;
+        return _scanFailure();
+      },
+      reader: (_, __) async => null,
+    );
+
+    expect(scanReads, 1);
+    expect(
+      find.byKey(const ValueKey('favorite-hot-window-failure-icon')),
+      findsNothing,
+    );
+
+    inRange = true;
+    NetworkFavoriteCacheManager().notifyListeners();
+    await tester.pump();
+    expect(
+      find.byKey(const ValueKey('favorite-hot-window-failure-icon')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets(
+    'an initial scan read cannot overwrite a newer repository event',
+    (tester) async {
+      final initialRead = Completer<ScanStoredItem?>();
+      await pumpPage(
+        tester,
+        source: _buildCollectionFailureSource(_sourceKey),
+        followUpdateRangeReader: (sourceKey) => sourceKey == _sourceKey,
+        scanItemReader: (_, __) => initialRead.future,
+        reader: (_, __) async => null,
+      );
+
+      scanEvents.add(ScanRepositoryEvent(item: _scanFailure(success: true)));
+      await tester.pump();
+      initialRead.complete(_scanFailure());
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('favorite-hot-window-failure-icon')),
+        findsNothing,
+      );
+    },
+  );
 
   testWidgets('follow-up being off hides the indicator even with a record', (
     tester,

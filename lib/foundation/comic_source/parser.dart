@@ -434,8 +434,19 @@ class ComicSourceParser {
               throw error;
             }
           };
+          let itemFailures = false;
+          let itemFailuresInvalid = false;
+          if (name === "collection" &&
+              Object.prototype.hasOwnProperty.call(value, "itemFailures")) {
+            if (typeof value.itemFailures !== "boolean") {
+              itemFailuresInvalid = true;
+            } else {
+              itemFailures = value.itemFailures;
+            }
+          }
           return {present: true, hasLoad: true,
-                  fieldSourceJson: fieldSourceJson, load: wrapped};
+                  fieldSourceJson: fieldSourceJson,
+                  itemFailures, itemFailuresInvalid, load: wrapped};
         };
         return {
           comic: describe("comic"),
@@ -496,6 +507,11 @@ class ComicSourceParser {
     if (collection['fieldSourceInvalid'] == true) {
       return const ScanCapabilities.invalid(
         'collection.fieldSource must be an object',
+      );
+    }
+    if (collection['itemFailuresInvalid'] == true) {
+      return const ScanCapabilities.invalid(
+        'collection.itemFailures must be a boolean',
       );
     }
 
@@ -587,6 +603,7 @@ class ComicSourceParser {
       collectionCapability = ScanCapability.collection(
         _wrapScanCollectionLoader(function),
         evidenceSchema: _evidenceSchemaFor(collection),
+        itemFailures: collection['itemFailures'] == true,
       );
     }
     void disposeFunctions() {

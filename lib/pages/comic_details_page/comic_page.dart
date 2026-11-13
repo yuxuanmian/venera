@@ -66,7 +66,22 @@ bool shouldShowFavoriteHotWindowIndicator({
   required bool followUpdatesEnabled,
   required bool isFavorite,
   required bool hasCheckRecord,
-}) => followUpdatesEnabled && isFavorite && hasCheckRecord;
+  bool hasCollectionFailure = false,
+}) =>
+    followUpdatesEnabled &&
+    isFavorite &&
+    (hasCheckRecord || hasCollectionFailure);
+
+@visibleForTesting
+bool isExplicitCollectionScanFailure({
+  required ScanItemResult? result,
+  required bool sourceOptedIn,
+  required bool inFollowUpdateRange,
+}) =>
+    sourceOptedIn &&
+    inFollowUpdateRange &&
+    result?.producer == ScanProducer.collection &&
+    result?.failure != null;
 
 bool _isAuthorNamespace(String namespace) {
   switch (namespace.trim().toLowerCase()) {
@@ -118,6 +133,9 @@ class ComicPage extends StatefulWidget {
     this.heroID,
     this.scheduleReader,
     this.judgmentEvents,
+    this.scanItemReader,
+    this.scanEvents,
+    this.followUpdateRangeReader,
   });
 
   final String id;
@@ -146,6 +164,13 @@ class ComicPage extends StatefulWidget {
   /// not a second event channel — the type is the same one the service
   /// publishes, and nothing in production constructs one here.
   final Stream<JudgmentBatchEvent>? judgmentEvents;
+
+  final Future<ScanStoredItem?> Function(String sourceKey, String comicId)?
+  scanItemReader;
+
+  final Stream<ScanRepositoryEvent>? scanEvents;
+
+  final bool Function(String sourceKey)? followUpdateRangeReader;
 
   @override
   State<ComicPage> createState() => _ComicPageState();
@@ -176,8 +201,11 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   /// fill the gap: "no schedule record" is a due condition (Contract S4), so
   /// writing one would change when this comic is checked next.
   ScheduleState? _scheduleState;
+  ScanItemResult? _latestScanResult;
+  int _scanReadGeneration = 0;
 
   StreamSubscription<JudgmentBatchEvent>? _judgmentSubscription;
+  StreamSubscription<ScanRepositoryEvent>? _scanSubscription;
 
   /// Whether the details page is showing the "recently updated" indicator.
   ///
@@ -189,18 +217,39 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     followUpdatesEnabled: followUpdatesEnabled,
     isFavorite: isFavorite,
     hasCheckRecord: _scheduleState != null,
+    hasCollectionFailure: _showCollectionFailure,
   );
+
+  bool get _showCollectionFailure {
+    final result = _latestScanResult;
+    final source = ComicSource.find(widget.sourceKey);
+    if (result == null ||
+        result.producer != ScanProducer.collection ||
+        result.failure == null ||
+        source == null ||
+        !sourceSupportsCollectionItemFailures(source)) {
+      return false;
+    }
+    final inRange =
+        widget.followUpdateRangeReader?.call(widget.sourceKey) ??
+        followUpdateCoordinator.evaluateGate().satisfiedSourceKeys.contains(
+          widget.sourceKey,
+        );
+    return inRange;
+  }
 
   FavoriteHotWindowIndicator? get _hotWindowIndicator {
     final state = _scheduleState;
-    if (state == null) return null;
+    final collectionFailure = _showCollectionFailure;
+    if (state == null && !collectionFailure) return null;
     return FavoriteHotWindowIndicator(
-      autoHotUntil: state.autoHotUntilMs == null
+      autoHotUntil: state?.autoHotUntilMs == null
           ? null
           : DateTime.fromMillisecondsSinceEpoch(
-              state.autoHotUntilMs!,
+              state!.autoHotUntilMs!,
               isUtc: true,
             ),
+      collectionUnavailable: collectionFailure,
     );
   }
 
@@ -238,6 +287,43 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     }
     if (!mounted) return;
     setState(() => _scheduleState = state);
+  }
+
+  Future<void> _loadCollectionFailure() async {
+    final source = ComicSource.find(widget.sourceKey);
+    if (source == null || !sourceSupportsCollectionItemFailures(source)) {
+      _scanReadGeneration++;
+      if (mounted) setState(() => _latestScanResult = null);
+      return;
+    }
+    final generation = ++_scanReadGeneration;
+    final reader = widget.scanItemReader;
+    ScanItemResult? result;
+    try {
+      final stored = reader != null
+          ? await reader(widget.sourceKey, widget.id)
+          : await scanResultRepository.readLatestItem(
+              widget.sourceKey,
+              widget.id,
+            );
+      result = stored?.result;
+    } catch (_) {
+      result = null;
+    }
+    if (!mounted || generation != _scanReadGeneration) return;
+    setState(() => _latestScanResult = result);
+  }
+
+  void _onScanEvent(ScanRepositoryEvent event) {
+    final item = event.item;
+    if (item == null ||
+        item.result.sourceKey != widget.sourceKey ||
+        item.result.comicId != widget.id) {
+      return;
+    }
+    if (!mounted) return;
+    _scanReadGeneration++;
+    setState(() => _latestScanResult = item.result);
   }
 
   /// Re-reads the schedule when this identity itself appears in a batch (W4).
@@ -341,8 +427,11 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     // identity.  Subscribing in the page's own lifecycle is what keeps the
     // listener from outliving the page (Contract W4).
     unawaited(_loadScheduleIndicator());
+    unawaited(_loadCollectionFailure());
     _judgmentSubscription = (widget.judgmentEvents ?? judgmentService.events)
         .listen(_onJudgmentBatch);
+    _scanSubscription = (widget.scanEvents ?? scanResultRepository.events)
+        .listen(_onScanEvent);
     super.initState();
   }
 
@@ -352,6 +441,8 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     _followUpdateCache.removeListener(_onFollowUpdateCacheChanged);
     unawaited(_judgmentSubscription?.cancel());
     _judgmentSubscription = null;
+    unawaited(_scanSubscription?.cancel());
+    _scanSubscription = null;
     super.dispose();
   }
 

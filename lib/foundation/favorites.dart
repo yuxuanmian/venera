@@ -358,6 +358,40 @@ class FavoriteFullCacheStatus {
   bool get isComplete => completedAt != null;
 }
 
+/// Typed cache-change evidence used by follow-up collection sources.
+///
+/// The ordinary changed-source set remains the trigger for every other source.
+/// A source that opts into collection item failures only reacts to a successful
+/// remote addition or the transition of a folder to fully cached.
+@immutable
+class FavoriteCacheChangeBatch {
+  FavoriteCacheChangeBatch({
+    required this.changedSourceKeys,
+    Map<String, Set<String>> remoteAdditionComicIds = const {},
+    Set<String> remoteAdditionOverflowSourceKeys = const {},
+    Set<String> firstFullCacheSourceKeys = const {},
+  }) : remoteAdditionComicIds = Map.unmodifiable({
+         for (final entry in remoteAdditionComicIds.entries)
+           entry.key: Set.unmodifiable(entry.value),
+       }),
+       remoteAdditionOverflowSourceKeys = Set.unmodifiable(
+         remoteAdditionOverflowSourceKeys,
+       ),
+       firstFullCacheSourceKeys = Set.unmodifiable(firstFullCacheSourceKeys);
+
+  /// `null` means the ordinary cache mutation named every source.
+  final Set<String>? changedSourceKeys;
+  final Map<String, Set<String>> remoteAdditionComicIds;
+  final Set<String> remoteAdditionOverflowSourceKeys;
+  final Set<String> firstFullCacheSourceKeys;
+
+  bool get isEmpty =>
+      (changedSourceKeys?.isEmpty ?? false) &&
+      remoteAdditionComicIds.isEmpty &&
+      remoteAdditionOverflowSourceKeys.isEmpty &&
+      firstFullCacheSourceKeys.isEmpty;
+}
+
 class FavoriteUpdateScanState {
   const FavoriteUpdateScanState({
     this.markerScheme,
@@ -440,8 +474,13 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   /// must be treated as changed.  Set by a whole-cache clear and by the legacy
   /// batched flush, which are both genuinely source-agnostic.
   bool _everySourceChanged = false;
+  final Map<String, Set<String>> _followUpdateRemoteAdditionIds = {};
+  final Set<String> _followUpdateAdditionOverflowSources = {};
+  final Set<String> _followUpdateFirstFullCacheSources = {};
   static const _backgroundRefreshAfter = Duration(minutes: 5);
   static const backgroundSummaryRefreshAfter = Duration(hours: 6);
+  @visibleForTesting
+  static int followUpdatePendingAdditionIdLimit = 512;
   static const _followScheduleBackfillKey = 'follow_schedule_state_backfill_v1';
   static const _trackingEvidenceMigrationKey = 'tracking_evidence_migration_v1';
   static const _followScheduleCoreColumns = <String>{
@@ -913,6 +952,9 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     _cacheGeneration++;
     _refreshing.clear();
     _fullCaching.clear();
+    _followUpdateRemoteAdditionIds.clear();
+    _followUpdateAdditionOverflowSources.clear();
+    _followUpdateFirstFullCacheSources.clear();
     _notifySourceChanged(null);
   }
 
@@ -1002,6 +1044,14 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         [sourceKey, comicId],
       )
       .map((row) => row['folder_id'] as String)
+      .toSet();
+
+  Set<String> getFavoriteComicIds(String sourceKey) => _db
+      .select(
+        'SELECT DISTINCT comic_id FROM favorite_membership WHERE source_key = ?',
+        [sourceKey],
+      )
+      .map((row) => row['comic_id'] as String)
       .toSet();
 
   /// Stores folder labels learned from a successful comic-detail query.  Such
@@ -2090,6 +2140,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     int pages,
     int comics,
   ) {
+    final wasComplete = getFullCacheStatus(folder).isComplete;
     _db.execute(
       '''UPDATE favorite_folders
          SET full_cache_at = ?, full_cache_pages = ?, full_cache_comics = ?
@@ -2102,6 +2153,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         folder.folderId,
       ],
     );
+    if (!wasComplete) _markFirstFullCache(folder.sourceKey);
     _notifySourceChanged(folder.sourceKey);
   }
 
@@ -2198,6 +2250,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       _db.execute('ROLLBACK');
       rethrow;
     }
+    if (isAdding) _markRemoteAddition(folder.sourceKey, comicId);
     _notifySourceChanged(folder.sourceKey);
     return const Res(true);
   }
@@ -2515,6 +2568,30 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     return drained;
   }
 
+  /// Drains ordinary and typed change evidence in one acknowledgement.
+  ///
+  /// The ordinary set keeps its historical behavior.  Typed evidence is
+  /// independent so collection-item-failure sources do not react to every page
+  /// write merely because that write also changed a cached row.
+  FavoriteCacheChangeBatch takeFollowUpdateChangeBatch() {
+    final changed = takeChangedSourceKeys();
+    final additions = {
+      for (final entry in _followUpdateRemoteAdditionIds.entries)
+        entry.key: Set<String>.of(entry.value),
+    };
+    final overflow = Set<String>.of(_followUpdateAdditionOverflowSources);
+    final completed = Set<String>.of(_followUpdateFirstFullCacheSources);
+    _followUpdateRemoteAdditionIds.clear();
+    _followUpdateAdditionOverflowSources.clear();
+    _followUpdateFirstFullCacheSources.clear();
+    return FavoriteCacheChangeBatch(
+      changedSourceKeys: changed,
+      remoteAdditionComicIds: additions,
+      remoteAdditionOverflowSourceKeys: overflow,
+      firstFullCacheSourceKeys: completed,
+    );
+  }
+
   /// Whether any source's cache changed since the last drain.
   ///
   /// A peek, not a drain: the follow-up trigger asks this to decide whether a
@@ -2522,6 +2599,34 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   /// the answer.
   bool get hasChangedSourceKeys =>
       _everySourceChanged || _changedSourceKeys.isNotEmpty;
+
+  bool get hasFollowUpdateChangeMarks =>
+      hasChangedSourceKeys ||
+      _followUpdateRemoteAdditionIds.isNotEmpty ||
+      _followUpdateAdditionOverflowSources.isNotEmpty ||
+      _followUpdateFirstFullCacheSources.isNotEmpty;
+
+  void _markRemoteAddition(String sourceKey, String comicId) {
+    final ids = _followUpdateRemoteAdditionIds.putIfAbsent(
+      sourceKey,
+      () => <String>{},
+    );
+    if (ids.length < followUpdatePendingAdditionIdLimit) {
+      ids.add(comicId);
+      return;
+    }
+    _followUpdateAdditionOverflowSources.add(sourceKey);
+  }
+
+  void _markFirstFullCache(String sourceKey) {
+    _followUpdateFirstFullCacheSources.add(sourceKey);
+  }
+
+  @visibleForTesting
+  void markRemoteAdditionForFollowUpdate(String sourceKey, String comicId) {
+    _markRemoteAddition(sourceKey, comicId);
+    _notifySourceChanged(sourceKey);
+  }
 
   /// Records which source changed, then notifies (Contract F1.4).
   ///

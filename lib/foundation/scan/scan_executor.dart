@@ -215,7 +215,11 @@ class ScanExecutor {
         }
         late final ScanCollectionPage page;
         try {
-          page = codec.decodeCollectionPage(raw, seenComicIds: seenComicIds);
+          page = codec.decodeCollectionPage(
+            raw,
+            seenComicIds: seenComicIds,
+            allowItemFailures: work.collectionItemFailures,
+          );
         } on ScanCodecException catch (error) {
           final failure = FailureSanitizer.sanitize({
             'exceptionType': 'ScanCodecException',
@@ -277,17 +281,29 @@ class ScanExecutor {
             context.scope.scopeAttemptId,
             '${work.sourceKey}\u0000${pageItem.comicId}',
           );
-          final item = ScanItemResult.observed(
-            attemptId: attemptId,
-            scopeAttemptId: context.scope.scopeAttemptId,
-            sourceKey: work.sourceKey,
-            comicId: pageItem.comicId,
-            producer: ScanProducer.collection,
-            definitionRevision: work.definitionRevision,
-            observedAt: observedAt,
-            evidenceSchema: work.evidenceSchema,
-            observation: pageItem.observation,
-          );
+          final item = pageItem.isSuccess
+              ? ScanItemResult.observed(
+                  attemptId: attemptId,
+                  scopeAttemptId: context.scope.scopeAttemptId,
+                  sourceKey: work.sourceKey,
+                  comicId: pageItem.comicId,
+                  producer: ScanProducer.collection,
+                  definitionRevision: work.definitionRevision,
+                  observedAt: observedAt,
+                  evidenceSchema: work.evidenceSchema,
+                  observation: pageItem.observation!,
+                )
+              : ScanItemResult.failed(
+                  attemptId: attemptId,
+                  scopeAttemptId: context.scope.scopeAttemptId,
+                  sourceKey: work.sourceKey,
+                  comicId: pageItem.comicId,
+                  producer: ScanProducer.collection,
+                  definitionRevision: work.definitionRevision,
+                  observedAt: observedAt,
+                  evidenceSchema: work.evidenceSchema,
+                  failure: pageItem.failure!,
+                );
           await emit(ScanEmission(ScanItemEvent(item)), context);
           persistedItems++;
         }

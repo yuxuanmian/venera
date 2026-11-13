@@ -28,6 +28,16 @@ This library provides a set of APIs for interacting with the Venera app.
 const SEMANTIC_SEARCH_MIN_RESULTS_PER_LOAD = 6;
 
 /**
+ * Host capability flag for collection pages that may contain explicit,
+ * per-comic failure entries. Source scripts must treat a missing value as
+ * unsupported and retain their legacy protocol branch.
+ *
+ * @global
+ * @type {boolean}
+ */
+const SCAN_COLLECTION_ITEM_FAILURES_V1 = true;
+
+/**
  * Set a timeout to execute a callback function after a specified delay.
  * @param callback {Function}
  * @param delay {number} - delay in milliseconds

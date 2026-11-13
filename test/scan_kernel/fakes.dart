@@ -15,9 +15,12 @@ class FakeScanAdapter implements ScanSourceAdapter {
     required this.sourceKey,
     this.definitionRevision = 'fake-revision',
     this.evidenceSchema,
+    this.comicEvidenceSchema,
+    this.collectionEvidenceSchema,
     this.comicLoader,
     this.collectionLoader,
     this.runtimeContext,
+    this.allowCollectionItemFailures = false,
   });
 
   @override
@@ -33,7 +36,49 @@ class FakeScanAdapter implements ScanSourceAdapter {
   final ManagedSourceContext? runtimeContext;
 
   @override
-  ScanCapabilities get capabilities => const ScanCapabilities.absent();
+  ScanCapabilities get capabilities {
+    final comicEvidence = comicEvidenceSchema ?? evidenceSchema;
+    final collectionEvidence = collectionEvidenceSchema ?? evidenceSchema;
+    if (allowCollectionItemFailures) {
+      return ScanCapabilities.supported(
+        primary: ScanProducer.collection,
+        comic: ScanCapability.comic(
+          _unusedComicLoader,
+          evidenceSchema: comicEvidence,
+        ),
+        collection: ScanCapability.collection(
+          _unusedCollectionLoader,
+          evidenceSchema: collectionEvidence,
+          itemFailures: true,
+        ),
+      );
+    }
+    if (comicLoader != null) {
+      return ScanCapabilities.supported(
+        primary: ScanProducer.comic,
+        comic: ScanCapability.comic(
+          _unusedComicLoader,
+          evidenceSchema: comicEvidence,
+        ),
+      );
+    }
+    return const ScanCapabilities.absent();
+  }
+
+  final bool allowCollectionItemFailures;
+  final String? comicEvidenceSchema;
+  final String? collectionEvidenceSchema;
+
+  static Future<Object?> _unusedComicLoader(
+    String comicId,
+    ScanHostRequest request,
+  ) async => const {};
+
+  static Future<Object?> _unusedCollectionLoader(
+    String collectionKey,
+    Object? cursor,
+    ScanHostRequest request,
+  ) async => const {'items': <Object?>[], 'next': null};
 
   final Future<Object?> Function(String comicId, ScanCallLease lease)?
   comicLoader;

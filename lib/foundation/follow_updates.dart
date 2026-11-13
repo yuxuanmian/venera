@@ -2,6 +2,7 @@ import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/catalog/source_preferences.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
+import 'package:venera/foundation/scan/models.dart';
 
 export 'follow_update_availability.dart';
 export 'follow_update_schedule.dart';
@@ -32,6 +33,21 @@ class UpdateProgress {
 
 bool get followUpdatesEnabled =>
     appdata.settings['followUpdatesEnabled'] == true;
+
+/// Whether a source uses the 016 collection-item-failure workflow.
+///
+/// This is a narrow capability check, not a source-key special case.  Sources
+/// without the explicit opt-in retain the ordinary cache-change behavior.
+bool sourceSupportsCollectionItemFailures(ComicSource source) {
+  final scan = source.scan;
+  return scan?.primary == ScanProducer.collection &&
+      scan?.collection?.itemFailures == true;
+}
+
+bool isCollectionItemFailuresSource(String sourceKey) {
+  final source = ComicSource.find(sourceKey);
+  return source != null && sourceSupportsCollectionItemFailures(source);
+}
 
 /// The keys the user selected for follow-up tracking.
 ///

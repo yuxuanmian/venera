@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
 
+import '../follow_update_recovery.dart';
 import '../scan/models.dart';
 import '../scan/scan_result_repository.dart';
 import '../scan/scan_service.dart';
@@ -248,8 +249,7 @@ class JudgmentService {
           observedAtMs: stored.observedAtMs,
           conclusion: outcome.conclusion,
           activityAt: outcome.activityAt,
-          producer: result.producer,
-          resumable: result.observation!.sourceUnread == null,
+          resumable: isRecoverableScheduleObservation(result),
         ),
       );
     }
@@ -283,7 +283,7 @@ class JudgmentService {
       final inputs =
           <String, ({JudgmentState state, ComicScheduleInput? input})>{};
       for (final entry in verified) {
-        final input = entry.producer == ScanProducer.comic && entry.resumable
+        final input = entry.resumable
             ? ComicScheduleInput(
                 sourceKey: entry.state.sourceKey,
                 comicId: entry.state.comicId,
@@ -316,7 +316,7 @@ class JudgmentService {
     // notification (Contract E2/E3).
     final eventRows = <JudgmentRowResult>[
       for (final entry in writtenEntries)
-        if (entry.producer == ScanProducer.comic && entry.resumable)
+        if (entry.resumable)
           ComicScheduleInput(
             sourceKey: entry.state.sourceKey,
             comicId: entry.state.comicId,
@@ -447,7 +447,6 @@ class _PendingJudgment {
     required this.observedAtMs,
     required this.conclusion,
     required this.activityAt,
-    required this.producer,
     required this.resumable,
   });
 
@@ -456,7 +455,6 @@ class _PendingJudgment {
   final int observedAtMs;
   final JudgmentConclusion conclusion;
   final DateTime? activityAt;
-  final ScanProducer producer;
   final bool resumable;
 }
 

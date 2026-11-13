@@ -23,6 +23,22 @@ void main() {
     expect(supported.selected!.producer, ScanProducer.comic);
   });
 
+  test('collection capabilities preserve the item-failure opt-in', () {
+    final supported = ScanCapabilities.supported(
+      primary: ScanProducer.collection,
+      collection: ScanCapability.collection(
+        (key, cursor, request) async => const {
+          'items': <Object?>[],
+          'next': null,
+        },
+        itemFailures: true,
+      ),
+    );
+
+    expect(supported.collection!.itemFailures, isTrue);
+    expect(supported.selected!.itemFailures, isTrue);
+  });
+
   test(
     'validates host requests to only GET/POST HTTP(S) without credentials',
     () {

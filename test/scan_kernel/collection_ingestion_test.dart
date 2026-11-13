@@ -131,4 +131,76 @@ void main() {
     expect(scope!.status, ScanScopeStatus.failed);
     expect(scope.itemCount, 1);
   });
+
+  test(
+    'a declared mixed collection stores observations and item failures',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'venera-collection-',
+      );
+      final repository = SqliteScanResultRepository(
+        databasePath: file_path.join(directory.path, 'scan_results.db'),
+      );
+      addTearDown(() async {
+        await repository.close();
+        if (directory.existsSync()) await directory.delete(recursive: true);
+      });
+      final source = makeScanTestSource('picacg');
+      final adapter = FakeScanAdapter(
+        sourceKey: source.key,
+        allowCollectionItemFailures: true,
+        collectionLoader: (_, _, __) async => const {
+          'items': [
+            {
+              'comicId': 'valid',
+              'observation': {
+                'update': {'chapterCount': 0},
+              },
+            },
+            {
+              'comicId': 'invalid-count',
+              'failure': {
+                'sourceCode': 'ERR_EPS_COUNT',
+                'message': 'Episode count was invalid',
+              },
+            },
+          ],
+          'next': null,
+        },
+      );
+      final consumer = ScanEmissionConsumer(repository: repository);
+
+      final outcome = await ScanExecutor(repository: repository).execute(
+        ScanWorkSpec.collection(
+          source: source,
+          adapter: adapter,
+          collectionKey: 'default',
+        ).toWork(
+          ScanExecutionGuard(
+            sourceKey: source.key,
+            sourceInstance: source,
+            cacheGeneration: 0,
+          ),
+        ),
+        emit: (emission, context) => consumer.consume(emission, context),
+      );
+
+      expect(outcome.status, ScanWorkOutcomeStatus.completed);
+      expect(outcome.persistedItems, 2);
+      final observed = await repository.readLatestItem(source.key, 'valid');
+      final failed = await repository.readLatestItem(
+        source.key,
+        'invalid-count',
+      );
+      expect(observed!.result.observation!.update!.chapterCount, 0);
+      expect(failed!.result.failure!.sourceCode, 'ERR_EPS_COUNT');
+      final scope = await repository.readLatestScope(
+        source.key,
+        ScanProducer.collection,
+        'default',
+      );
+      expect(scope!.status, ScanScopeStatus.completed);
+      expect(scope.itemCount, 2);
+    },
+  );
 }

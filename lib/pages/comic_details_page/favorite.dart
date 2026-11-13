@@ -212,7 +212,10 @@ class _FavoriteToggleButton extends StatelessWidget {
 /// stored value and never recomputes it.
 @immutable
 class FavoriteHotWindowIndicator {
-  const FavoriteHotWindowIndicator({required this.autoHotUntil});
+  const FavoriteHotWindowIndicator({
+    required this.autoHotUntil,
+    this.collectionUnavailable = false,
+  });
 
   /// Stored automatic hot-window deadline, or null when there is none.
   ///
@@ -220,6 +223,12 @@ class FavoriteHotWindowIndicator {
   /// a normal value, not a missing one: the schedule store only sets this field
   /// when a judgment concludes "content changed" (Contract S6.1).
   final DateTime? autoHotUntil;
+
+  /// A collection scan explicitly failed for this comic in the latest round.
+  ///
+  /// The previous judgment and schedule remain authoritative; this flag only
+  /// says that the latest collection source could not confirm them.
+  final bool collectionUnavailable;
 
   /// Whether the automatic hot window is still open at [now].
   bool isActiveAt(DateTime now) {
@@ -251,12 +260,14 @@ class _FavoriteHotWindowIndicatorSegment extends StatelessWidget {
     required this.message,
     required this.icon,
     required this.color,
+    this.iconKey = const ValueKey('favorite-hot-window-fire-icon'),
   });
 
   final String label;
   final String message;
   final IconData icon;
   final Color color;
+  final Key iconKey;
 
   @override
   Widget build(BuildContext context) {
@@ -269,12 +280,7 @@ class _FavoriteHotWindowIndicatorSegment extends StatelessWidget {
           width: _favoriteHotWindowSegmentWidth,
           height: 36,
           child: Center(
-            child: Icon(
-              key: const ValueKey('favorite-hot-window-fire-icon'),
-              icon,
-              size: 20,
-              color: color,
-            ),
+            child: Icon(key: iconKey, icon, size: 20, color: color),
           ),
         ),
       ),
@@ -324,7 +330,12 @@ class FavoriteHotWindowActionButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final now = clock?.call() ?? DateTime.now();
     final active = indicator.isActiveAt(now);
-    final hotLabel = active ? 'Recently updated'.tl : 'No recent update'.tl;
+    final unavailable = indicator.collectionUnavailable;
+    final hotLabel = unavailable
+        ? 'Follow-up check incomplete'.tl
+        : active
+        ? 'Recently updated'.tl
+        : 'No recent update'.tl;
     final hotMessage = _hotWindowMessage(active);
     final fireBase = context.isDarkMode
         ? Colors.deepOrange.shade300
@@ -332,7 +343,9 @@ class FavoriteHotWindowActionButton extends StatelessWidget {
     final fireColor = active
         ? fireBase.withValues(alpha: 0.68)
         : context.colorScheme.onSurfaceVariant;
-    final fireIcon = active
+    final fireIcon = unavailable
+        ? Icons.warning_amber_rounded
+        : active
         ? Icons.local_fire_department
         : Icons.local_fire_department_outlined;
     final favoriteLabel = 'Favorite'.tl;
@@ -424,6 +437,9 @@ class FavoriteHotWindowActionButton extends StatelessWidget {
                     message: hotMessage,
                     icon: fireIcon,
                     color: fireColor,
+                    iconKey: unavailable
+                        ? const ValueKey('favorite-hot-window-failure-icon')
+                        : const ValueKey('favorite-hot-window-fire-icon'),
                   )
                 else
                   Semantics(
@@ -470,6 +486,11 @@ class FavoriteHotWindowActionButton extends StatelessWidget {
   /// by construction.  The derived "changed at" moment is additional context
   /// only.  Neither string contains an action verb — this is not a switch.
   String _hotWindowMessage(bool active) {
+    if (indicator.collectionUnavailable) {
+      return 'The latest follow-up check could not confirm this comic. '
+              'The previous update state is unchanged.'
+          .tl;
+    }
     final until = indicator.autoHotUntil;
     if (!active || until == null) return 'No recent update'.tl;
     final changedAt = indicator.recentlyChangedAt();

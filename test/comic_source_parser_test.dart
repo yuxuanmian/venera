@@ -18,6 +18,7 @@ void main() {
       'venera-comic-source-parser-',
     );
     App.dataPath = dataDirectory.path;
+    App.packageVersion = '9.9.9';
     await JsEngine().init();
   });
 
@@ -237,6 +238,37 @@ $goodLoad''',
 $goodLoad''');
       expect(source.scan!.state, ScanCapabilitiesState.invalid);
     });
+
+    test(
+      'collection item failures require an explicit boolean opt-in',
+      () async {
+        final enabled = await parseScanSource(
+          'parser_scan_item_failures_enabled',
+          'collection',
+          '''
+      itemFailures: true,
+      fieldSource: {chapterCount: "epsCount"},
+      load: async (key, cursor, request) => ({items: [], next: null}),
+''',
+        );
+        expect(enabled.scan!.state, ScanCapabilitiesState.supported);
+        expect(enabled.scan!.collection!.itemFailures, isTrue);
+
+        for (final value in const ['1', '"true"', 'null']) {
+          final invalid = await parseScanSource(
+            'parser_scan_item_failures_${value.hashCode.abs()}',
+            'collection',
+            '''
+      itemFailures: $value,
+      fieldSource: {chapterCount: "epsCount"},
+      load: async (key, cursor, request) => ({items: [], next: null}),
+''',
+          );
+          expect(invalid.scan!.state, ScanCapabilitiesState.invalid);
+          expect(invalid.scan!.reason, contains('itemFailures'));
+        }
+      },
+    );
 
     test('each branch carries its own label', () async {
       const key = 'parser_scan_two_branches';

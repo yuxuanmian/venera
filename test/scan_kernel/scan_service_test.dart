@@ -59,6 +59,7 @@ void main() {
       expect(summary.progress.succeededWorks, 1);
       expect(summary.progress.failedWorks, 1);
       expect(summary.progress.persistedItems, 2);
+      expect(summary.progress.failedItems, 0);
       expect(summary.progress.activeWorks, 0);
       expect(service.isRunning, isFalse);
       expect(adapter.comicLeases, hasLength(2));
@@ -69,6 +70,109 @@ void main() {
       );
     },
   );
+
+  test(
+    'completed collection reports item failures separately from work failure',
+    () async {
+      final source = makeScanTestSource('source');
+      final adapter = FakeScanAdapter(
+        sourceKey: source.key,
+        allowCollectionItemFailures: true,
+        collectionLoader: (_, _, __) async => const {
+          'items': [
+            {
+              'comicId': 'good',
+              'observation': {
+                'update': {'chapterCount': 12},
+              },
+            },
+            {
+              'comicId': 'bad',
+              'failure': {
+                'sourceCode': 'ERR_CHAPTER_COUNT',
+                'message': 'Chapter count was invalid',
+              },
+            },
+          ],
+          'next': null,
+        },
+      );
+      final provider = FakeTargetProvider(
+        ScanTargetSnapshot(
+          works: [
+            ScanWorkSpec.collection(
+              source: source,
+              adapter: adapter,
+              collectionKey: 'default',
+            ),
+          ],
+          cacheGeneration: 0,
+        ),
+      );
+      final repository = FakeScanResultRepository();
+      final service = ScanService(
+        repository: repository,
+        targetProvider: provider,
+      );
+
+      final summary = await service.startFullScan();
+
+      expect(summary.disposition, FullScanDisposition.completed);
+      expect(summary.progress.succeededWorks, 1);
+      expect(summary.progress.failedWorks, 0);
+      expect(summary.progress.persistedItems, 2);
+      expect(summary.progress.failedItems, 1);
+      expect(summary.progress.failedCollectionScans, 0);
+      expect(summary.progress.toJson()['failedItems'], 1);
+    },
+  );
+
+  test('an unfinished item-failure collection is counted separately', () async {
+    final source = makeScanTestSource('source');
+    final adapter = FakeScanAdapter(
+      sourceKey: source.key,
+      allowCollectionItemFailures: true,
+      collectionLoader: (_, cursor, __) async => cursor == null
+          ? const {
+              'items': [
+                {
+                  'comicId': 'good',
+                  'observation': {
+                    'update': {'chapterCount': 1},
+                  },
+                },
+              ],
+              'next': 'page-2',
+            }
+          : const {
+              'failure': {'message': 'page failed'},
+            },
+    );
+    final provider = FakeTargetProvider(
+      ScanTargetSnapshot(
+        works: [
+          ScanWorkSpec.collection(
+            source: source,
+            adapter: adapter,
+            collectionKey: 'default',
+          ),
+        ],
+        cacheGeneration: 0,
+      ),
+    );
+    final service = ScanService(
+      repository: FakeScanResultRepository(),
+      targetProvider: provider,
+    );
+
+    final summary = await service.startFullScan();
+
+    expect(summary.disposition, FullScanDisposition.completed);
+    expect(summary.progress.failedWorks, 1);
+    expect(summary.progress.failedItems, 0);
+    expect(summary.progress.failedCollectionScans, 1);
+    expect(summary.progress.toJson()['failedCollectionScans'], 1);
+  });
 
   test(
     'rejects re-entry and cancellation preserves only committed work',

@@ -67,6 +67,13 @@ void main() {
       'Auto hot window until @time',
       'Recently changed at @time',
     ],
+    'collection scan feedback (016)': [
+      'Follow-up check incomplete',
+      'The latest follow-up check could not confirm this comic. The previous update state is unchanged.',
+      'Follow-up check summary',
+      'Incomplete favorite scans: @c',
+      'Comic check failures: @c',
+    ],
     // 007 Contract D — the two in-place Debug blocks.  The defaults are part of
     // the contract (D4: a default MUST be distinguishable from a real value and
     // MUST NOT use an action verb), so they are translated like any other label.

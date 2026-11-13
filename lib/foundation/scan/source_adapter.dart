@@ -108,12 +108,17 @@ enum ScanCapabilitiesState { absent, invalid, supported }
 
 class ScanCapability {
   const ScanCapability.comic(this.load, {this.evidenceSchema})
-    : producer = ScanProducer.comic;
-  const ScanCapability.collection(this.load, {this.evidenceSchema})
-    : producer = ScanProducer.collection;
+    : producer = ScanProducer.comic,
+      itemFailures = false;
+  const ScanCapability.collection(
+    this.load, {
+    this.evidenceSchema,
+    this.itemFailures = false,
+  }) : producer = ScanProducer.collection;
 
   final ScanProducer producer;
   final Object load;
+  final bool itemFailures;
 
   /// The normalized comparable label of this branch's mapping declaration.
   ///

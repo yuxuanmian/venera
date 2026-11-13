@@ -293,10 +293,11 @@ class ScanService {
       try {
         final work = spec.toWork(guard);
         final outcome = await executor.execute(work, emit: _emit);
-        _recordOutcome(outcome);
+        _recordOutcome(outcome, spec);
       } on ScanControlException {
         _recordOutcome(
           const ScanWorkOutcome(status: ScanWorkOutcomeStatus.canceled),
+          spec,
         );
       } on ScanStorageException catch (error) {
         _storageError ??= error;
@@ -310,6 +311,7 @@ class ScanService {
         // process down without a durable scope result.
         _recordOutcome(
           const ScanWorkOutcome(status: ScanWorkOutcomeStatus.failed),
+          spec,
         );
       } finally {
         _guards.remove(guard);
@@ -421,9 +423,16 @@ class ScanService {
               event.item,
             );
             if (result.written) {
+              final progress = _progress.value;
               _setProgress(
-                _progress.value.copyWith(
-                  persistedItems: _progress.value.persistedItems + 1,
+                progress.copyWith(
+                  persistedItems: progress.persistedItems + 1,
+                  failedItems:
+                      progress.failedItems +
+                      (event.item.producer == ScanProducer.collection &&
+                              event.item.failure != null
+                          ? 1
+                          : 0),
                 ),
               );
             }
@@ -484,8 +493,12 @@ class ScanService {
     }
   }
 
-  void _recordOutcome(ScanWorkOutcome outcome) {
+  void _recordOutcome(ScanWorkOutcome outcome, ScanWorkSpec spec) {
     final progress = _progress.value;
+    final failedCollectionScan =
+        outcome.status == ScanWorkOutcomeStatus.failed &&
+        spec.producer == ScanProducer.collection &&
+        spec.adapter.capabilities.collection?.itemFailures == true;
     _setProgress(
       progress.copyWith(
         succeededWorks:
@@ -497,6 +510,8 @@ class ScanService {
         canceledWorks:
             progress.canceledWorks +
             (outcome.status == ScanWorkOutcomeStatus.canceled ? 1 : 0),
+        failedCollectionScans:
+            progress.failedCollectionScans + (failedCollectionScan ? 1 : 0),
       ),
     );
   }

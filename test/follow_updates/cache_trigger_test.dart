@@ -3,12 +3,15 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:venera/foundation/app.dart';
+import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_updates_service.dart';
+import 'package:venera/foundation/res.dart';
 import 'package:venera/foundation/schedule/schedule_service.dart';
 import 'package:venera/foundation/schedule/schedule_state.dart';
 import 'package:venera/foundation/schedule/sqlite_schedule_repository.dart';
 import 'package:venera/foundation/scan/models.dart';
+import 'package:venera/foundation/scan/scan_result_repository.dart';
 import 'package:venera/foundation/scan/scan_service.dart';
 import 'package:venera/foundation/tracking/judgment_service.dart';
 
@@ -18,7 +21,7 @@ import '../tracking/fakes.dart';
 /// F1 — the cache-change trigger is the third of the three triggers, and it
 /// MUST use the same range rule as the other two.  FR-007 adds the debounce.
 void main() {
-  late InMemoryScanItemStore scanItems;
+  late _EventScanItemStore scanItems;
   late InMemoryJudgmentRepository judgmentRepository;
   late JudgmentService judgment;
   late SqliteScheduleRepository scheduleRepository;
@@ -28,7 +31,7 @@ void main() {
   late Directory tempDir;
 
   setUp(() async {
-    scanItems = InMemoryScanItemStore();
+    scanItems = _EventScanItemStore();
     judgmentRepository = InMemoryJudgmentRepository();
     judgment = JudgmentService(
       repository: judgmentRepository,
@@ -70,6 +73,8 @@ void main() {
   FollowUpdateCoordinator buildCoordinator({
     Duration debounce = const Duration(milliseconds: 20),
     Set<String> sources = const {'src'},
+    Set<String> collectionItemFailureSources = const {},
+    Set<String>? complete,
   }) => FollowUpdateCoordinator(
     followUpdatesEnabledReader: () => true,
     judgmentService: judgment,
@@ -78,12 +83,31 @@ void main() {
     scanRepository: scanItems,
     favoriteCache: cache,
     criterionSourceKeys: () => sources,
-    completeSourceKeys: () => sources,
+    completeSourceKeys: () => complete ?? sources,
+    collectionItemFailuresSourceReader: collectionItemFailureSources.contains,
     clock: () => DateTime.utc(2026, 9, 10, 12),
     cacheChangeDebounce: debounce,
   );
 
   group('the cache-change trigger (F1)', () {
+    test('typed addition IDs coalesce under a fixed bound', () {
+      final previousLimit =
+          NetworkFavoriteCacheManager.followUpdatePendingAdditionIdLimit;
+      NetworkFavoriteCacheManager.followUpdatePendingAdditionIdLimit = 1;
+      addTearDown(() {
+        NetworkFavoriteCacheManager.followUpdatePendingAdditionIdLimit =
+            previousLimit;
+      });
+
+      cache.markRemoteAdditionForFollowUpdate('collection', 'one');
+      cache.markRemoteAdditionForFollowUpdate('collection', 'two');
+      final batch = cache.takeFollowUpdateChangeBatch();
+
+      expect(batch.remoteAdditionComicIds['collection'], {'one'});
+      expect(batch.remoteAdditionOverflowSourceKeys, {'collection'});
+      expect(cache.hasFollowUpdateChangeMarks, isFalse);
+    });
+
     test('attaching listens to the favorite cache', () {
       final coordinator = buildCoordinator();
       expect(coordinator.cacheListenerAttached, isFalse);
@@ -104,6 +128,92 @@ void main() {
 
       expect(scan.calls, hasLength(1));
     });
+
+    test(
+      'ordinary writes do not trigger an item-failure collection source',
+      () async {
+        final coordinator = buildCoordinator(
+          sources: const {'collection'},
+          collectionItemFailureSources: const {'collection'},
+        );
+        coordinator.attachObservationConsumer();
+
+        cache.replaceComicMembership('collection', 'c1', const ['f']);
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+
+        expect(scan.calls, isEmpty);
+        expect(cache.hasFollowUpdateChangeMarks, isFalse);
+      },
+    );
+
+    test(
+      'a typed remote addition triggers only its collection source',
+      () async {
+        final coordinator = buildCoordinator(
+          sources: const {'collection', 'ordinary'},
+          collectionItemFailureSources: const {'collection'},
+        );
+        coordinator.attachObservationConsumer();
+
+        cache.markRemoteAdditionForFollowUpdate('collection', 'new-comic');
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+
+        expect(scan.calls, hasLength(1));
+        expect(scan.scopes.single, {'collection'});
+      },
+    );
+
+    test(
+      'the first complete transition triggers an empty collection',
+      () async {
+        final coordinator = buildCoordinator(
+          sources: const {'collection'},
+          collectionItemFailureSources: const {'collection'},
+        );
+        coordinator.attachObservationConsumer();
+        final data = FavoriteData(
+          key: 'collection',
+          title: 'Collection',
+          multiFolder: false,
+          loadComic: (page, [folder]) async =>
+              const Res<List<Comic>>([], subData: 1),
+          loadNext: null,
+        );
+
+        await cache
+            .cacheAllPages(
+              data,
+              const NetworkFavoriteFolderRef(
+                sourceKey: 'collection',
+                folderId: '',
+              ),
+              isCanceled: () => false,
+            )
+            .drain<void>();
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+
+        expect(scan.calls, hasLength(1));
+        expect(scan.scopes.single, {'collection'});
+      },
+    );
+
+    test(
+      'manual and typed triggers still require the collection cache gate',
+      () async {
+        final coordinator = buildCoordinator(
+          sources: const {'collection'},
+          collectionItemFailureSources: const {'collection'},
+          complete: const {},
+        );
+        coordinator.attachObservationConsumer();
+
+        expect(await coordinator.runRound(FollowUpdateTrigger.manual), isFalse);
+        cache.markRemoteAdditionForFollowUpdate('collection', 'new-comic');
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+
+        expect(scan.calls, isEmpty);
+      },
+    );
 
     test('the trigger uses the same range rule as the other two', () async {
       // One future-scheduled identity and one with no schedule row.
@@ -326,6 +436,67 @@ void main() {
 
   group('a source the running round does not cover is picked up afterwards '
       '(F1.2)', () {
+    test(
+      'an uncovered new mark gets one serial collection follow-up',
+      () async {
+        final coordinator = buildCoordinator(
+          sources: const {'collection'},
+          collectionItemFailureSources: const {'collection'},
+        );
+        coordinator.attachObservationConsumer();
+        scan.hold = true;
+
+        final round = coordinator.runRound(FollowUpdateTrigger.manual);
+        await scan.gate.started.future;
+        cache.markRemoteAdditionForFollowUpdate('collection', 'late-comic');
+        scan.hold = false;
+        scan.gate.release.complete();
+        await round;
+
+        expect(scan.scopes, [
+          null,
+          {'collection'},
+        ]);
+      },
+    );
+
+    test('a covered new mark does not add a second collection round', () async {
+      final coordinator = buildCoordinator(
+        sources: const {'collection'},
+        collectionItemFailureSources: const {'collection'},
+      );
+      coordinator.attachObservationConsumer();
+      scan.hold = true;
+
+      final round = coordinator.runRound(FollowUpdateTrigger.manual);
+      await scan.gate.started.future;
+      cache.markRemoteAdditionForFollowUpdate('collection', 'covered-comic');
+      scanItems.emit(
+        ScanStoredItem(
+          result: ScanItemResult.failed(
+            attemptId: 'covered-attempt',
+            scopeAttemptId: 'covered-scope',
+            sourceKey: 'collection',
+            comicId: 'covered-comic',
+            producer: ScanProducer.collection,
+            definitionRevision: '1.0.11',
+            observedAt: '2026-11-13T12:00:00Z',
+            evidenceSchema: '{"chapterCount":"epsCount"}',
+            failure: const ScanFailure(sourceCode: 'ERR_EPS_COUNT'),
+          ),
+          attemptOrdinal: 1,
+          observedAtMs: 1,
+          committedAtMs: 1,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      scan.hold = false;
+      scan.gate.release.complete();
+      await round;
+
+      expect(scan.scopes, [null]);
+    });
+
     test('one coalesced follow-up round covers it', () async {
       final coordinator = buildCoordinator(
         sources: const {'src', 'other'},
@@ -485,4 +656,16 @@ class _CountingScanService extends ScanService {
 class _Gate {
   final started = Completer<void>();
   final release = Completer<void>();
+}
+
+class _EventScanItemStore extends InMemoryScanItemStore {
+  final _events = StreamController<ScanRepositoryEvent>.broadcast();
+
+  @override
+  Stream<ScanRepositoryEvent> get events => _events.stream;
+
+  void emit(ScanStoredItem item) {
+    replace(item);
+    _events.add(ScanRepositoryEvent(item: item));
+  }
 }

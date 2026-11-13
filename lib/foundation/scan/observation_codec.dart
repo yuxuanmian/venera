@@ -27,10 +27,21 @@ class ComicScanEnvelope {
 }
 
 class ScanCollectionItem {
-  const ScanCollectionItem({required this.comicId, required this.observation});
+  const ScanCollectionItem.observed({
+    required this.comicId,
+    required ScanObservation this.observation,
+  }) : failure = null;
+
+  const ScanCollectionItem.failed({
+    required this.comicId,
+    required ScanFailure this.failure,
+  }) : observation = null;
 
   final String comicId;
-  final ScanObservation observation;
+  final ScanObservation? observation;
+  final ScanFailure? failure;
+
+  bool get isSuccess => observation != null;
 }
 
 class ScanCollectionPage {
@@ -117,6 +128,7 @@ class ObservationCodec {
   ScanCollectionPage decodeCollectionPage(
     Object? raw, {
     Set<String>? seenComicIds,
+    bool allowItemFailures = false,
   }) {
     final safe = preflightJson(raw, label: 'collection page');
     if (safe is! Map ||
@@ -134,9 +146,7 @@ class ObservationCodec {
     final ids = <String>{};
     final items = <ScanCollectionItem>[];
     for (final rawItem in rawItems) {
-      if (rawItem is! Map ||
-          rawItem['comicId'] is! String ||
-          rawItem['observation'] is! Map) {
+      if (rawItem is! Map || rawItem['comicId'] is! String) {
         throw const ScanCodecException('invalidPageItem');
       }
       final comicId = (rawItem['comicId'] as String).trim();
@@ -145,10 +155,32 @@ class ObservationCodec {
           seenComicIds?.contains(comicId) == true) {
         throw const ScanCodecException('duplicateComicId', 'comicId');
       }
+      final hasObservation = rawItem.containsKey('observation');
+      final hasFailure = rawItem.containsKey('failure');
+      if (hasObservation == hasFailure || (hasFailure && !allowItemFailures)) {
+        throw const ScanCodecException('invalidPageItem');
+      }
+      if (hasObservation) {
+        final observation = rawItem['observation'];
+        if (observation is! Map) {
+          throw const ScanCodecException('invalidPageItem');
+        }
+        items.add(
+          ScanCollectionItem.observed(
+            comicId: comicId,
+            observation: normalizeObservation(observation),
+          ),
+        );
+        continue;
+      }
+      final failure = rawItem['failure'];
+      if (failure is! Map) {
+        throw const ScanCodecException('invalidFailure');
+      }
       items.add(
-        ScanCollectionItem(
+        ScanCollectionItem.failed(
           comicId: comicId,
-          observation: normalizeObservation(rawItem['observation']),
+          failure: FailureSanitizer.sanitize(failure, limits: limits),
         ),
       );
     }

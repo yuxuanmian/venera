@@ -77,11 +77,14 @@ void main() {
       ],
       'next': null,
     });
-    expect(page.items.map((item) => item.observation.sourceUnread), [
+    expect(page.items.map((item) => item.observation!.sourceUnread), [
       false,
       true,
     ]);
-    expect(page.items.every((item) => item.observation.update == null), isTrue);
+    expect(
+      page.items.every((item) => item.observation!.update == null),
+      isTrue,
+    );
   });
 
   test('an observation with no valid facts is still rejected', () {
@@ -95,6 +98,78 @@ void main() {
         ],
         'next': null,
       }),
+      throwsA(isA<ScanCodecException>()),
+    );
+  });
+
+  test('item failures require explicit capability support', () {
+    const raw = {
+      'items': [
+        {
+          'comicId': 'failed',
+          'failure': {
+            'sourceCode': 'ERR_CHAPTER_COUNT',
+            'message': 'Chapter count is invalid',
+          },
+        },
+      ],
+      'next': null,
+    };
+
+    expect(
+      () => codec.decodeCollectionPage(raw),
+      throwsA(isA<ScanCodecException>()),
+    );
+
+    final page = codec.decodeCollectionPage(raw, allowItemFailures: true);
+    expect(page.items.single.isSuccess, isFalse);
+    expect(page.items.single.failure!.sourceCode, 'ERR_CHAPTER_COUNT');
+  });
+
+  test('item failure payloads remain XOR and participate in ID checks', () {
+    expect(
+      () => codec.decodeCollectionPage({
+        'items': [
+          {
+            'comicId': 'same',
+            'observation': {'sourceUnread': true},
+            'failure': {'message': 'ambiguous'},
+          },
+        ],
+        'next': null,
+      }, allowItemFailures: true),
+      throwsA(isA<ScanCodecException>()),
+    );
+    expect(
+      () => codec.decodeCollectionPage({
+        'items': [
+          {
+            'comicId': 'same',
+            'failure': {'message': 'first'},
+          },
+          {
+            'comicId': 'same',
+            'observation': {'sourceUnread': false},
+          },
+        ],
+        'next': null,
+      }, allowItemFailures: true),
+      throwsA(isA<ScanCodecException>()),
+    );
+    expect(
+      () => codec.decodeCollectionPage(
+        {
+          'items': [
+            {
+              'comicId': 'already-seen',
+              'failure': {'message': 'known failure'},
+            },
+          ],
+          'next': null,
+        },
+        seenComicIds: {'already-seen'},
+        allowItemFailures: true,
+      ),
       throwsA(isA<ScanCodecException>()),
     );
   });

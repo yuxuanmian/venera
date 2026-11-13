@@ -98,6 +98,9 @@ class ScanWork {
   /// [definitionRevision].
   String? get evidenceSchema => adapter.evidenceSchema;
 
+  bool get collectionItemFailures =>
+      adapter.capabilities.collection?.itemFailures == true;
+
   ManagedSourceContext? get runtimeContext => adapter.runtimeContext;
 }
 

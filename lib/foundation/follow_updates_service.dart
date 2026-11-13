@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import 'comic_source/comic_source.dart';
 import 'favorites.dart';
+import 'follow_update_recovery.dart';
 import 'follow_updates.dart';
 import 'log.dart';
 import 'schedule/schedule_service.dart';
@@ -26,6 +27,8 @@ import 'tracking/sqlite_judgment_repository.dart';
 /// distinction is which targets are handed to it, not a second scanner.
 const String kFollowUpdateScopePrefix = 'follow-up';
 
+const _picacgStartupScanInterval = Duration(hours: 12);
+
 /// Why a round was requested.  Recorded for diagnostics and used by tests to
 /// prove every trigger goes through one range rule.
 enum FollowUpdateTrigger { startup, cacheChanged, manual }
@@ -42,12 +45,16 @@ class FollowUpdateProgress {
     required this.discovered,
     required this.finished,
     required this.phase,
+    this.incompleteCollectionScans = 0,
+    this.comicFailures = 0,
   });
 
   const FollowUpdateProgress.idle()
     : discovered = 0,
       finished = 0,
-      phase = ScanProgressPhase.idle;
+      phase = ScanProgressPhase.idle,
+      incompleteCollectionScans = 0,
+      comicFailures = 0;
 
   /// The denominator.  Fixed once target discovery completes; it MUST NOT
   /// change while the round runs.
@@ -61,6 +68,12 @@ class FollowUpdateProgress {
   final int finished;
 
   final ScanProgressPhase phase;
+
+  /// Collection rounds for item-failure sources that did not finish.
+  final int incompleteCollectionScans;
+
+  /// Explicit per-comic failures persisted by a collection round.
+  final int comicFailures;
 
   /// Whether the round has reached its completion boundary.
   ///
@@ -231,6 +244,7 @@ class FollowUpdateCoordinator {
     NetworkFavoriteCacheManager? favoriteCache,
     Set<String> Function()? criterionSourceKeys,
     Set<String> Function()? completeSourceKeys,
+    bool Function(String sourceKey)? collectionItemFailuresSourceReader,
     DateTime Function()? clock,
     this.batchThreshold = 50,
     this.cacheChangeDebounce = const Duration(seconds: 2),
@@ -256,7 +270,10 @@ class FollowUpdateCoordinator {
            completeSourceKeys ??
            (() => _completeSourceKeysFromCache(
              _favoriteCacheReaderFor(favoriteCache)(),
-           )) {
+           )),
+       _collectionItemFailuresSourceReader =
+           collectionItemFailuresSourceReader ??
+           isCollectionItemFailuresSource {
     // Live counts are mirrored from the acquisition service rather than
     // polled, so the numerator moves exactly when a task settles (F5.4).
     // Unlike the schedule and observation subscriptions this needs no explicit
@@ -276,6 +293,7 @@ class FollowUpdateCoordinator {
   final Set<String> Function() _criterionSourceKeys;
   final DateTime Function() _clock;
   final Set<String> Function() _completeSourceKeys;
+  final bool Function(String sourceKey) _collectionItemFailuresSourceReader;
 
   /// The follow-up master switch (Contract F1.4).
   ///
@@ -323,6 +341,9 @@ class FollowUpdateCoordinator {
   StreamSubscription<ScanRepositoryEvent>? _observationSubscription;
   Timer? _debounce;
   int _observationsSinceJudgment = 0;
+  final Map<String, Set<String>> _roundCoveredComicIds = {};
+  final Set<String> _roundCompletedCollectionSourceKeys = {};
+  Set<String> _roundTrackedCollectionSources = const {};
 
   /// Progress for the current (or last) round.
   ValueListenable<FollowUpdateProgress> get progress => _progressNotifier;
@@ -398,6 +419,8 @@ class FollowUpdateCoordinator {
         phase: scan.phase == ScanProgressPhase.finished
             ? ScanProgressPhase.running
             : scan.phase,
+        incompleteCollectionScans: scan.failedCollectionScans,
+        comicFailures: scan.failedItems,
       ),
     );
   }
@@ -436,6 +459,22 @@ class FollowUpdateCoordinator {
   /// broadcast simply carries nothing until it is.
   void attachObservationConsumer() {
     _observationSubscription ??= _scanRepository.events.listen((event) {
+      if (_roundRunning) {
+        final item = event.item;
+        if (item != null &&
+            item.result.producer == ScanProducer.collection &&
+            _roundTrackedCollectionSources.contains(item.result.sourceKey)) {
+          _roundCoveredComicIds
+              .putIfAbsent(item.result.sourceKey, () => <String>{})
+              .add(item.result.comicId);
+        }
+        final scope = event.scope;
+        if (scope?.producer == ScanProducer.collection &&
+            scope?.status == ScanScopeStatus.completed &&
+            _roundTrackedCollectionSources.contains(scope!.sourceKey)) {
+          _roundCompletedCollectionSourceKeys.add(scope.sourceKey);
+        }
+      }
       // Only a persisted item is progress.  A scope event marks the end of a
       // range, so counting it would advance the threshold by one per range and
       // consume the remainder twice.
@@ -535,17 +574,13 @@ class FollowUpdateCoordinator {
 
     var scope = scopeSourceKeys;
     if (scope == null && trigger == FollowUpdateTrigger.cacheChanged) {
-      // `null` here means "every source, because the change could not be
-      // attributed"; an empty set means nothing changed, which is not a round.
-      scope = _cache.takeChangedSourceKeys();
+      scope = _sourceKeysForCacheChangeBatch(
+        _cache.takeFollowUpdateChangeBatch(),
+      );
       if (scope != null && scope.isEmpty) return false;
     }
+    scope = _scopeRespectingCollectionGate(scope);
     if (scope != null) {
-      // A source outside the criterion set (switched off, logged out, no scan
-      // capability) must not be scanned even when its cache changed.  The
-      // intersection is here rather than in the due map because a
-      // collection-type work item can never be dropped by that map.
-      scope = scope.intersection(_criterionSourceKeys());
       if (scope.isEmpty) return false;
     }
 
@@ -577,7 +612,10 @@ class FollowUpdateCoordinator {
         if (_cancelRequested) break;
         final owed = _takeOwedScope(roundScope);
         if (owed == null) break;
-        roundScope = owed.everySource ? null : owed.sourceKeys;
+        roundScope = _scopeRespectingCollectionGate(
+          owed.everySource ? null : owed.sourceKeys,
+        );
+        if (roundScope != null && roundScope.isEmpty) break;
         roundTrigger = FollowUpdateTrigger.cacheChanged;
         _activeTrigger = roundTrigger;
         _publish(
@@ -595,6 +633,43 @@ class FollowUpdateCoordinator {
     }
   }
 
+  Set<String>? _sourceKeysForCacheChangeBatch(FavoriteCacheChangeBatch batch) {
+    final criterion = _criterionSourceKeys();
+    final itemFailureSources = criterion
+        .where(_collectionItemFailuresSourceReader)
+        .toSet();
+    final ordinary = batch.changedSourceKeys;
+    if (ordinary == null && itemFailureSources.isEmpty) return null;
+
+    final actionable = <String>{};
+    final ordinaryCandidates = ordinary ?? criterion;
+    actionable.addAll(
+      ordinaryCandidates.intersection(criterion).difference(itemFailureSources),
+    );
+    actionable.addAll(
+      {
+        ...batch.remoteAdditionComicIds.keys,
+        ...batch.remoteAdditionOverflowSourceKeys,
+        ...batch.firstFullCacheSourceKeys,
+      }.intersection(itemFailureSources),
+    );
+    return actionable;
+  }
+
+  Set<String>? _scopeRespectingCollectionGate(Set<String>? scope) {
+    final criterion = _criterionSourceKeys();
+    final candidates = scope == null
+        ? criterion
+        : scope.intersection(criterion);
+    final incompleteItemFailureSources = criterion
+        .where(_collectionItemFailuresSourceReader)
+        .toSet()
+        .difference(_completeSourceKeys());
+    final filtered = candidates.difference(incompleteItemFailureSources);
+    if (scope == null && filtered.length == criterion.length) return null;
+    return filtered;
+  }
+
   /// The scope a coalesced follow-up round still owes, or null when none is.
   ///
   /// F1.2 revised: a trigger arriving mid-round is still **absorbed**, but the
@@ -607,10 +682,43 @@ class FollowUpdateCoordinator {
   /// definition, so nothing is owed — that is what keeps the startup and manual
   /// paths at exactly one round per request.
   _OwedScope? _takeOwedScope(Set<String>? justRan) {
-    final marks = _cache.takeChangedSourceKeys();
-    if (justRan == null) return null;
-    if (marks == null) return const _OwedScope.everySource();
-    final owed = marks.intersection(_criterionSourceKeys()).difference(justRan);
+    final batch = _cache.takeFollowUpdateChangeBatch();
+    final criterion = _criterionSourceKeys();
+    final itemFailureSources = criterion
+        .where(_collectionItemFailuresSourceReader)
+        .toSet();
+    final owed = <String>{};
+    if (justRan != null) {
+      final ordinary = batch.changedSourceKeys;
+      if (ordinary == null) {
+        if (itemFailureSources.isEmpty) {
+          return const _OwedScope.everySource();
+        }
+        owed.addAll(criterion.toSet().difference(itemFailureSources));
+      } else {
+        owed.addAll(
+          ordinary
+              .intersection(criterion)
+              .difference(itemFailureSources)
+              .difference(justRan),
+        );
+      }
+    }
+    for (final sourceKey in batch.firstFullCacheSourceKeys) {
+      if (itemFailureSources.contains(sourceKey) &&
+          !_roundCompletedCollectionSourceKeys.contains(sourceKey)) {
+        owed.add(sourceKey);
+      }
+    }
+    for (final entry in batch.remoteAdditionComicIds.entries) {
+      final sourceKey = entry.key;
+      if (!itemFailureSources.contains(sourceKey)) continue;
+      final covered = _roundCoveredComicIds[sourceKey] ?? const <String>{};
+      if (!covered.containsAll(entry.value)) owed.add(sourceKey);
+    }
+    owed.addAll(
+      batch.remoteAdditionOverflowSourceKeys.intersection(itemFailureSources),
+    );
     if (owed.isEmpty) return null;
     return _OwedScope.sources(owed);
   }
@@ -620,6 +728,12 @@ class FollowUpdateCoordinator {
     required FollowUpdateTrigger trigger,
   }) async {
     final nowMs = _clock().millisecondsSinceEpoch;
+    _roundCoveredComicIds.clear();
+    _roundCompletedCollectionSourceKeys.clear();
+    final roundSources = scope ?? _criterionSourceKeys();
+    _roundTrackedCollectionSources = roundSources
+        .where(_collectionItemFailuresSourceReader)
+        .toSet();
     await _scanRepository.ensureOpen();
     // 007 Contract L2: the settlement's elapsed time is the whole round's
     // **wall clock**, from this point to the close — not the sum of the
@@ -637,11 +751,16 @@ class FollowUpdateCoordinator {
         ? await scan.startPreparedFullScan(
             scopeSourceKeys: scope,
             roundLabel: trigger.name,
-            prepareTargets: (snapshot, targetScope) => _prepareComicRecovery(
-              snapshot: snapshot,
-              scope: targetScope,
-              nowMs: nowMs,
-            ),
+            prepareTargets: (snapshot, targetScope) async {
+              final prepared = await _prepareComicRecovery(
+                snapshot: snapshot,
+                scope: targetScope,
+                nowMs: nowMs,
+              );
+              return trigger == FollowUpdateTrigger.startup
+                  ? _skipFreshPicacgCollection(prepared, nowMs)
+                  : prepared;
+            },
           )
         : await scan.startFullScan(
             dueComicIdsBySource: await _dueComicIdsBySource(nowMs, scope),
@@ -660,6 +779,7 @@ class FollowUpdateCoordinator {
     } finally {
       _observationsSinceJudgment = 0;
     }
+    await _drainScheduleEvents();
 
     roundWatch.stop();
     _logSettlementOverview(summary, roundWatch.elapsedMilliseconds);
@@ -669,7 +789,41 @@ class FollowUpdateCoordinator {
         discovered: summary.progress.discoveredWorks,
         finished: _finishedTasks(summary.progress),
         phase: ScanProgressPhase.finished,
+        incompleteCollectionScans: summary.progress.failedCollectionScans,
+        comicFailures: summary.progress.failedItems,
       ),
+    );
+  }
+
+  Future<scan_kernel.ScanTargetSnapshot> _skipFreshPicacgCollection(
+    scan_kernel.ScanTargetSnapshot snapshot,
+    int nowMs,
+  ) async {
+    bool isPicacgCollection(ScanWorkSpec work) =>
+        work.sourceKey == 'picacg' &&
+        work.producer == ScanProducer.collection &&
+        work.scopeKey == 'default';
+    if (!snapshot.works.any(isPicacgCollection)) return snapshot;
+
+    // This is checked after local recovery so skipping HTTP does not skip
+    // pending judgments or heat windows. A newer incomplete attempt is due.
+    final last = await _scanRepository.readLatestScope(
+      'picacg',
+      ScanProducer.collection,
+      'default',
+    );
+    final finishedAt = last?.finishedAtMs;
+    if (last?.status != ScanScopeStatus.completed || finishedAt == null) {
+      return snapshot;
+    }
+    final age = nowMs - finishedAt;
+    if (age < 0 || age >= _picacgStartupScanInterval.inMilliseconds) {
+      return snapshot;
+    }
+    return scan_kernel.ScanTargetSnapshot(
+      works: snapshot.works.where((work) => !isPicacgCollection(work)),
+      cacheGeneration: snapshot.cacheGeneration,
+      skippedSources: snapshot.skippedSources,
     );
   }
 
@@ -688,21 +842,50 @@ class FollowUpdateCoordinator {
       final schedule = _scheduleService;
       if (schedule == null) return snapshot;
       await sqliteJudgment.ensureOpen();
-      final worksByIdentity = <String, ScanWorkSpec>{
+      final comicWorksByIdentity = <String, ScanWorkSpec>{
         for (final work in snapshot.works)
-          if (work.comicId != null)
+          if (work.producer == ScanProducer.comic && work.comicId != null)
             '${work.sourceKey}\u0000${work.comicId}': work,
       };
+      final collectionWorksBySource = <String, ScanWorkSpec>{
+        for (final work in snapshot.works)
+          if (work.producer == ScanProducer.collection &&
+              work.adapter.capabilities.collection?.itemFailures == true)
+            work.sourceKey: work,
+      };
+      final collectionMembershipBySource = <String, Set<String>>{};
+      for (final sourceKey in collectionWorksBySource.keys) {
+        try {
+          collectionMembershipBySource[sourceKey] = _cache.getFavoriteComicIds(
+            sourceKey,
+          );
+        } catch (error) {
+          if (_isUnopenedStore(error)) {
+            collectionMembershipBySource[sourceKey] = const <String>{};
+          } else {
+            rethrow;
+          }
+        }
+      }
       final latestByIdentity = <String, ScanStoredItem>{
         for (final item in await _scanRepository.readAllItems())
-          if (worksByIdentity.containsKey(
-            '${item.result.sourceKey}\u0000${item.result.comicId}',
-          ))
+          if ((comicWorksByIdentity.containsKey(
+                    '${item.result.sourceKey}\u0000${item.result.comicId}',
+                  ) ||
+                  (collectionWorksBySource.containsKey(item.result.sourceKey) &&
+                      (collectionMembershipBySource[item.result.sourceKey] ??
+                              const <String>{})
+                          .contains(item.result.comicId))) &&
+              (scope == null || scope.contains(item.result.sourceKey)))
             '${item.result.sourceKey}\u0000${item.result.comicId}': item,
       };
       final candidates = <String, ScanStoredItem>{
         for (final entry in latestByIdentity.entries)
-          if (_isRecoveryCandidate(worksByIdentity[entry.key]!, entry.value))
+          if (_isRecoveryCandidate(
+            comicWorksByIdentity[entry.key] ??
+                collectionWorksBySource[entry.value.result.sourceKey],
+            entry.value,
+          ))
             entry.key: entry.value,
       };
       final existingInputs = sqliteJudgment.readComicRecoveryInputs();
@@ -726,9 +909,14 @@ class FollowUpdateCoordinator {
 
       final latestAfter = <String, ScanStoredItem>{
         for (final item in await _scanRepository.readAllItems())
-          if (worksByIdentity.containsKey(
-            '${item.result.sourceKey}\u0000${item.result.comicId}',
-          ))
+          if ((comicWorksByIdentity.containsKey(
+                    '${item.result.sourceKey}\u0000${item.result.comicId}',
+                  ) ||
+                  (collectionWorksBySource.containsKey(item.result.sourceKey) &&
+                      (collectionMembershipBySource[item.result.sourceKey] ??
+                              const <String>{})
+                          .contains(item.result.comicId))) &&
+              (scope == null || scope.contains(item.result.sourceKey)))
             '${item.result.sourceKey}\u0000${item.result.comicId}': item,
       };
       final inputsAfter = sqliteJudgment.readComicRecoveryInputs();
@@ -736,7 +924,8 @@ class FollowUpdateCoordinator {
         for (final entry in candidates.entries)
           if (!writeFailures.contains(entry.key) &&
               _isRecoveryCandidate(
-                worksByIdentity[entry.key]!,
+                comicWorksByIdentity[entry.key] ??
+                    collectionWorksBySource[entry.value.result.sourceKey],
                 latestAfter[entry.key],
               ) &&
               latestAfter[entry.key]!.result.attemptId ==
@@ -749,12 +938,23 @@ class FollowUpdateCoordinator {
         excluded: writeFailures,
       );
       writeFailures = {...writeFailures, ...result.failed};
+      final deferredCollectionSources = {
+        for (final identity in writeFailures)
+          identity.substring(0, identity.indexOf('\u0000')),
+      }.intersection(collectionWorksBySource.keys.toSet());
       if (writeFailures.isNotEmpty) {
         Log.warning(
           'Follow update',
           '${writeFailures.length} comic request(s) deferred after '
               'recovery persistence failure',
         );
+        if (deferredCollectionSources.isNotEmpty) {
+          Log.warning(
+            'Follow update',
+            '${deferredCollectionSources.length} collection scan(s) '
+                'deferred after recovery persistence failure',
+          );
+        }
       }
       final due = await _dueComicIdsBySource(nowMs, scope);
       final filtered = due == null
@@ -763,10 +963,12 @@ class FollowUpdateCoordinator {
       return scan_kernel.ScanTargetSnapshot(
         works: [
           for (final work in filtered.works)
-            if (work.comicId == null ||
-                !writeFailures.contains(
-                  '${work.sourceKey}\u0000${work.comicId}',
-                ))
+            if ((work.producer == ScanProducer.collection &&
+                    !deferredCollectionSources.contains(work.sourceKey)) ||
+                (work.comicId != null &&
+                    !writeFailures.contains(
+                      '${work.sourceKey}\u0000${work.comicId}',
+                    )))
               work,
         ],
         cacheGeneration: filtered.cacheGeneration,
@@ -775,15 +977,31 @@ class FollowUpdateCoordinator {
     });
   }
 
-  bool _isRecoveryCandidate(ScanWorkSpec work, ScanStoredItem? item) {
-    if (item == null) return false;
+  bool _isRecoveryCandidate(ScanWorkSpec? work, ScanStoredItem? item) {
+    if (work == null || item == null) return false;
+    final sourceSnapshot = work.sourceSnapshot;
+    if (sourceSnapshot?.managed == true &&
+        !identical(ComicSource.find(work.sourceKey), work.source)) {
+      return false;
+    }
     final result = item.result;
-    return work.comicId == result.comicId &&
-        result.producer == ScanProducer.comic &&
-        result.isSuccess &&
-        result.observation!.sourceUnread == null &&
+    if (!isRecoverableScheduleObservation(result) ||
+        result.sourceKey != work.sourceKey) {
+      return false;
+    }
+    final capabilities = work.adapter.capabilities;
+    if (work.producer == ScanProducer.collection) {
+      if (result.producer == ScanProducer.comic) {
+        return isKnownPicacgComicObservation(result);
+      }
+      final collection = capabilities.collection;
+      return collection?.itemFailures == true &&
+          isPicacgCollectionCountObservation(result) &&
+          result.evidenceSchema == collection?.evidenceSchema;
+    }
+    return result.producer == ScanProducer.comic &&
         result.definitionRevision == work.adapter.definitionRevision &&
-        result.evidenceSchema == work.adapter.evidenceSchema;
+        result.evidenceSchema == capabilities.comic?.evidenceSchema;
   }
 
   Future<scan_kernel.ScanTargetSnapshot> _legacyDueSnapshot(

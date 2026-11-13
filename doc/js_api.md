@@ -281,6 +281,15 @@ it. It is independent of the host's UI presentation limit
 result page appends at a time), and it never authorizes scanning more pages or
 issuing more requests than the source's own declared work bound.
 
+### `SCAN_COLLECTION_ITEM_FAILURES_V1: boolean`
+
+Indicates that the host accepts an explicitly declared
+`scan.collection.itemFailures: true` capability and mixed collection pages
+containing either a valid observation or a sanitized per-comic failure for each
+known comic ID. A missing value means the host only supports the original
+collection page shape. Sources must retain a compatibility branch for older
+hosts.
+
 ## Types
 
 ### `Cookie`

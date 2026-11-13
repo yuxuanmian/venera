@@ -940,8 +940,13 @@ class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage>
   Widget buildProgressArea(BuildContext context) {
     final caching = followUpdateCoordinator.isCachingFavorites;
     final running = followUpdateCoordinator.isRunning;
-    if (!running && !caching) return buildPostCacheTransition(context);
     final progress = followUpdateCoordinator.currentProgress;
+    final hasFailureCounts =
+        progress.incompleteCollectionScans > 0 || progress.comicFailures > 0;
+    if (!running && !caching && !hasFailureCounts) {
+      return buildPostCacheTransition(context);
+    }
+    final completed = !running && !caching;
     return SliverToBoxAdapter(
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -953,23 +958,51 @@ class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage>
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(caching ? 'Caching favorites'.tl : 'Checking updates'.tl),
-            const SizedBox(height: 8),
-            LinearProgressIndicator(value: progress.fraction),
-            const SizedBox(height: 4),
-            Text(followUpdateProgressLabel(progress), style: ts.s12),
+            Text(
+              completed
+                  ? 'Follow-up check summary'.tl
+                  : caching
+                  ? 'Caching favorites'.tl
+                  : 'Checking updates'.tl,
+            ),
+            if (!completed) ...[
+              const SizedBox(height: 8),
+              LinearProgressIndicator(value: progress.fraction),
+              const SizedBox(height: 4),
+              Text(followUpdateProgressLabel(progress), style: ts.s12),
+            ],
             if (caching) ...[
               const SizedBox(height: 4),
               Text('Caching is not finished yet'.tl, style: ts.s12),
             ],
-            const SizedBox(height: 8),
-            OutlinedButton.icon(
-              onPressed: caching
-                  ? followUpdateCoordinator.cancelFullCache
-                  : followUpdateCoordinator.cancel,
-              icon: const Icon(Icons.stop),
-              label: Text('Cancel'.tl),
-            ),
+            if (progress.incompleteCollectionScans > 0) ...[
+              const SizedBox(height: 6),
+              Text(
+                'Incomplete favorite scans: @c'.tlParams({
+                  'c': progress.incompleteCollectionScans,
+                }),
+                style: ts.s12,
+              ),
+            ],
+            if (progress.comicFailures > 0) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Comic check failures: @c'.tlParams({
+                  'c': progress.comicFailures,
+                }),
+                style: ts.s12,
+              ),
+            ],
+            if (!completed) ...[
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: caching
+                    ? followUpdateCoordinator.cancelFullCache
+                    : followUpdateCoordinator.cancel,
+                icon: const Icon(Icons.stop),
+                label: Text('Cancel'.tl),
+              ),
+            ],
           ],
         ),
       ),

@@ -74,6 +74,39 @@ void main() {
   );
 
   test(
+    'a completed empty item-failure collection still yields default work',
+    () async {
+      final source = _comicSource(
+        'collection',
+        ScanProducer.collection,
+        singleFolder: true,
+        itemFailures: true,
+      );
+      final cache = _FakeCache(
+        <NetworkFavoriteFolder>[_folder('collection', '')],
+        const <String, List<String>>{},
+        completeFolders: const {''},
+      );
+      final provider = ScanTargetProvider(
+        cache: cache,
+        sources: () => [source],
+        sourceEnabled: (_) => true,
+        favoriteSettingReader: () => ['collection'],
+        adapterFactory: (value) => FakeScanAdapter(
+          sourceKey: value.key,
+          allowCollectionItemFailures: true,
+        ),
+      );
+
+      final snapshot = await provider.snapshot();
+
+      expect(snapshot.works, hasLength(1));
+      expect(snapshot.works.single.scopeKey, 'default');
+      expect(snapshot.works.single.producer, ScanProducer.collection);
+    },
+  );
+
+  test(
     'reports absent, invalid, disabled, and unauthenticated sources',
     () async {
       final disabled = _comicSource('disabled', ScanProducer.comic);
@@ -194,6 +227,7 @@ ComicSource _comicSource(
   String key,
   ScanProducer producer, {
   bool singleFolder = false,
+  bool itemFailures = false,
 }) {
   final favoriteData = FavoriteData(
     key: key,
@@ -205,7 +239,10 @@ ComicSource _comicSource(
   );
   final capability = producer == ScanProducer.comic
       ? ScanCapability.comic((_, __) async => const {})
-      : ScanCapability.collection((_, __, ___) async => const {});
+      : ScanCapability.collection(
+          (_, __, ___) async => const {},
+          itemFailures: itemFailures,
+        );
   return makeScanTestSource(
     key,
     favoriteData: favoriteData,
@@ -226,10 +263,15 @@ NetworkFavoriteFolder _folder(String source, String id) =>
     );
 
 class _FakeCache extends NetworkFavoriteCacheManager {
-  _FakeCache(this.folders, this.items) : super.forTesting();
+  _FakeCache(
+    this.folders,
+    this.items, {
+    this.completeFolders = const <String>{},
+  }) : super.forTesting();
 
   final List<NetworkFavoriteFolder> folders;
   final Map<String, List<String>> items;
+  final Set<String> completeFolders;
 
   @override
   int get cacheGeneration => 0;
@@ -240,6 +282,12 @@ class _FakeCache extends NetworkFavoriteCacheManager {
   @override
   int countCachedComics(NetworkFavoriteFolderRef folder) =>
       items[folder.folderId]?.toSet().length ?? 0;
+
+  @override
+  FavoriteFullCacheStatus getFullCacheStatus(NetworkFavoriteFolderRef folder) =>
+      completeFolders.contains(folder.folderId)
+      ? FavoriteFullCacheStatus(completedAt: DateTime.utc(2026, 9, 10))
+      : const FavoriteFullCacheStatus();
 
   @override
   int countCachedComicsInFolders(Iterable<NetworkFavoriteFolderRef> selected) =>
