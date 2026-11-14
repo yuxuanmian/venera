@@ -3,10 +3,13 @@ import 'package:flutter/material.dart';
 import 'package:venera/foundation/catalog/controller.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/catalog/http_client.dart';
+import 'package:venera/foundation/log.dart';
 import 'package:venera/pages/auth_page.dart';
 import 'package:venera/pages/catalog_bootstrap_page.dart';
 import 'package:venera/pages/comic_source_page.dart';
 import 'package:venera/utils/translations.dart';
+
+import 'startup_logo.dart';
 
 /// Keeps all personal Catalog state behind the existing local unlock. The
 /// child is not even built until authentication succeeds, so migration and
@@ -54,8 +57,12 @@ class CatalogGate extends StatefulWidget {
 }
 
 class _CatalogGateState extends State<CatalogGate> {
+  static const _servicesTimeout = Duration(seconds: 15);
+  static const _storageGrace = Duration(seconds: 5);
+
   CatalogStartupResult? _result;
-  String _phase = '正在检查漫画源配置';
+  bool _startingServices = false;
+  bool _startupFailed = false;
   bool _sourceSelectionHandled = false;
   late final bool _showInitialPreparation;
 
@@ -94,26 +101,52 @@ class _CatalogGateState extends State<CatalogGate> {
   }
 
   Future<void> _boot() async {
-    final result = await widget.controller.boot();
+    final controller = widget.controller;
+    // Preserve the normal remote -> active -> last known good fallback.
+    // Allow those attempts their own budgets before limiting the UI's wait
+    // for operations such as final storage commits, which cannot be cancelled.
+    final budget = _showInitialPreparation
+        ? catalogBootstrapPrepareBudget
+        : catalogHeadTimeout + controller.normalPrepareBudget * 3;
+    CatalogStartupResult result;
+    try {
+      result = await controller.boot().timeout(budget + _storageGrace);
+    } catch (error, stack) {
+      _failStartup('Catalog', error, stack);
+      return;
+    }
     if (!mounted) return;
     if (result is CatalogReady) {
-      setState(
-        () => _phase = result.usedLocalFallback ? '正在使用本地版本' : '正在启动应用服务',
-      );
-      await widget.onReady?.call();
-      if (!mounted) return;
+      await _finishReady(result);
+    } else {
+      setState(() => _result = result);
     }
-    setState(() {
-      _result = result;
-      _phase = result is CatalogReady ? '漫画源配置已就绪' : '需要完成漫画源配置';
-    });
-    if (result is CatalogReady && result.usedLocalFallback) {
-      _showLocalFallback(result);
-    }
+  }
+
+  void _failStartup(String stage, Object error, StackTrace stack) {
+    if (mounted) setState(() => _startupFailed = true);
+    Log.error('Startup', '$stage: ${error.runtimeType}', stack);
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_startupFailed) {
+      // A timed-out write or initialization can still be draining. Do not
+      // let an in-process retry race it or expose a half-initialized home.
+      return Scaffold(
+        body: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Text(
+                'Could not start. Please close and reopen the app.'.tl,
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
     final result = _result;
     if (result is CatalogReady) {
       if (result.needsSourceSelection && !_sourceSelectionHandled) {
@@ -124,9 +157,11 @@ class _CatalogGateState extends State<CatalogGate> {
           onCancel: _finishSourceSelection,
         );
       }
-      return widget.ready(context);
+      return _showInitialPreparation
+          ? widget.ready(context)
+          : StartupLogo(child: Builder(builder: widget.ready));
     }
-    if (result is CatalogNeedsInitialization) {
+    if (!_startingServices && result is CatalogNeedsInitialization) {
       return CatalogBootstrapPage(
         controller: widget.controller,
         repositorySource: result.repositorySource,
@@ -135,7 +170,7 @@ class _CatalogGateState extends State<CatalogGate> {
         onReady: (ready) => _finishReady(ready),
       );
     }
-    if (result is CatalogNeedsRecovery) {
+    if (!_startingServices && result is CatalogNeedsRecovery) {
       return CatalogBootstrapPage(
         controller: widget.controller,
         repositorySource: result.repositorySource,
@@ -144,10 +179,8 @@ class _CatalogGateState extends State<CatalogGate> {
         onReady: (ready) => _finishReady(ready),
       );
     }
-    // Keep the runtime gate on returning launches without showing the setup
-    // page. A missing or corrupt snapshot still leads to recovery if needed.
-    if (!_showInitialPreparation) {
-      return ColoredBox(color: Theme.of(context).scaffoldBackgroundColor);
+    if (!_showInitialPreparation || _startingServices) {
+      return const StartupLogo();
     }
     final canUseLocal = widget.controller.canUseLocalVersion;
     final attempt = widget.controller.currentAttempt;
@@ -162,7 +195,7 @@ class _CatalogGateState extends State<CatalogGate> {
           children: [
             Text(
               widget.controller.progressPhase.isEmpty
-                  ? _phase
+                  ? '正在检查漫画源配置'
                   : widget.controller.progressPhase,
             ),
             if (progressValue != null) ...[
@@ -193,11 +226,19 @@ class _CatalogGateState extends State<CatalogGate> {
   }
 
   Future<void> _finishReady(CatalogReady ready) async {
+    if (!mounted || _startingServices) return;
+    setState(() => _startingServices = true);
+    try {
+      await widget.onReady?.call().timeout(_servicesTimeout);
+    } catch (error, stack) {
+      _failStartup('Local services', error, stack);
+      return;
+    }
     if (!mounted) return;
-    setState(() => _phase = ready.usedLocalFallback ? '正在使用本地版本' : '正在启动应用服务');
-    await widget.onReady?.call();
-    if (!mounted) return;
-    setState(() => _result = ready);
+    setState(() {
+      _startingServices = false;
+      _result = ready;
+    });
     if (ready.usedLocalFallback) _showLocalFallback(ready);
   }
 

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches the outer color in lib/components/startup_logo.dart. -->
+    <color name="startup_background">#0B1128</color>
+</resources>

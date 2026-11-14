@@ -8,7 +8,7 @@ Venera 是一个 Flutter 跨平台漫画阅读器，主要能力包括本地漫�
 
 应用有两个入口模式：
 
-1. GUI：`lib/main.dart` 初始化 Flutter、应用数据、网络/JS/漫画源组件，然后创建 `MyApp` 和 `MainPage`。
+1. GUI：`lib/main.dart` 初始化 Flutter 和基础服务，再由 `CatalogGate` 准备漫画源和本地服务，最后打开 `MainPage`。
 2. Headless：命令行包含 `--headless` 时转到 `lib/headless.dart`，当前支持 WebDAV 同步、漫画源脚本更新和订阅更新。
 
 ## 启动链路
@@ -19,19 +19,26 @@ Venera 是一个 Flutter 跨平台漫画阅读器，主要能力包括本地漫�
 main
   -> overrideIO
   -> WidgetsFlutterBinding.ensureInitialized
-  -> init
+  -> initBase
        -> App.init (确定 dataPath/cachePath)
        -> CookieJar
-       -> Rhttp
-       -> App.initComponents (Appdata，再初始化 History / Favorites / Local)
+       -> Rhttp / Appdata
        -> translation / tags / OpenCC
        -> JsEngine
-       -> Cloud runtime admission（无执行 registry discovery、接管 block/recovery）
-       -> ComicSourceManager
-       -> CloudTrackingCoordinator.start（authority 对齐与 poll）
   -> runApp(MyApp)
+  -> 本地解锁（如已启用） -> CatalogGate
+       -> CatalogController.boot (检查远端，失败则尝试本地 active / LKG)
+       -> initRuntimeServices (History / Favorites / Local，恢复下载任务)
   -> MainPage (Home / Favorites / Explore / Categories)
 ```
+
+已有配置时，`CatalogGate` 在等待期间绘制 Logo；动画不参与启动判定，服务就绪即构建主页，
+配置需要恢复则直接显示恢复页。配置准备仍按各尝试的预算回退；GUI 对整个配置阶段和本地
+服务初始化另设时间上限，遇到意外异常或超时则显示重新打开应用的提示，不进入未就绪的主页。
+Windows 在窗口隐藏时恢复普通尺寸与位置，等 Flutter 第一帧实际渲染后再显示窗口并恢复最大化；
+窗口显示不依赖漫画源准备完成，首帧通知超时也会显示窗口。
+Android 的系统启动画面和 Flutter 首帧前的窗口使用同一深蓝背景，和双 V 动画的底色衔接。
+Android 12 及以上的系统启动画面不另绘桌面图标，由 Flutter 绘制双 V 动画。
 
 `lib/utils/init.dart` 的 `Init` mixin 用于协调异步初始化。调用方若依赖初始化结果，应调用 `init()` 或 `ensureInit()`，不要通过延时或轮询猜测组件是否可用。
 

@@ -28,8 +28,12 @@ void main(List<String> args) {
   overrideIO(() {
     runZonedGuarded(
       () async {
-        WidgetsFlutterBinding.ensureInitialized();
+        final binding = WidgetsFlutterBinding.ensureInitialized();
         await initBase();
+        if (App.isWindows) {
+          await _runWindowsApp(binding);
+          return;
+        }
         runApp(const MyApp());
         if (App.isDesktop) {
           await windowManager.ensureInitialized();
@@ -60,6 +64,35 @@ void main(List<String> args) {
       },
     );
   });
+}
+
+Future<void> _runWindowsApp(WidgetsBinding binding) async {
+  await windowManager.ensureInitialized();
+  await windowManager.waitUntilReadyToShow();
+  await windowManager.setTitleBarStyle(
+    TitleBarStyle.hidden,
+    windowButtonVisibility: false,
+  );
+  await windowManager.setMinimumSize(const Size(500, 600));
+  final placement = await WindowPlacement.loadFromFile();
+  // Restore the normal bounds before Flutter draws into the window. On
+  // Windows maximize also shows the window, so hold that operation back.
+  await placement.applyToWindow(restoreMaximized: false);
+  runApp(const MyApp());
+  try {
+    await binding.waitUntilFirstFrameRasterized.timeout(
+      const Duration(seconds: 3),
+    );
+  } on TimeoutException {
+    // If the engine never reports rasterization, still give the user a
+    // window they can see and close.
+    Log.warning('Startup', 'Windows first frame was not reported in time');
+  }
+  if (placement.isMaximized) {
+    await windowManager.maximize();
+  }
+  await windowManager.show();
+  WindowPlacement.loop();
 }
 
 class MyApp extends StatefulWidget {

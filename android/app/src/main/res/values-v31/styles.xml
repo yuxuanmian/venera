@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="LaunchTheme" parent="LaunchThemeBase">
+        <item name="android:windowSplashScreenBackground">@color/startup_background</item>
+        <!-- Flutter draws the V itself; avoid a separate launcher icon
+             disappearing just as the line animation begins. -->
+        <item name="android:windowSplashScreenAnimatedIcon">@android:color/transparent</item>
+    </style>
+</resources>

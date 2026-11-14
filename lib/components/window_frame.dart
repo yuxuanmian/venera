@@ -776,14 +776,14 @@ class WindowPlacement {
 
   const WindowPlacement(this.rect, this.isMaximized);
 
-  Future<void> applyToWindow() async {
+  Future<void> applyToWindow({bool restoreMaximized = true}) async {
     await windowManager.setBounds(rect);
 
     if (!validate(rect)) {
       await windowManager.center();
     }
 
-    if (isMaximized) {
+    if (isMaximized && restoreMaximized) {
       await windowManager.maximize();
     }
   }
