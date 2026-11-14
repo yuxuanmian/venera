@@ -517,6 +517,11 @@ class _MultiPagesFilter extends StatefulWidget {
 class _MultiPagesFilterState extends State<_MultiPagesFilter> {
   late List<String> keys;
 
+  Map<String, String> get availablePages => {
+    for (final entry in widget.pages.entries)
+      if (!keys.contains(entry.key)) entry.key: entry.value,
+  };
+
   @override
   void initState() {
     keys = List.from(appdata.settings[widget.settingsIndex]);
@@ -579,7 +584,7 @@ class _MultiPagesFilterState extends State<_MultiPagesFilter> {
     return PopUpWidgetScaffold(
       title: widget.title,
       tailing: [
-        if (keys.length < widget.pages.length)
+        if (availablePages.isNotEmpty)
           TextButton.icon(
             label: Text("Add".tl),
             icon: const Icon(Icons.add),
@@ -614,12 +619,7 @@ class _MultiPagesFilterState extends State<_MultiPagesFilter> {
   }
 
   void showAddDialog() {
-    var canAdd = <String, String>{};
-    widget.pages.forEach((key, value) {
-      if (!keys.contains(key)) {
-        canAdd[key] = value;
-      }
-    });
+    final canAdd = availablePages;
     var selected = <String>[];
     showDialog(
       context: context,
