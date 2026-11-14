@@ -90,7 +90,7 @@ void main() {
       expect(appReleaseUrl, 'https://github.com/yuxuanmian/venera/releases');
       expect(
         autoUpdateManifestUrl,
-        'https://cdn.jsdelivr.net/gh/yuxuanmian/venera@master/pubspec.yaml',
+        'https://raw.githubusercontent.com/yuxuanmian/venera/master/pubspec.yaml',
       );
     });
 

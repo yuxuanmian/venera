@@ -71,6 +71,10 @@ debug/release 沿用现有 Gradle 配置，共用同一签名。缺少 Secrets �
 5. CI 单纯失败可直接 Re-run（`gh release upload ... --clobber` 会覆盖同名 asset），不需要改版本；
    如果发布内容真正变化并需要用户收到更新，应提升 semantic version，而不是只增加 `+buildNumber`。
 
+新版客户端直接读取 GitHub `master/pubspec.yaml` 检查更新。使用 CDN 镜像的旧客户端可能
+读到缓存的旧版本；发版后若出现此问题，可刷新 `gh/yuxuanmian/venera@master/pubspec.yaml`
+这一个 CDN 文件，再验证它返回的 `version:`。
+
 ## 产物和本地构建
 
 显式使用 `--target-platform android-arm64`，检查 APK 原生库只有 arm64-v8a。

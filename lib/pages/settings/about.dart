@@ -7,7 +7,7 @@ part of 'settings_page.dart';
 /// dependency repositories (`venera-app/*` in `pubspec.yaml`) are deliberately
 /// untouched.
 const String autoUpdateManifestUrl =
-    "https://cdn.jsdelivr.net/gh/yuxuanmian/venera@master/pubspec.yaml";
+    "https://raw.githubusercontent.com/yuxuanmian/venera/master/pubspec.yaml";
 
 const String appGithubUrl = "https://github.com/yuxuanmian/venera";
 
@@ -58,10 +58,17 @@ typedef UpdateManifestReader = Future<String?> Function();
 
 /// The production manifest reader.
 Future<String?> fetchAutoUpdateManifest() async {
-  var res = await AppDio().get(autoUpdateManifestUrl);
+  // An update check needs the current branch, not a long-lived CDN snapshot.
+  // Bypass the app's HTTP cache and ask upstream caches to revalidate too.
+  final res = await AppDio().get<String>(
+    autoUpdateManifestUrl,
+    options: Options(
+      responseType: ResponseType.plain,
+      headers: {'cache-time': 'no', 'Cache-Control': 'no-cache'},
+    ),
+  );
   if (res.statusCode != 200) return null;
-  var data = res.data;
-  return data is String ? data : null;
+  return res.data;
 }
 
 /// The injectable manifest reader, defaulting to the real network fetch.
