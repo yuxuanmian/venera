@@ -149,26 +149,25 @@ mixin class JsUiApi {
         imageData = Uint8List.fromList(image);
       }
     }
-    await showInputDialog(
-      context: App.rootContext,
-      title: title,
-      image: imageUrl,
-      imageData: imageData,
-      onConfirm: (v) {
-        if (func != null) {
-          var res = func.call([v]);
+    try {
+      await showInputDialog(
+        context: App.rootContext,
+        title: title,
+        image: imageUrl,
+        imageData: imageData,
+        onConfirm: (v) {
+          final res = func?.call([v]);
           if (res != null) {
             return res.toString();
-          } else {
-            result = v;
           }
-        } else {
           result = v;
-        }
-        return null;
-      },
-    );
-    return result;
+          return null;
+        },
+      );
+      return result;
+    } finally {
+      func?.dispose();
+    }
   }
 
   Future<int?> _showSelectDialog(

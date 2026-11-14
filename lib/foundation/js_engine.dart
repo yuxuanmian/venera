@@ -813,11 +813,18 @@ class _SourceJsDomain {
       'sendMessage',
       (dynamic message) {
         requireCurrent();
-        final result = managedRuntimeBridge.run(
-          context,
-          () => host(wrap(message)),
-        );
-        return gateHostResult(result);
+        final borrowedFunctions = <_AdmittedJsFunction>[];
+        try {
+          final result = managedRuntimeBridge.run(
+            context,
+            () => host(wrap(message, borrowedFunctions: borrowedFunctions)),
+          );
+          return gateHostResult(result);
+        } finally {
+          for (final function in borrowedFunctions) {
+            function.free();
+          }
+        }
       },
     ]);
     setGlobal(['appVersion', App.version]);
@@ -861,10 +868,14 @@ class _SourceJsDomain {
     return wrap(engine.evaluate(code, name: name));
   }
 
-  dynamic wrap(dynamic result) {
+  dynamic wrap(dynamic result, {List<_AdmittedJsFunction>? borrowedFunctions}) {
     if (result is JSInvokable) {
+      // QuickJS releases message arguments when sendMessage returns. A host
+      // callback holder retaining this wrapper must also keep the native value.
+      if (borrowedFunctions != null) result.dup();
       final function = _AdmittedJsFunction(this, result);
       _functions.add(function);
+      borrowedFunctions?.add(function);
       return function;
     }
     if (result is Uint8List) return result;
@@ -888,16 +899,18 @@ class _SourceJsDomain {
       );
       return completer.future;
     }
-    if (result is List) return result.map(wrap).toList();
+    dynamic wrapChild(dynamic value) =>
+        wrap(value, borrowedFunctions: borrowedFunctions);
+    if (result is List) return result.map(wrapChild).toList();
     if (result is Map) {
       if (result.keys.every((key) => key is String)) {
         return <String, dynamic>{
           for (final entry in result.entries)
-            entry.key as String: wrap(entry.value),
+            entry.key as String: wrapChild(entry.value),
         };
       }
       return <dynamic, dynamic>{
-        for (final entry in result.entries) entry.key: wrap(entry.value),
+        for (final entry in result.entries) entry.key: wrapChild(entry.value),
       };
     }
     return result;
