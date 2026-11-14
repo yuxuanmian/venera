@@ -251,6 +251,7 @@ class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage>
     }
     _cache = NetworkFavoriteCacheManager();
     _cache.addListener(_onCacheChanged);
+    _cache.favoriteCoverChanges.addListener(_onFavoriteCoverChanged);
     _lastAllowedSourceKeys = _currentAllowedSourceKeys();
     followUpdateCoordinator.progress.addListener(_onProgress);
     followUpdateCoordinator.scheduleRevision.addListener(_onScheduleChanged);
@@ -269,6 +270,7 @@ class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage>
     }
     _cacheRefreshDebounce?.cancel();
     _cache.removeListener(_onCacheChanged);
+    _cache.favoriteCoverChanges.removeListener(_onFavoriteCoverChanged);
     followUpdateCoordinator.progress.removeListener(_onProgress);
     followUpdateCoordinator.scheduleRevision.removeListener(_onScheduleChanged);
     _tabController.removeListener(_onTabChanged);
@@ -354,6 +356,28 @@ class FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage>
       const Duration(milliseconds: 100),
       _refreshAfterCacheChange,
     );
+  }
+
+  void _onFavoriteCoverChanged() {
+    final change = _cache.favoriteCoverChanges.value;
+    if (!mounted || change == null || !change.refreshFollowUpdates) return;
+    var activeChanged = false;
+    for (final view in _views.values) {
+      final changed = view.comics.any(
+        (comic) =>
+            comic.sourceKey == change.sourceKey &&
+            change.covers.containsKey(comic.id),
+      );
+      if (changed) {
+        view.needsRefresh = true;
+        activeChanged |= view.tab == _activeTab;
+      }
+    }
+    if (!activeChanged) return;
+    setState(() {});
+    if (_showList) {
+      unawaited(_reloadTab(_activeTab));
+    }
   }
 
   void _refreshAfterCacheChange() {

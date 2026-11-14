@@ -193,6 +193,39 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
 
   bool showFAB = false;
 
+  FavoriteCoverSnapshot? _coverSnapshot;
+  int _coverGeneration = 0;
+  bool _coverWritebackHandled = false;
+
+  void _onDetailCoverDisplayed({
+    required String detailCover,
+    required FavoriteCoverSnapshot snapshot,
+    required int generation,
+  }) {
+    if (detailCover.isEmpty || !snapshot.hasRows) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          generation != _coverGeneration ||
+          comic.cover.trim() != detailCover ||
+          !identical(snapshot, _coverSnapshot)) {
+        return;
+      }
+      _performCoverWriteback(snapshot: snapshot, detailCover: detailCover);
+    });
+  }
+
+  void _performCoverWriteback({
+    required FavoriteCoverSnapshot snapshot,
+    required String detailCover,
+  }) {
+    if (_coverWritebackHandled) return;
+    _coverWritebackHandled = true;
+    _followUpdateCache.writebackFavoriteCover(
+      snapshot: snapshot,
+      newCover: detailCover,
+    );
+  }
+
   /// The schedule record of this comic, when it has one.
   ///
   /// Null means "no check record yet" — which is also what a read failure and a
@@ -563,6 +596,17 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       widget.id,
       ComicType(widget.sourceKey.hashCode),
     );
+    _coverGeneration++;
+    _coverWritebackHandled = false;
+    try {
+      _coverSnapshot = _followUpdateCache.captureFavoriteCoverSnapshot(
+        widget.sourceKey,
+        widget.id,
+      );
+    } catch (e, s) {
+      _coverSnapshot = null;
+      Log.error('Favorite cover snapshot', e.toString(), s);
+    }
     final watch = Stopwatch()..start();
     try {
       final res = await comicSource.loadComicInfo!(widget.id);
@@ -688,6 +732,9 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   }
 
   Iterable<Widget> buildTitle() sync* {
+    final detailCover = comic.cover.trim();
+    final snapshot = _coverSnapshot;
+    final generation = _coverGeneration;
     yield SliverAppbar(
       title: AnimatedOpacity(
         opacity: showAppbarTitle ? 1.0 : 0.0,
@@ -737,6 +784,13 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
                   ),
                   width: double.infinity,
                   height: double.infinity,
+                  onFirstFrame: snapshot == null
+                      ? null
+                      : (_) => _onDetailCoverDisplayed(
+                          detailCover: detailCover,
+                          snapshot: snapshot,
+                          generation: generation,
+                        ),
                 ),
               ),
             ),

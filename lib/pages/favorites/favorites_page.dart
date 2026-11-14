@@ -472,6 +472,7 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
     _cacheGeneration = _cache.cacheGeneration;
     _searchController.addListener(_onFilterChanged);
     _cache.addListener(_onCacheChanged);
+    _cache.favoriteCoverChanges.addListener(_onFavoriteCoverChanged);
   }
 
   @override
@@ -481,6 +482,7 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
       ..dispose();
     _searchFocusNode.dispose();
     _cache.removeListener(_onCacheChanged);
+    _cache.favoriteCoverChanges.removeListener(_onFavoriteCoverChanged);
     super.dispose();
   }
 
@@ -511,6 +513,25 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
       _searchResults = null;
       setState(() {});
       return;
+    }
+    _updateSearchResults();
+  }
+
+  void _onFavoriteCoverChanged() {
+    final change = _cache.favoriteCoverChanges.value;
+    if (!mounted ||
+        change == null ||
+        change.sourceKey != widget.folder.sourceKey) {
+      return;
+    }
+    final listState = _comicListKey.currentState;
+    if (listState == null) return;
+    final changedIds = change.covers.keys.toSet();
+    for (final page in listState.loadedPagesContainingAnyComicIds(changedIds)) {
+      final cached = _cache.getCachedPageByIndex(widget.folder, page);
+      if (cached != null) {
+        listState.updatePageComics(cached.pageIndex, cached.comics);
+      }
     }
     _updateSearchResults();
   }

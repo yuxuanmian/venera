@@ -720,6 +720,24 @@ class _ReadingHistoryPainter extends CustomPainter {
   }
 }
 
+bool _comicListsEqual(List<Comic> a, List<Comic> b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i] || a[i].cover != b[i].cover) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool _sameComicIdentities(List<Comic> a, List<Comic> b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
+}
+
 class SliverGridComics extends StatefulWidget {
   const SliverGridComics({
     super.key,
@@ -765,14 +783,18 @@ class _SliverGridComicsState extends State<SliverGridComics> {
 
   @override
   void didUpdateWidget(covariant SliverGridComics oldWidget) {
-    if (!comics.isEqualTo(widget.comics)) {
-      comics.clear();
-      for (var comic in widget.comics) {
-        if (isBlocked(comic) == null) {
-          comics.add(comic);
-        }
+    final nextComics = [
+      for (final comic in widget.comics)
+        if (isBlocked(comic) == null) comic,
+    ];
+    if (!_comicListsEqual(comics, nextComics)) {
+      final keepHeroIDs = _sameComicIdentities(comics, nextComics);
+      comics
+        ..clear()
+        ..addAll(nextComics);
+      if (!keepHeroIDs) {
+        generateHeroID();
       }
-      generateHeroID();
     }
     super.didUpdateWidget(oldWidget);
   }
@@ -1156,6 +1178,24 @@ class ComicListState extends State<ComicList> {
     _error = null;
     storeState();
     if (mounted) setState(() {});
+  }
+
+  void updatePageComics(int page, List<Comic> comics) {
+    if (_data.containsKey(page)) {
+      if (!_comicListsEqual(_data[page]!, comics)) {
+        _data[page] = List<Comic>.from(comics);
+        storeState();
+        if (mounted) setState(() {});
+      }
+    }
+  }
+
+  Iterable<int> loadedPagesContainingAnyComicIds(Set<String> comicIds) sync* {
+    for (final entry in _data.entries) {
+      if (entry.value.any((comic) => comicIds.contains(comic.id))) {
+        yield entry.key;
+      }
+    }
   }
 
   /// Re-evaluates [ComicList.comicFilter] without discarding loaded pages.

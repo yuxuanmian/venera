@@ -35,6 +35,7 @@ class FavoriteItem implements Comic {
     required this.tags,
     this.chapterCount,
     this.remoteFavoriteId,
+    this.supersededCovers = const [],
     DateTime? favoriteTime,
   }) : time = _formatFavoriteTime(favoriteTime ?? DateTime.now());
 
@@ -47,6 +48,9 @@ class FavoriteItem implements Comic {
       tags = List<String>.from(comic.tags ?? const []),
       chapterCount = comic is FavoriteItem ? comic.chapterCount : null,
       remoteFavoriteId = comic.favoriteId,
+      supersededCovers = comic is FavoriteItem
+          ? comic.supersededCovers
+          : const [],
       time = _formatFavoriteTime(DateTime.now());
 
   FavoriteItem.fromRow(Row row)
@@ -58,6 +62,9 @@ class FavoriteItem implements Comic {
       remoteFavoriteId = row['favorite_id'] as String?,
       name = _readComicJson(row)['title'] as String? ?? '',
       coverPath = _readComicJson(row)['cover'] as String? ?? '',
+      supersededCovers = List<String>.from(
+        _readComicJson(row)['supersededCovers'] as List? ?? const [],
+      ),
       author =
           (_readComicJson(row)['subTitle'] ??
                   _readComicJson(row)['subtitle'] ??
@@ -83,6 +90,7 @@ class FavoriteItem implements Comic {
   final String coverPath;
   final String? remoteFavoriteId;
   final String time;
+  final List<String> supersededCovers;
 
   ComicType get type => ComicType(sourceKeyValue.hashCode);
 
@@ -127,6 +135,7 @@ class FavoriteItem implements Comic {
     'description': '',
     'sourceKey': sourceKeyValue,
     'favoriteId': remoteFavoriteId,
+    if (supersededCovers.isNotEmpty) 'supersededCovers': supersededCovers,
   };
 
   Map<String, dynamic> toCacheJson() => toJson();
@@ -173,6 +182,7 @@ class FavoriteItemWithUpdateInfo extends FavoriteItem {
          tags: item.tags,
          chapterCount: item.chapterCount,
          remoteFavoriteId: item.favoriteId,
+         supersededCovers: item.supersededCovers,
        );
 
   final String? updateTime;
@@ -358,6 +368,90 @@ class FavoriteFullCacheStatus {
   bool get isComplete => completedAt != null;
 }
 
+/// A point-in-time snapshot of cached favorite covers for one comic.
+///
+/// Used for compare-and-set detail-cover writebacks so intervening background
+/// refreshes or account changes are not overwritten.
+class FavoriteCoverSnapshot {
+  const FavoriteCoverSnapshot({
+    required this.sourceKey,
+    required this.comicId,
+    required this.epoch,
+    required this.rowCovers,
+  });
+
+  final String sourceKey;
+  final String comicId;
+  final int epoch;
+  final Map<String, String> rowCovers;
+
+  bool get hasRows => rowCovers.isNotEmpty;
+}
+
+class FavoriteCoverChange {
+  FavoriteCoverChange({
+    required this.revision,
+    required this.sourceKey,
+    required this.refreshFollowUpdates,
+    required Map<String, String> covers,
+  }) : covers = Map.unmodifiable(covers);
+
+  final int revision;
+  final String sourceKey;
+  final bool refreshFollowUpdates;
+  final Map<String, String> covers;
+}
+
+class _FavoriteCoverObservation {
+  const _FavoriteCoverObservation(this.cover, this.supersededCovers);
+
+  final String cover;
+  final Set<String> supersededCovers;
+}
+
+class _FavoriteCoverProvenance {
+  final List<_FavoriteCoverObservation> observations = [];
+
+  void merge(_FavoriteCoverProvenance? other) {
+    if (other == null) return;
+    observations.addAll(other.observations);
+  }
+
+  void record(String cover, Iterable<String> supersededCovers) {
+    final normalizedCover = cover.trim();
+    final normalizedSuperseded = supersededCovers
+        .map((url) => url.trim())
+        .where((url) => url.isNotEmpty)
+        .toSet();
+    if (normalizedCover.isEmpty && normalizedSuperseded.isEmpty) return;
+    observations.add(
+      _FavoriteCoverObservation(normalizedCover, normalizedSuperseded),
+    );
+  }
+
+  Set<String> get supersededCovers => {
+    for (final observation in observations) ...observation.supersededCovers,
+  };
+
+  String? get latestCover {
+    for (final observation in observations.reversed) {
+      if (observation.cover.isNotEmpty) return observation.cover;
+    }
+    return null;
+  }
+
+  String? confirmedCoverFor(String candidate) {
+    for (final observation in observations.reversed) {
+      if (observation.cover.isNotEmpty &&
+          observation.cover != candidate &&
+          observation.supersededCovers.contains(candidate)) {
+        return observation.cover;
+      }
+    }
+    return null;
+  }
+}
+
 /// Typed cache-change evidence used by follow-up collection sources.
 ///
 /// The ordinary changed-source set remains the trigger for every other source.
@@ -458,6 +552,11 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   late Database _db;
   final Set<String> _refreshing = {};
   final Set<String> _fullCaching = {};
+  final Map<String, Map<String, _FavoriteCoverProvenance>>
+  _fullCacheCoverProvenance = {};
+  final ValueNotifier<FavoriteCoverChange?> favoriteCoverChanges =
+      ValueNotifier(null);
+  int _favoriteCoverChangeRevision = 0;
   final Map<String, int> _favoriteSessionEpochs = <String, int>{};
   int _cacheGeneration = 0;
 
@@ -952,6 +1051,8 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     _cacheGeneration++;
     _refreshing.clear();
     _fullCaching.clear();
+    _fullCacheCoverProvenance.clear();
+    favoriteCoverChanges.value = null;
     _followUpdateRemoteAdditionIds.clear();
     _followUpdateAdditionOverflowSources.clear();
     _followUpdateFirstFullCacheSources.clear();
@@ -1353,16 +1454,24 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     NetworkFavoriteFolderRef folder,
     int page, {
     bool preserveExistingCover = false,
+    bool adoptRemoteCover = false,
+    int? expectedEpoch,
   }) async {
     if (data.loadComic == null) {
       return const Res.error('Favorite paging is not supported');
     }
-    final expectedEpoch = data.updateCheck == null
-        ? null
-        : captureFavoriteSessionEpoch(folder.sourceKey);
+    final sessionEpoch =
+        expectedEpoch ??
+        (data.updateCheck == null
+            ? null
+            : captureFavoriteSessionEpoch(folder.sourceKey));
+    if (sessionEpoch != null &&
+        !isFavoriteSessionEpochCurrent(folder.sourceKey, sessionEpoch)) {
+      return const Res.error('Favorite session changed');
+    }
     final result = await data.loadComic!(page, folder.folderId);
-    if (expectedEpoch != null &&
-        !isFavoriteSessionEpochCurrent(folder.sourceKey, expectedEpoch)) {
+    if (sessionEpoch != null &&
+        !isFavoriteSessionEpochCurrent(folder.sourceKey, sessionEpoch)) {
       return const Res.error('Favorite session changed');
     }
     if (result.error) return Res.error(result.errorMessage!);
@@ -1378,6 +1487,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
           nextToken: null,
           clearFollowingCursorPages: false,
           preserveExistingCover: preserveExistingCover,
+          adoptRemoteCover: adoptRemoteCover,
         ),
       );
     } catch (e, s) {
@@ -1391,16 +1501,24 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     NetworkFavoriteFolderRef folder,
     String? requestToken, {
     bool preserveExistingCover = false,
+    bool adoptRemoteCover = false,
+    int? expectedEpoch,
   }) async {
     if (data.loadNext == null) {
       return const Res.error('Favorite cursor paging is not supported');
     }
-    final expectedEpoch = data.updateCheck == null
-        ? null
-        : captureFavoriteSessionEpoch(folder.sourceKey);
+    final sessionEpoch =
+        expectedEpoch ??
+        (data.updateCheck == null
+            ? null
+            : captureFavoriteSessionEpoch(folder.sourceKey));
+    if (sessionEpoch != null &&
+        !isFavoriteSessionEpochCurrent(folder.sourceKey, sessionEpoch)) {
+      return const Res.error('Favorite session changed');
+    }
     final result = await data.loadNext!(requestToken, folder.folderId);
-    if (expectedEpoch != null &&
-        !isFavoriteSessionEpochCurrent(folder.sourceKey, expectedEpoch)) {
+    if (sessionEpoch != null &&
+        !isFavoriteSessionEpochCurrent(folder.sourceKey, sessionEpoch)) {
       return const Res.error('Favorite session changed');
     }
     if (result.error) return Res.error(result.errorMessage!);
@@ -1419,6 +1537,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
           clearFollowingCursorPages:
               existing != null && existing.nextToken != result.subData,
           preserveExistingCover: preserveExistingCover,
+          adoptRemoteCover: adoptRemoteCover,
         ),
       );
     } catch (e, s) {
@@ -1447,8 +1566,10 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     required String? nextToken,
     required bool clearFollowingCursorPages,
     required bool preserveExistingCover,
+    required bool adoptRemoteCover,
   }) {
     final now = DateTime.now();
+    final pageCoverChanges = <String, String>{};
     _db.execute('BEGIN');
     try {
       _ensureFolder(folder);
@@ -1461,6 +1582,9 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       )) {
         updateState[row['comic_id'] as String] = FavoriteItem.fromRow(row);
       }
+      final coverProvenance = _knownFavoriteCoverProvenance(folder, {
+        for (final comic in comics) comic.id,
+      });
       _db.execute(
         '''DELETE FROM favorite_items
            WHERE source_key = ? AND folder_id = ? AND page_index = ?''',
@@ -1513,19 +1637,58 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         final previousFavoriteTime = previousItem == null
             ? null
             : DateTime.tryParse(previousItem.time.replaceFirst(' ', 'T'));
+        final remoteCover = remoteItem.coverPath.trim();
+        final knownCover = coverProvenance[remoteItem.id];
+        final supersededCovers = {
+          ...?previousItem?.supersededCovers,
+          ...?knownCover?.supersededCovers,
+        };
+        late final String coverPath;
+        if (preserveExistingCover) {
+          coverPath =
+              previousItem?.coverPath ??
+              knownCover?.latestCover ??
+              remoteItem.coverPath;
+        } else if (adoptRemoteCover) {
+          coverPath = remoteCover.isEmpty
+              ? previousItem?.coverPath ??
+                    knownCover?.latestCover ??
+                    remoteItem.coverPath
+              : knownCover?.confirmedCoverFor(remoteCover) ?? remoteCover;
+        } else {
+          coverPath = remoteCover.isEmpty
+              ? previousItem?.coverPath ??
+                    knownCover?.latestCover ??
+                    remoteItem.coverPath
+              : knownCover?.confirmedCoverFor(remoteCover) ?? remoteCover;
+        }
         final item = FavoriteItem(
           id: remoteItem.id,
           name: remoteItem.name,
-          coverPath: preserveExistingCover
-              ? previousItem?.coverPath ?? remoteItem.coverPath
-              : remoteItem.coverPath,
+          coverPath: coverPath,
           author: remoteItem.author,
           sourceKeyValue: remoteItem.sourceKey,
           tags: remoteItem.tags,
           chapterCount: remoteItem.chapterCount ?? previousItem?.chapterCount,
           remoteFavoriteId: remoteItem.favoriteId,
           favoriteTime: previousFavoriteTime,
+          supersededCovers: supersededCovers.toList(growable: false),
         );
+        if (item.supersededCovers.isNotEmpty) {
+          final provenance = coverProvenance[remoteItem.id] ??=
+              _FavoriteCoverProvenance();
+          provenance.record(item.coverPath, item.supersededCovers);
+          final active = _fullCacheCoverProvenance[_folderCacheKey(folder)];
+          if (active != null) {
+            (active[item.id] ??= _FavoriteCoverProvenance()).record(
+              item.coverPath,
+              item.supersededCovers,
+            );
+          }
+        }
+        if (previousItem != null && previousItem.coverPath != item.coverPath) {
+          pageCoverChanges[item.id] = item.coverPath;
+        }
         _db.execute(
           '''INSERT INTO favorite_items
               (source_key, folder_id, page_index, comic_id, display_order, comic_json,
@@ -1551,8 +1714,91 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       rethrow;
     }
     final cached = _getCachedPage(folder, requestToken)!;
+    _notifyFavoriteCoverChanges(folder.sourceKey, pageCoverChanges);
     _notifySourceChanged(folder.sourceKey);
     return cached;
+  }
+
+  Map<String, _FavoriteCoverProvenance> _knownFavoriteCoverProvenance(
+    NetworkFavoriteFolderRef folder,
+    Set<String> comicIds,
+  ) {
+    final result = _loadFavoriteCoverProvenance(folder.sourceKey, comicIds);
+    final active = _fullCacheCoverProvenance[_folderCacheKey(folder)];
+    if (active != null) {
+      for (final comicId in comicIds) {
+        final merged = _FavoriteCoverProvenance()
+          ..merge(active[comicId])
+          ..merge(result[comicId]);
+        if (merged.observations.isEmpty) {
+          result.remove(comicId);
+        } else {
+          result[comicId] = merged;
+        }
+      }
+    }
+    return result;
+  }
+
+  Map<String, _FavoriteCoverProvenance> _loadFavoriteCoverProvenance(
+    String sourceKey,
+    Set<String> comicIds, {
+    String? folderId,
+  }) {
+    final result = <String, _FavoriteCoverProvenance>{};
+    final ids = comicIds.toList(growable: false);
+    for (var offset = 0; offset < ids.length; offset += 400) {
+      final chunk = ids.skip(offset).take(400).toList(growable: false);
+      final placeholders = List.filled(chunk.length, '?').join(',');
+      final folderClause = folderId == null ? '' : ' AND folder_id = ?';
+      final rows = _db.select(
+        '''SELECT comic_id, comic_json FROM favorite_items
+           WHERE source_key = ?$folderClause AND comic_id IN ($placeholders)''',
+        [sourceKey, if (folderId != null) folderId, ...chunk],
+      );
+      for (final row in rows) {
+        final comicId = row['comic_id'] as String;
+        final json = FavoriteItem._readComicJson(row);
+        final cover = (json['cover'] as String? ?? '').trim();
+        final superseded = List<String>.from(
+          json['supersededCovers'] as List? ?? const [],
+        );
+        (result[comicId] ??= _FavoriteCoverProvenance()).record(
+          cover,
+          superseded,
+        );
+      }
+    }
+    return result;
+  }
+
+  void _beginFullCacheCoverProvenance(NetworkFavoriteFolderRef folder) {
+    final rows = _db.select(
+      '''SELECT comic_id, comic_json FROM favorite_items
+         WHERE source_key = ? AND folder_id = ?
+           AND comic_json LIKE '%"supersededCovers"%' ''',
+      [folder.sourceKey, folder.folderId],
+    );
+    final provenance = <String, _FavoriteCoverProvenance>{};
+    for (final row in rows) {
+      final comicId = row['comic_id'] as String;
+      final json = FavoriteItem._readComicJson(row);
+      final cover = (json['cover'] as String? ?? '').trim();
+      final superseded = List<String>.from(
+        json['supersededCovers'] as List? ?? const [],
+      );
+      if (superseded.isNotEmpty) {
+        (provenance[comicId] ??= _FavoriteCoverProvenance()).record(
+          cover,
+          superseded,
+        );
+      }
+    }
+    _fullCacheCoverProvenance[_folderCacheKey(folder)] = provenance;
+  }
+
+  void _endFullCacheCoverProvenance(NetworkFavoriteFolderRef folder) {
+    _fullCacheCoverProvenance.remove(_folderCacheKey(folder));
   }
 
   void _rebuildMembership(NetworkFavoriteFolderRef folder) {
@@ -1777,8 +2023,10 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         ..close();
       return stream.stream;
     }
+    final runEpoch = captureFavoriteSessionEpoch(folder.sourceKey);
     () async {
       try {
+        _beginFullCacheCoverProvenance(folder);
         _upsertFolders(data.key, [
           NetworkFavoriteFolder(
             sourceKey: folder.sourceKey,
@@ -1788,9 +2036,21 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
           ),
         ], removeMissing: false);
         if (data.loadComic != null) {
-          await _cacheAllNumberedPages(data, folder, stream, isCanceled);
+          await _cacheAllNumberedPages(
+            data,
+            folder,
+            stream,
+            isCanceled,
+            runEpoch,
+          );
         } else if (data.loadNext != null) {
-          await _cacheAllCursorPages(data, folder, stream, isCanceled);
+          await _cacheAllCursorPages(
+            data,
+            folder,
+            stream,
+            isCanceled,
+            runEpoch,
+          );
         } else {
           stream.add(
             const FavoriteFullCacheProgress(
@@ -1809,6 +2069,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
           ),
         );
       } finally {
+        _endFullCacheCoverProvenance(folder);
         releaseFullCacheLock(folder);
         await stream.close();
       }
@@ -1821,6 +2082,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     NetworkFavoriteFolderRef folder,
     StreamController<FavoriteFullCacheProgress> stream,
     bool Function() isCanceled,
+    int runEpoch,
   ) async {
     if (isCanceled()) {
       stream.add(
@@ -1839,7 +2101,8 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       data,
       folder,
       1,
-      preserveExistingCover: true,
+      adoptRemoteCover: true,
+      expectedEpoch: runEpoch,
     );
     if (first.error) {
       stream.add(
@@ -1855,7 +2118,14 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     if (totalPages == null) {
       // Some sources never report a page count; walk to the end instead of
       // giving up (see _cacheNumberedWalk).
-      await _cacheNumberedWalk(data, folder, stream, isCanceled, first.data);
+      await _cacheNumberedWalk(
+        data,
+        folder,
+        stream,
+        isCanceled,
+        first.data,
+        runEpoch,
+      );
       return;
     }
     stream.add(
@@ -1865,7 +2135,15 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         totalPages: totalPages,
       ),
     );
-    await _cacheNumberedSweep(data, folder, stream, isCanceled, 2, totalPages);
+    await _cacheNumberedSweep(
+      data,
+      folder,
+      stream,
+      isCanceled,
+      2,
+      totalPages,
+      runEpoch,
+    );
   }
 
   /// Fetches pages [startPage]..[totalPages] concurrently, three at a time.
@@ -1879,6 +2157,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     bool Function() isCanceled,
     int startPage,
     int totalPages,
+    int runEpoch,
   ) async {
     var completed = startPage - 1;
     for (
@@ -1900,7 +2179,13 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       final last = math.min(next + _fullCacheBatchSize - 1, totalPages);
       final results = await Future.wait([
         for (var p = next; p <= last; p++)
-          refreshPage(data, folder, p, preserveExistingCover: true),
+          refreshPage(
+            data,
+            folder,
+            p,
+            adoptRemoteCover: true,
+            expectedEpoch: runEpoch,
+          ),
       ]);
       for (final result in results) {
         if (result.error) {
@@ -1950,6 +2235,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     StreamController<FavoriteFullCacheProgress> stream,
     bool Function() isCanceled,
     CachedFavoritePage firstPage,
+    int runEpoch,
   ) async {
     if (firstPage.comics.isEmpty) {
       // An empty first page means an empty folder; drop the empty page row
@@ -1986,7 +2272,13 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       );
       final results = await Future.wait([
         for (var p = page; p <= last; p++)
-          refreshPage(data, folder, p, preserveExistingCover: true),
+          refreshPage(
+            data,
+            folder,
+            p,
+            adoptRemoteCover: true,
+            expectedEpoch: runEpoch,
+          ),
       ]);
       // Results keep input order, so repeat detection compares against the
       // page that precedes each entry even when requests finish out of order.
@@ -2071,6 +2363,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     NetworkFavoriteFolderRef folder,
     StreamController<FavoriteFullCacheProgress> stream,
     bool Function() isCanceled,
+    int runEpoch,
   ) async {
     String? token;
     var page = 0;
@@ -2090,7 +2383,8 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         data,
         folder,
         token,
-        preserveExistingCover: true,
+        adoptRemoteCover: true,
+        expectedEpoch: runEpoch,
       );
       if (result.error) {
         stream.add(
@@ -2530,6 +2824,154 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     }
   }
 
+  /// Captures the current favorite session epoch and all existing cover URLs
+  /// stored in [favorite_items] for [sourceKey] and [comicId].
+  FavoriteCoverSnapshot captureFavoriteCoverSnapshot(
+    String sourceKey,
+    String comicId,
+  ) {
+    final epoch = captureFavoriteSessionEpoch(sourceKey);
+    final rows = _db.select(
+      '''SELECT folder_id, page_index, comic_json FROM favorite_items
+         WHERE source_key = ? AND comic_id = ?''',
+      [sourceKey, comicId],
+    );
+    final rowCovers = <String, String>{};
+    for (final row in rows) {
+      final key = '${row['folder_id']}\u0000${row['page_index']}';
+      final json = FavoriteItem._readComicJson(row);
+      final cover = (json['cover'] as String? ?? '').trim();
+      rowCovers[key] = cover;
+    }
+    return FavoriteCoverSnapshot(
+      sourceKey: sourceKey,
+      comicId: comicId,
+      epoch: epoch,
+      rowCovers: rowCovers,
+    );
+  }
+
+  /// Writes back an authoritative detail cover to existing cached favorite rows
+  /// using compare-and-set.
+  ///
+  /// Criteria:
+  /// - The session epoch for the source must still match [snapshot.epoch].
+  /// - Only existing rows whose current cover in [favorite_items] still matches
+  ///   [snapshot.rowCovers] are updated.
+  /// - Minimal provenance ('supersededCovers') is recorded in [comic_json].
+  /// - Does NOT insert new rows or trigger tracking scans.
+  /// - Notifies UI listeners if any rows were updated.
+  bool writebackFavoriteCover({
+    required FavoriteCoverSnapshot snapshot,
+    required String newCover,
+  }) {
+    final trimmedNewCover = newCover.trim();
+    if (trimmedNewCover.isEmpty || !snapshot.hasRows) return false;
+
+    if (!isFavoriteSessionEpochCurrent(snapshot.sourceKey, snapshot.epoch)) {
+      return false;
+    }
+
+    var updatedCount = 0;
+    final writtenSupersededCovers = <String>{};
+    try {
+      _db.execute('BEGIN');
+      final rows = _db.select(
+        '''SELECT folder_id, page_index, comic_json FROM favorite_items
+           WHERE source_key = ? AND comic_id = ?''',
+        [snapshot.sourceKey, snapshot.comicId],
+      );
+
+      for (final row in rows) {
+        final folderId = row['folder_id'] as String;
+        final pageIndex = row['page_index'] as int;
+        final key = '$folderId\u0000$pageIndex';
+
+        if (!snapshot.rowCovers.containsKey(key)) continue;
+
+        final json = FavoriteItem._readComicJson(row);
+        final currentCover = (json['cover'] as String? ?? '').trim();
+
+        if (currentCover != snapshot.rowCovers[key]) continue;
+        if (currentCover == trimmedNewCover) continue;
+
+        json['cover'] = trimmedNewCover;
+        final superseded = List<String>.from(
+          json['supersededCovers'] as List? ?? const [],
+        );
+        if (currentCover.isNotEmpty && !superseded.contains(currentCover)) {
+          superseded.add(currentCover);
+          writtenSupersededCovers.add(currentCover);
+        }
+        json['supersededCovers'] = superseded;
+
+        _db.execute(
+          '''UPDATE favorite_items SET comic_json = ?, search_text = ?
+             WHERE source_key = ? AND folder_id = ? AND page_index = ? AND comic_id = ?''',
+          [
+            jsonEncode(json),
+            buildFavoriteSearchText(snapshot.comicId, json),
+            snapshot.sourceKey,
+            folderId,
+            pageIndex,
+            snapshot.comicId,
+          ],
+        );
+        updatedCount++;
+      }
+      _db.execute('COMMIT');
+    } catch (e, s) {
+      try {
+        _db.execute('ROLLBACK');
+      } catch (_) {}
+      Log.error('Favorite cover writeback', e.toString(), s);
+      return false;
+    }
+
+    if (updatedCount > 0) {
+      final sourcePrefix = '${snapshot.sourceKey}\u0000';
+      for (final entry in _fullCacheCoverProvenance.entries) {
+        if (!entry.key.startsWith(sourcePrefix)) continue;
+        (entry.value[snapshot.comicId] ??= _FavoriteCoverProvenance()).record(
+          trimmedNewCover,
+          writtenSupersededCovers,
+        );
+      }
+      _notifyFavoriteCoverChanges(snapshot.sourceKey, {
+        snapshot.comicId: trimmedNewCover,
+      }, refreshFollowUpdates: true);
+      return true;
+    }
+    return false;
+  }
+
+  /// Returns cached page [pageIndex] for [folder] regardless of paging strategy.
+  CachedFavoritePage? getCachedPageByIndex(
+    NetworkFavoriteFolderRef folder,
+    int pageIndex,
+  ) {
+    final pages = _db.select(
+      '''SELECT * FROM favorite_pages
+         WHERE source_key = ? AND folder_id = ? AND page_index = ?''',
+      [folder.sourceKey, folder.folderId, pageIndex],
+    );
+    if (pages.isEmpty) return null;
+    final page = pages.first;
+    final rows = _db.select(
+      '''SELECT * FROM favorite_items
+         WHERE source_key = ? AND folder_id = ? AND page_index = ?
+         ORDER BY display_order''',
+      [folder.sourceKey, folder.folderId, pageIndex],
+    );
+    return CachedFavoritePage(
+      comics: rows.map(FavoriteItem.fromRow).toList(),
+      pageIndex: pageIndex,
+      maxPage: page['max_page'] as int?,
+      nextToken: page['next_token'] as String?,
+      updatedAt: DateTime.fromMillisecondsSinceEpoch(page['updated_at'] as int),
+    );
+  }
+
   void markReadInAllFolders(String sourceKey, String comicId) {
     _db.execute(
       '''UPDATE comic_check_state SET has_new_update = 0
@@ -2642,6 +3084,20 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     super.notifyListeners();
   }
 
+  void _notifyFavoriteCoverChanges(
+    String sourceKey,
+    Map<String, String> covers, {
+    bool refreshFollowUpdates = false,
+  }) {
+    if (covers.isEmpty) return;
+    favoriteCoverChanges.value = FavoriteCoverChange(
+      revision: ++_favoriteCoverChangeRevision,
+      sourceKey: sourceKey,
+      refreshFollowUpdates: refreshFollowUpdates,
+      covers: covers,
+    );
+  }
+
   /// A cache change whose source could not be attributed.
   ///
   /// Overridden rather than merely inherited so that attribution cannot be
@@ -2696,13 +3152,13 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   }
 
   void invalidateFavoriteSessionForSource(String sourceKey) {
+    _favoriteSessionEpochs[sourceKey] =
+        captureFavoriteSessionEpoch(sourceKey) + 1;
     // Contract F8: the criterion is "does this source declare a source-side
     // unread signal", NOT "does the retired observation channel exist".  The
     // old test would have silently stopped clearing anything the moment that
     // channel was removed, and the signal it guards is account-level.
     if (!sourceDeclaresUnreadSignal(sourceKey)) return;
-    _favoriteSessionEpochs[sourceKey] =
-        captureFavoriteSessionEpoch(sourceKey) + 1;
     // Recorded so the follow-up page can explain why its results disappeared
     // (FR-034).  Five different account-change entry points funnel through this
     // method, so recording it here covers all of them at once instead of

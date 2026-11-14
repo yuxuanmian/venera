@@ -23,6 +23,7 @@ class AnimatedImage extends StatefulWidget {
     this.isAntiAlias = false,
     this.part,
     this.onError,
+    this.onFirstFrame,
     Map<String, String>? headers,
     int? cacheWidth,
     int? cacheHeight,
@@ -65,6 +66,8 @@ class AnimatedImage extends StatefulWidget {
   final ImagePart? part;
 
   final Function? onError;
+
+  final void Function(ImageInfo imageInfo)? onFirstFrame;
 
   static void clear() => _AnimatedImageState.clear();
 
@@ -186,6 +189,7 @@ class _AnimatedImageState extends State<AnimatedImage>
   }
 
   void _handleImageFrame(ImageInfo imageInfo, bool synchronousCall) {
+    final isFirst = _frameNumber == null;
     setState(() {
       _replaceImage(info: imageInfo);
       _loadingProgress = null;
@@ -193,6 +197,9 @@ class _AnimatedImageState extends State<AnimatedImage>
       _frameNumber = _frameNumber == null ? 0 : _frameNumber! + 1;
       _wasSynchronouslyLoaded = _wasSynchronouslyLoaded | synchronousCall;
     });
+    if (isFirst) {
+      widget.onFirstFrame?.call(imageInfo);
+    }
   }
 
   void _handleImageChunk(ImageChunkEvent event) {
