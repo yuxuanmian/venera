@@ -6,31 +6,30 @@ import "package:venera/foundation/comic_source/comic_source.dart";
 import "package:venera/utils/translations.dart";
 
 class RankingPage extends StatefulWidget {
-  const RankingPage({required this.categoryKey, super.key});
+  const RankingPage({required this.sourceKey, super.key});
 
-  final String categoryKey;
+  final String sourceKey;
 
   @override
   State<RankingPage> createState() => _RankingPageState();
 }
 
 class _RankingPageState extends State<RankingPage> {
-  late final CategoryComicsData data;
-  late final Map<String, String> options;
+  late final RankingData ranking;
   late String optionValue;
 
   void findData() {
-    for (final source in ComicSource.all().where(
-      (source) => isSourceEnabled(source.key),
-    )) {
-      if (source.categoryData?.key == widget.categoryKey) {
-        data = source.categoryComicsData!;
-        options = data.rankingData!.options;
-        optionValue = options.keys.first;
-        return;
-      }
+    final data = ComicSource.find(widget.sourceKey)?.categoryComicsData;
+    final sourceRanking = data?.rankingData;
+    if (sourceRanking == null ||
+        sourceRanking.options.isEmpty ||
+        !isSourceEnabled(widget.sourceKey)) {
+      throw StateError(
+        "Ranking is unavailable for source: ${widget.sourceKey}",
+      );
     }
-    throw "${widget.categoryKey} Not found";
+    ranking = sourceRanking;
+    optionValue = ranking.options.keys.first;
   }
 
   @override
@@ -42,21 +41,23 @@ class _RankingPageState extends State<RankingPage> {
   @override
   Widget build(BuildContext context) {
     var topPadding = context.padding.top + 56;
+    final option = optionValue;
+    final load = ranking.load;
+    final loadWithNext = ranking.loadWithNext;
     return Scaffold(
       extendBodyBehindAppBar: true,
       appBar: Appbar(title: Text("Ranking".tl)),
       body: ComicList(
-        key: Key(optionValue),
+        key: Key(option),
+        showRankingMedals: true,
         errorLeading: SizedBox(height: topPadding),
         leadingSliver: buildOptions().sliverPadding(
           EdgeInsets.only(top: topPadding),
         ),
-        loadPage: data.rankingData!.load == null
+        loadPage: load == null ? null : (page) => load(option, page),
+        loadNext: loadWithNext == null
             ? null
-            : (i) => data.rankingData!.load!(optionValue, i),
-        loadNext: data.rankingData!.loadWithNext == null
-            ? null
-            : (i) => data.rankingData!.loadWithNext!(optionValue, i),
+            : (next) => loadWithNext(option, next),
       ),
     );
   }
@@ -81,7 +82,7 @@ class _RankingPageState extends State<RankingPage> {
         spacing: 8,
         runSpacing: 8,
         children: [
-          for (var option in options.entries)
+          for (var option in ranking.options.entries)
             buildOptionItem(option.value.tl, option.key, context),
         ],
       ),

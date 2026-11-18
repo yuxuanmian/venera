@@ -5,6 +5,7 @@
 The Javascript API is a set of functions that used to interact application.
 
 There are following parts in the API:
+- [App capabilities](#app-capabilities)
 - [Convert](#Convert)
 - [Network](#Network)
 - [Html](#Html)
@@ -12,6 +13,12 @@ There are following parts in the API:
 - [Utils](#Utils)
 - [Types](#Types)
 
+
+## App capabilities
+
+`APP.supportsRankingPageTarget === true` indicates support for the
+`{ page: "ranking" }` navigation target. See the
+[ranking configuration](comic_source.md#category-comics-page).
 
 ## Convert
 

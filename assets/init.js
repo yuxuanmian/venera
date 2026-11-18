@@ -1477,6 +1477,9 @@ let UI = {
  * @since 1.2.1
  */
 let APP = {
+    /** Whether PageJumpTarget can open { page: "ranking" }. */
+    supportsRankingPageTarget: true,
+
     /**
      * Get the app version
      * @returns {string} - The app version

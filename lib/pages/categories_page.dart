@@ -173,7 +173,8 @@ class _CategoryPage extends StatelessWidget {
             children: [
               if (data.enableRankingPage)
                 buildTag("Ranking".tl, () {
-                  context.to(() => RankingPage(categoryKey: data.key));
+                  final sourceKey = findComicSourceKey();
+                  context.to(() => RankingPage(sourceKey: sourceKey));
                 }),
               for (var buttonData in data.buttons)
                 buildTag(buttonData.label.tl, buttonData.onTap),

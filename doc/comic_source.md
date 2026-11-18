@@ -364,6 +364,12 @@ When user clicks on a category, the category comics page will be displayed.
 
 This part is used to load comics of a category.
 
+`category.enableRankingPage: true` adds the ranking button to the category
+page. The shared ranking page reads its options and loader from
+`categoryComics.ranking`. A discovery section can link to the same page with
+`viewMore: { page: "ranking" }` when `APP.supportsRankingPageTarget === true`.
+For older app versions, supply a compatible `viewMore` target.
+
 #### Search
 
 ```javascript

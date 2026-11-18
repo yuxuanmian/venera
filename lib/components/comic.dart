@@ -28,6 +28,7 @@ class ComicTile extends StatelessWidget {
     required this.comic,
     this.enableLongPressed = true,
     this.badge,
+    this.rankingPlace,
     this.menuOptions,
     this.onTap,
     this.onLongPressed,
@@ -39,6 +40,8 @@ class ComicTile extends StatelessWidget {
   final bool enableLongPressed;
 
   final String? badge;
+
+  final int? rankingPlace;
 
   final List<MenuEntry>? menuOptions;
 
@@ -132,10 +135,18 @@ class ComicTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     var type = appdata.settings['comicDisplayMode'];
+    final place = rankingPlace;
+    final medal = place == null
+        ? null
+        : Semantics(
+            label: '${"Ranking".tl} $place',
+            excludeSemantics: true,
+            child: RankingMedal(rank: place),
+          );
 
     Widget child = type == 'detailed'
-        ? _buildDetailedMode(context)
-        : _buildBriefMode(context);
+        ? _buildDetailedMode(context, medal)
+        : _buildBriefMode(context, medal);
 
     var history = appdata.settings['showHistoryStatusOnTile']
         ? HistoryManager().find(comic.id, ComicType(comic.sourceKey.hashCode))
@@ -194,7 +205,7 @@ class ComicTile extends StatelessWidget {
     return result;
   }
 
-  Widget _buildDetailedMode(BuildContext context) {
+  Widget _buildDetailedMode(BuildContext context, Widget? medal) {
     return LayoutBuilder(
       builder: (context, constrains) {
         final height = constrains.maxHeight - 16;
@@ -214,11 +225,7 @@ class ComicTile extends StatelessWidget {
             ],
           ),
           clipBehavior: Clip.antiAlias,
-          child: Stack(
-            children: [
-              Positioned.fill(child: buildImage(context)),
-            ],
-          ),
+          child: Stack(children: [Positioned.fill(child: buildImage(context))]),
         );
 
         if (heroID != null) {
@@ -254,6 +261,7 @@ class ComicTile extends StatelessWidget {
                     rating: comic.stars,
                   ),
                 ),
+                if (medal != null) ...[const SizedBox(width: 10), medal],
               ],
             ),
           ),
@@ -262,7 +270,7 @@ class ComicTile extends StatelessWidget {
     );
   }
 
-  Widget _buildBriefMode(BuildContext context) {
+  Widget _buildBriefMode(BuildContext context, Widget? medal) {
     return LayoutBuilder(
       builder: (context, constraints) {
         Widget image = Container(
@@ -278,11 +286,7 @@ class ComicTile extends StatelessWidget {
             ],
           ),
           clipBehavior: Clip.antiAlias,
-          child: Stack(
-            children: [
-              Positioned.fill(child: buildImage(context)),
-            ],
-          ),
+          child: Stack(children: [Positioned.fill(child: buildImage(context))]),
         );
 
         if (heroID != null) {
@@ -300,6 +304,14 @@ class ComicTile extends StatelessWidget {
                 child: Stack(
                   children: [
                     Positioned.fill(child: image),
+                    if (medal != null)
+                      PositionedDirectional(
+                        top: 4,
+                        end: 4,
+                        width: 24,
+                        height: 28,
+                        child: medal,
+                      ),
                     Align(
                       alignment: Alignment.bottomRight,
                       child: (() {
@@ -744,6 +756,7 @@ class SliverGridComics extends StatefulWidget {
     required this.comics,
     this.onLastItemBuild,
     this.badgeBuilder,
+    this.rankingPlaces = const {},
     this.menuBuilder,
     this.onTap,
     this.onLongPressed,
@@ -758,6 +771,9 @@ class SliverGridComics extends StatefulWidget {
 
   final String? Function(Comic)? badgeBuilder;
 
+  /// Medal places keyed by the index in [comics], before blocked items are hidden.
+  final Map<int, int> rankingPlaces;
+
   final List<MenuEntry> Function(Comic)? menuBuilder;
 
   final void Function(Comic, int heroID)? onTap;
@@ -770,6 +786,7 @@ class SliverGridComics extends StatefulWidget {
 
 class _SliverGridComicsState extends State<SliverGridComics> {
   List<Comic> comics = [];
+  final List<int> _originalIndices = [];
   List<int> heroIDs = [];
 
   static int _nextHeroID = 0;
@@ -781,12 +798,16 @@ class _SliverGridComicsState extends State<SliverGridComics> {
     }
   }
 
-  @override
-  void didUpdateWidget(covariant SliverGridComics oldWidget) {
-    final nextComics = [
-      for (final comic in widget.comics)
-        if (isBlocked(comic) == null) comic,
-    ];
+  void _updateVisibleComics() {
+    final nextComics = <Comic>[];
+    _originalIndices.clear();
+    for (final (index, comic) in widget.comics.indexed) {
+      if (isBlocked(comic) == null) {
+        nextComics.add(comic);
+        _originalIndices.add(index);
+      }
+    }
+
     if (!_comicListsEqual(comics, nextComics)) {
       final keepHeroIDs = _sameComicIdentities(comics, nextComics);
       comics
@@ -796,17 +817,17 @@ class _SliverGridComicsState extends State<SliverGridComics> {
         generateHeroID();
       }
     }
+  }
+
+  @override
+  void didUpdateWidget(covariant SliverGridComics oldWidget) {
+    _updateVisibleComics();
     super.didUpdateWidget(oldWidget);
   }
 
   @override
   void initState() {
-    for (var comic in widget.comics) {
-      if (isBlocked(comic) == null) {
-        comics.add(comic);
-      }
-    }
-    generateHeroID();
+    _updateVisibleComics();
     HistoryManager().addListener(update);
     super.initState();
   }
@@ -818,14 +839,7 @@ class _SliverGridComicsState extends State<SliverGridComics> {
   }
 
   void update() {
-    setState(() {
-      comics.clear();
-      for (var comic in widget.comics) {
-        if (isBlocked(comic) == null) {
-          comics.add(comic);
-        }
-      }
-    });
+    setState(_updateVisibleComics);
   }
 
   @override
@@ -836,6 +850,7 @@ class _SliverGridComicsState extends State<SliverGridComics> {
       selection: widget.selections,
       onLastItemBuild: widget.onLastItemBuild,
       badgeBuilder: widget.badgeBuilder,
+      rankingPlaceAt: (index) => widget.rankingPlaces[_originalIndices[index]],
       menuBuilder: widget.menuBuilder,
       onTap: widget.onTap,
       onLongPressed: widget.onLongPressed,
@@ -849,6 +864,7 @@ class _SliverGridComics extends StatelessWidget {
     required this.heroIDs,
     this.onLastItemBuild,
     this.badgeBuilder,
+    required this.rankingPlaceAt,
     this.menuBuilder,
     this.onTap,
     this.onLongPressed,
@@ -864,6 +880,7 @@ class _SliverGridComics extends StatelessWidget {
   final void Function()? onLastItemBuild;
 
   final String? Function(Comic)? badgeBuilder;
+  final int? Function(int index) rankingPlaceAt;
 
   final List<MenuEntry> Function(Comic)? menuBuilder;
 
@@ -885,6 +902,7 @@ class _SliverGridComics extends StatelessWidget {
         var comic = ComicTile(
           comic: comics[index],
           badge: badge,
+          rankingPlace: rankingPlaceAt(index),
           menuOptions: menuBuilder?.call(comics[index]),
           onTap: onTap != null
               ? () => onTap!(comics[index], heroIDs[index])
@@ -954,6 +972,7 @@ class ComicList extends StatefulWidget {
     this.errorLeading,
     this.menuBuilder,
     this.badgeBuilder,
+    this.showRankingMedals = false,
     this.controller,
     this.refreshHandlerCallback,
     this.comicFilter,
@@ -974,6 +993,9 @@ class ComicList extends StatefulWidget {
   final List<MenuEntry> Function(Comic)? menuBuilder;
 
   final String? Function(Comic comic)? badgeBuilder;
+
+  /// Show places one through three from the first page in source order.
+  final bool showRankingMedals;
 
   final ScrollController? controller;
 
@@ -1223,6 +1245,32 @@ class ComicListState extends State<ComicList> {
     return filter == null ? comics.toList() : comics.where(filter).toList();
   }
 
+  SliverGridComics _buildPagedComicGrid(
+    Iterable<MapEntry<int, List<Comic>>> pages, {
+    VoidCallback? onLastItemBuild,
+  }) {
+    final filter = widget.comicFilter;
+    final comics = <Comic>[];
+    final rankingPlaces = <int, int>{};
+    for (final page in pages) {
+      final awardMedals = widget.showRankingMedals && page.key == 1;
+      for (final (index, comic) in page.value.indexed) {
+        if (filter?.call(comic) == false) continue;
+        if (awardMedals && index < 3) {
+          rankingPlaces[comics.length] = index + 1;
+        }
+        comics.add(comic);
+      }
+    }
+    return SliverGridComics(
+      comics: comics,
+      rankingPlaces: rankingPlaces,
+      menuBuilder: widget.menuBuilder,
+      badgeBuilder: widget.badgeBuilder,
+      onLastItemBuild: onLastItemBuild,
+    );
+  }
+
   Widget _buildPageSelector() {
     return Row(
       children: [
@@ -1449,11 +1497,7 @@ class ComicListState extends State<ComicList> {
       slivers: [
         if (widget.leadingSliver != null) widget.leadingSliver!,
         if (_maxPage != 1) _buildSliverPageSelector(),
-        SliverGridComics(
-          comics: _filterComics(_data[_page] ?? const []),
-          menuBuilder: widget.menuBuilder,
-          badgeBuilder: widget.badgeBuilder,
-        ),
+        _buildPagedComicGrid([MapEntry(_page, _data[_page]!)]),
         if (_data[_page]!.length > 6 && _maxPage != 1)
           _buildSliverPageSelector(),
         if (widget.trailingSliver != null) widget.trailingSliver!,
@@ -1495,10 +1539,8 @@ class ComicListState extends State<ComicList> {
       controller: widget.controller,
       slivers: [
         if (widget.leadingSliver != null) widget.leadingSliver!,
-        SliverGridComics(
-          comics: _filterComics(_data.values.expand((element) => element)),
-          menuBuilder: widget.menuBuilder,
-          badgeBuilder: widget.badgeBuilder,
+        _buildPagedComicGrid(
+          _data.entries,
           onLastItemBuild: () {
             if (_error == null &&
                 (_maxPage == null || _data.length < _maxPage!)) {

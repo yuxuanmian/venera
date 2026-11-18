@@ -697,6 +697,16 @@ class PageJumpTarget {
           param: attributes?["param"],
         ),
       );
+    } else if (page == "ranking") {
+      final source = ComicSource.find(sourceKey);
+      final ranking = source?.categoryComicsData?.rankingData;
+      if (ranking == null ||
+          ranking.options.isEmpty ||
+          !isSourceEnabled(sourceKey)) {
+        Log.error("Page Jump", "Ranking is unavailable for source: $sourceKey");
+        return;
+      }
+      context.to(() => RankingPage(sourceKey: sourceKey));
     } else if (page == "tagSearch") {
       // Always the target's own source key; the semantic page fixes it.
       context.to(

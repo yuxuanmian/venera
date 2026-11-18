@@ -9,12 +9,14 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_qjs/flutter_qjs.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/catalog/runtime_context.dart';
+import 'package:venera/foundation/catalog/source_preferences.dart';
 import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/foundation/tracking/comparability.dart';
 import 'package:venera/foundation/tracking/update_state.dart';
 import 'package:venera/pages/category_comics_page.dart';
+import 'package:venera/pages/ranking_page.dart';
 import 'package:venera/pages/search_result_page.dart';
 import 'package:venera/pages/semantic_search_page.dart';
 import 'package:venera/utils/data_sync.dart';
@@ -472,6 +474,7 @@ class ExplorePagePart {
   /// Value of this field should match the following format:
   ///   - search:keyword
   ///   - category:categoryName
+  ///   - {page: "ranking"} for this source's shared ranking page
   ///
   /// End with `@`+`param` if the category has a parameter.
   final PageJumpTarget? viewMore;
