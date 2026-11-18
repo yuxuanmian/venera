@@ -623,6 +623,10 @@ If `load` function is implemented, `loadNext` function will be ignored.
 
 #### Comic Details
 
+`comic.loadInfo` can return `ComicDetails.readChapterIds` when the source supplies
+account-specific read status. Use the same string IDs as in `chapters`. This field
+adds read marks to the chapter list alongside the local reading history.
+
 ```javascript
     /// single comic related
     comic = {

@@ -1066,6 +1066,7 @@ function Comic({id, title, subtitle, subTitle, cover, tags, description, maxPage
  * @param description {string?}
  * @param tags {Map<string, string[]> | {} | null | undefined}
  * @param chapters {Map<string, string> | {} | null | undefined} - key: chapter id, value: chapter title
+ * @param readChapterIds {string[]?} - chapter IDs confirmed as read by the source
  * @param isFavorite {boolean | null | undefined} - favorite status.
  * @param subId {string?} - a param which is passed to comments api
  * @param thumbnails {string[]?} - for multiple page thumbnails, set this to null, and use `loadThumbnails` api to load thumbnails
@@ -1082,13 +1083,14 @@ function Comic({id, title, subtitle, subTitle, cover, tags, description, maxPage
  * @param comments {Comment[]?}- `since 1.0.7` App will display comments in the details page.
  * @constructor
  */
-function ComicDetails({title, subtitle, subTitle, cover, description, tags, chapters, isFavorite, subId, thumbnails, recommend, commentCount, likesCount, isLiked, uploader, updateTime, uploadTime, url, stars, maxPage, comments}) {
+function ComicDetails({title, subtitle, subTitle, cover, description, tags, chapters, readChapterIds, isFavorite, subId, thumbnails, recommend, commentCount, likesCount, isLiked, uploader, updateTime, uploadTime, url, stars, maxPage, comments}) {
     this.title = title;
     this.subtitle = subtitle ?? subTitle;
     this.cover = cover;
     this.description = description;
     this.tags = tags;
     this.chapters = chapters;
+    this.readChapterIds = readChapterIds;
     this.isFavorite = isFavorite;
     this.subId = subId;
     this.thumbnails = thumbnails;

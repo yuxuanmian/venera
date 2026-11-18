@@ -15,6 +15,66 @@ class _ComicChapters extends StatelessWidget {
   }
 }
 
+class _ChapterTile extends StatelessWidget {
+  const _ChapterTile({
+    required this.title,
+    required this.isRead,
+    required this.backgroundColor,
+    required this.borderRadius,
+    required this.onTap,
+  });
+
+  final String title;
+  final bool isRead;
+  final Color backgroundColor;
+  final BorderRadius borderRadius;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final readColor = context.useTextColor(Colors.green);
+    return Padding(
+      padding: const EdgeInsets.all(4),
+      child: Material(
+        color: backgroundColor,
+        shape: RoundedRectangleBorder(
+          borderRadius: borderRadius,
+          side: isRead ? BorderSide(color: readColor) : BorderSide.none,
+        ),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: borderRadius,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: isRead ? 22 : 8),
+                child: Center(
+                  child: Text(
+                    title,
+                    semanticsLabel: isRead
+                        ? '$title, ${'Already read'.tl}'
+                        : null,
+                    maxLines: 1,
+                    textAlign: TextAlign.center,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+              if (isRead)
+                PositionedDirectional(
+                  top: 4,
+                  end: 6,
+                  child: Icon(Icons.check_rounded, size: 14, color: readColor),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _NormalComicChapters extends StatefulWidget {
   const _NormalComicChapters(this.history);
 
@@ -107,33 +167,15 @@ class _NormalComicChaptersState extends State<_NormalComicChapters> {
                 }
                 var key = chapters.ids.elementAt(i);
                 var value = chapters[key]!;
-                bool visited = (history?.readEpisode ?? {}).contains(i + 1);
-                return Padding(
-                  padding: const EdgeInsets.fromLTRB(4, 4, 4, 4),
-                  child: Material(
-                    color: context.colorScheme.surfaceContainer,
-                    borderRadius: BorderRadius.circular(16),
-                    child: InkWell(
-                      onTap: () => state.read(i + 1),
-                      borderRadius: BorderRadius.circular(16),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
-                        child: Center(
-                          child: Text(
-                            value,
-                            maxLines: 1,
-                            textAlign: TextAlign.center,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: visited
-                                  ? context.colorScheme.outline
-                                  : null,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
+                final visited =
+                    state.comic.readChapterIds.contains(key) ||
+                    (history?.readEpisode.contains('${i + 1}') ?? false);
+                return _ChapterTile(
+                  title: value,
+                  isRead: visited,
+                  backgroundColor: context.colorScheme.surfaceContainer,
+                  borderRadius: const BorderRadius.all(Radius.circular(16)),
+                  onTap: () => state.read(i + 1),
                 );
               }),
               gridDelegate: const SliverGridDelegateWithFixedHeight(
@@ -299,38 +341,18 @@ class _GroupedComicChaptersState extends State<_GroupedComicChapters>
                 }
                 String rawIndex = (chapterIndex + 1).toString();
                 String groupedIndex = "${index + 1}-${i + 1}";
-                bool visited = false;
-                if (history != null) {
-                  visited =
-                      history!.readEpisode.contains(groupedIndex) ||
-                      history!.readEpisode.contains(rawIndex);
-                }
-                return Padding(
-                  padding: const EdgeInsets.fromLTRB(4, 4, 4, 4),
-                  child: Material(
-                    color: context.colorScheme.surfaceContainerLow,
-                    borderRadius: BorderRadius.circular(12),
-                    child: InkWell(
-                      onTap: () => state.read(chapterIndex + 1),
-                      borderRadius: BorderRadius.circular(12),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
-                        child: Center(
-                          child: Text(
-                            value,
-                            maxLines: 1,
-                            textAlign: TextAlign.center,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: visited
-                                  ? context.colorScheme.outline
-                                  : null,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
+                final localReadEpisodes =
+                    history?.readEpisode ?? const <String>{};
+                final visited =
+                    state.comic.readChapterIds.contains(key) ||
+                    localReadEpisodes.contains(groupedIndex) ||
+                    localReadEpisodes.contains(rawIndex);
+                return _ChapterTile(
+                  title: value,
+                  isRead: visited,
+                  backgroundColor: context.colorScheme.surfaceContainerLow,
+                  borderRadius: const BorderRadius.all(Radius.circular(12)),
+                  onTap: () => state.read(chapterIndex + 1),
                 );
               }),
               gridDelegate: const SliverGridDelegateWithFixedHeight(

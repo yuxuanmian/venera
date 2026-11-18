@@ -20,6 +20,8 @@ class _DetailFixture {
     required this.sourceKey,
     required this.comicId,
     required this.loadFolders,
+    this.chapters = const {'ep': 'Chapter'},
+    this.readChapterIds,
   });
 
   final String sourceKey;
@@ -27,6 +29,8 @@ class _DetailFixture {
   final String comicId;
 
   final Future<Res<Map<String, String>>> Function(String comicId) loadFolders;
+  final Map<String, Object> chapters;
+  final List<String>? readChapterIds;
 
   ComicSource buildSource() {
     final coverPath =
@@ -57,7 +61,8 @@ class _DetailFixture {
           'cover': coverPath,
           'description': 'Details loaded',
           'tags': <String, List<String>>{},
-          'chapters': <String, String>{'ep': 'Chapter'},
+          'chapters': chapters,
+          if (readChapterIds != null) 'readChapterIds': readChapterIds,
           'sourceKey': sourceKey,
           'comicId': id,
           'isFavorite': false,
@@ -93,14 +98,49 @@ class _DetailFixture {
   }
 }
 
-Future<void> _pumpDetail(WidgetTester tester, _DetailFixture fixture) async {
+Future<void> _pumpDetail(
+  WidgetTester tester,
+  _DetailFixture fixture, {
+  Brightness brightness = Brightness.light,
+}) async {
   ComicSourceManager().add(fixture.buildSource());
   await tester.pumpWidget(
     MaterialApp(
+      theme: ThemeData(brightness: brightness),
       home: ComicPage(id: fixture.comicId, sourceKey: fixture.sourceKey),
     ),
   );
   await tester.pump();
+}
+
+void _expectChapterRead(WidgetTester tester, String title, bool read) {
+  final chapter = find.text(title);
+  final tile = find.ancestor(of: chapter, matching: find.byType(InkWell)).first;
+  final material = find
+      .ancestor(of: tile, matching: find.byType(Material))
+      .first;
+  final check = find.descendant(
+    of: tile,
+    matching: find.byIcon(Icons.check_rounded),
+  );
+  final shape =
+      tester.widget<Material>(material).shape! as RoundedRectangleBorder;
+  final color = Theme.of(tester.element(chapter)).brightness == Brightness.light
+      ? Colors.green.shade800
+      : Colors.green.shade100;
+  expect(shape.side, read ? BorderSide(color: color) : BorderSide.none);
+  expect(check, read ? findsOneWidget : findsNothing);
+  expect(tester.widget<Text>(chapter).style?.color, isNull);
+  expect(tester.widget<InkWell>(tile).onTap, isNotNull);
+  if (read) {
+    expect(tester.widget<Icon>(check).color, color);
+    expect(tester.getCenter(check).dx, greaterThan(tester.getCenter(tile).dx));
+    expect(tester.getCenter(check).dy, lessThan(tester.getCenter(tile).dy));
+    expect(
+      tester.widget<Text>(chapter).semanticsLabel,
+      '$title, ${'Already read'.tl}',
+    );
+  }
 }
 
 void main() {
@@ -119,6 +159,98 @@ void main() {
       migrateLegacy: false,
     );
   });
+
+  for (final sourceSupportsReadStatus in [false, true]) {
+    testWidgets(
+      'flat chapters preserve local marks with remote status ${sourceSupportsReadStatus ? 'present' : 'absent'}',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(380, 1100));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final fixture = _DetailFixture(
+          sourceKey: 'chapter-status-source-$sourceSupportsReadStatus',
+          comicId: 'chapters-$sourceSupportsReadStatus',
+          loadFolders: (_) async => const Res({}),
+          chapters: const {
+            'a': '01',
+            'b': 'Source chapter',
+            'c': 'Unread chapter',
+          },
+          readChapterIds: sourceSupportsReadStatus
+              ? const ['b', 'unknown']
+              : null,
+        );
+        final model = (await fixture.buildSource().loadComicInfo!(
+          fixture.comicId,
+        )).data;
+        HistoryManager().addHistory(
+          History.fromModel(model: model, ep: 1, page: 7, readChapters: {'1'}),
+        );
+
+        await _pumpDetail(tester, fixture);
+        _expectChapterRead(tester, '01', true);
+        _expectChapterRead(tester, 'Source chapter', sourceSupportsReadStatus);
+        _expectChapterRead(tester, 'Unread chapter', false);
+        await tester.tap(find.byTooltip('Order'.tl));
+        await tester.pump();
+        _expectChapterRead(tester, '01', true);
+        _expectChapterRead(tester, 'Source chapter', sourceSupportsReadStatus);
+        _expectChapterRead(tester, 'Unread chapter', false);
+        expect(
+          find.text('${'Last Reading'.tl}: 01 P7'),
+          findsOneWidget,
+        );
+        final history = HistoryManager().find(model.id, model.comicType)!;
+        expect(history.readEpisode, {'1'});
+        expect(history.ep, 1);
+        expect(history.page, 7);
+      },
+    );
+  }
+
+  testWidgets(
+    'grouped chapters combine source and both local history formats',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(800, 1100));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final fixture = _DetailFixture(
+        sourceKey: 'grouped-chapter-status-source',
+        comicId: 'grouped-chapters',
+        loadFolders: (_) async => const Res({}),
+        chapters: const {
+          'First group': {'a': 'First chapter'},
+          'Second group': {
+            'b': 'Legacy chapter',
+            'c': 'Local chapter',
+            'd': 'Source chapter',
+            'e': 'Unread chapter',
+          },
+        },
+        readChapterIds: const ['d'],
+      );
+      final model = (await fixture.buildSource().loadComicInfo!(
+        fixture.comicId,
+      )).data;
+      HistoryManager().addHistory(
+        History.fromModel(
+          model: model,
+          ep: 2,
+          page: 7,
+          group: 2,
+          readChapters: {'2', '2-2'},
+        ),
+      );
+
+      await _pumpDetail(tester, fixture, brightness: Brightness.dark);
+      _expectChapterRead(tester, 'Legacy chapter', true);
+      _expectChapterRead(tester, 'Local chapter', true);
+      _expectChapterRead(tester, 'Source chapter', true);
+      _expectChapterRead(tester, 'Unread chapter', false);
+      expect(
+        find.text('${'Last Reading'.tl}: Second group Local chapter P7'),
+        findsOneWidget,
+      );
+    },
+  );
 
   testWidgets('details render while loadFolders is pending', (tester) async {
     final folders = Completer<Res<Map<String, String>>>();

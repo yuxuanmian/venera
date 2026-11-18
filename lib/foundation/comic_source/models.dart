@@ -290,6 +290,10 @@ class ComicDetails with HistoryMixin {
   /// id-name
   final ComicChapters? chapters;
 
+  /// Source-account chapter IDs for display in this detail session.
+  /// Excluded from [toJson], which is used for download state.
+  final Set<String> readChapterIds;
+
   final List<String>? thumbnails;
 
   final List<Comic>? recommend;
@@ -340,6 +344,10 @@ class ComicDetails with HistoryMixin {
       description = json["description"],
       tags = _generateMap(json["tags"]),
       chapters = ComicChapters.fromJsonOrNull(json["chapters"]),
+      readChapterIds = switch (json['readChapterIds']) {
+        List ids => Set<String>.unmodifiable(ids.whereType<String>()),
+        _ => const <String>{},
+      },
       sourceKey = json["sourceKey"],
       comicId = json["comicId"],
       thumbnails = ListOrNull.from(json["thumbnails"]),

@@ -52,6 +52,36 @@ class ParserMissingSearchSource extends ComicSource {
     expect(source.loadComicPages, isNotNull);
   });
 
+  test(
+    'optional chapter read IDs survive the JavaScript details bridge',
+    () async {
+      const key = 'parser_read_chapters_case';
+      final source = await ComicSourceParser().parse('''
+class ParserReadChaptersSource extends ComicSource {
+  name = "Parser chapter read status";
+  key = "$key";
+  version = "1.0.0";
+  minAppVersion = "1.0.0";
+  comic = {
+    loadInfo: async (id) => new ComicDetails({
+      title: "Sample", cover: "cover", tags: {}, chapters: {a: "Chapter"},
+      readChapterIds: id === "known" ? ["a", "a", 2, null] :
+        id === "malformed" ? {a: true} : undefined,
+    }),
+    loadEp: async () => ({images: []}),
+  };
+}
+''', '$key.js');
+
+      final load = source.loadComicInfo!;
+      final known = (await load('known')).data;
+      expect(known.readChapterIds, {'a'});
+      expect(known.toJson(), isNot(contains('readChapterIds')));
+      expect((await load('malformed')).data.readChapterIds, isEmpty);
+      expect((await load('legacy')).data.readChapterIds, isEmpty);
+    },
+  );
+
   test('retains search data and tag suggestion callback', () async {
     const key = 'parser_full_search_case';
     final source = await ComicSourceParser().parse('''
