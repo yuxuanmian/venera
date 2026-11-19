@@ -123,6 +123,171 @@ class ScanBridgeIntegrationSource extends ComicSource {
   );
 
   test(
+    'optional favorite cache page crosses the bridge with an exact total',
+    () async {
+      const favoriteKey = 'favorite_cache_page_bridge';
+      final originalVersion = App.packageVersion;
+      App.packageVersion = '2.0.0';
+      addTearDown(() => App.packageVersion = originalVersion);
+      final source = await ComicSourceParser().parse(
+        '''
+class FavoriteCachePageSource extends ComicSource {
+  name = "Favorites bridge";
+  key = "$favoriteKey";
+  version = "1.0.0";
+  minAppVersion = "1.0.0";
+  favorites = {
+    multiFolder: false,
+    loadComics: async () => ({comics: [], maxPage: 2}),
+    loadCachePage: async (page, folder, total) => ({
+      comics: [new Comic({id: folder + page, title: "Favorite", cover: ""})],
+      maxPage: 2,
+      total: total ?? 19,
+    }),
+  };
+}
+''',
+        '$favoriteKey.js',
+        loadData: false,
+        scheduleInit: false,
+      );
+      addTearDown(() => ComicSourceManager().remove(favoriteKey));
+      final data = source.favoriteData!;
+      expect((await data.loadComic!(1)).subData, 2);
+      final home = (await data.loadCachePage!(1, '', null)).data;
+      expect(home.total, 19);
+      expect(home.maxPage, 2);
+      final tail = (await data.loadCachePage!(2, '', home.total)).data;
+      expect(tail.comics.single.id, '2');
+      expect(tail.total, 19);
+    },
+    skip: _quickJsAvailable
+        ? null
+        : 'flutter_qjs native library is unavailable',
+  );
+
+  test(
+    'optional favorite cursor crosses the bridge without a total',
+    () async {
+      const favoriteKey = 'favorite_cursor_bridge';
+      final originalVersion = App.packageVersion;
+      App.packageVersion = '2.0.0';
+      addTearDown(() => App.packageVersion = originalVersion);
+      final source = await ComicSourceParser().parse(
+        '''
+class FavoriteCursorSource extends ComicSource {
+  name = "Favorites cursor bridge";
+  key = "$favoriteKey";
+  version = "1.0.0";
+  minAppVersion = "1.0.0";
+  favorites = {
+    multiFolder: true,
+    cacheAllFolder: "-1",
+    cacheSettings: ["domain"],
+    cacheAccountSetting: "domain",
+    loadNext: async () => ({comics: []}),
+    loadCacheNext: async (next, folder) => ({
+      comics: [new Comic({id: folder + (next ?? "home"), title: "Favorite", cover: ""})],
+      next: next === null ? "tail" : null,
+    }),
+  };
+}
+''',
+        '$favoriteKey.js',
+        loadData: false,
+        scheduleInit: false,
+      );
+      addTearDown(() => ComicSourceManager().remove(favoriteKey));
+      final data = source.favoriteData!;
+      expect(data.loadCachePage, isNull);
+      expect(data.cacheAllFolder, '-1');
+      expect(data.cacheAccountSetting, 'domain');
+      final first = (await data.loadCacheNext!(null, '3')).data;
+      expect(first.next, 'tail');
+      expect(first.total, isNull);
+      final last = (await data.loadCacheNext!(first.next, '3')).data;
+      expect(last.next, isNull);
+      expect(last.comics.single.id, '3tail');
+    },
+    skip: _quickJsAvailable
+        ? null
+        : 'flutter_qjs native library is unavailable',
+  );
+
+  test(
+    'optional favorite pages share one relogin for overlapping and late failures',
+    () async {
+      const favoriteKey = 'favorite_relogin_bridge';
+      const jsSource = 'ComicSource.sources.$favoriteKey';
+      final originalVersion = App.packageVersion;
+      App.packageVersion = '2.0.0';
+      addTearDown(() => App.packageVersion = originalVersion);
+      final source = await ComicSourceParser().parse(
+        '''
+class FavoriteReloginSource extends ComicSource {
+  name = "Favorite relogin bridge";
+  key = "$favoriteKey";
+  version = "1.0.0";
+  minAppVersion = "1.0.0";
+  loggedIn = false;
+  loginCount = 0;
+  finishPage = {};
+  account = {
+    login: async () => {
+      this.loginCount++;
+      await new Promise(resolve => this.finishLogin = resolve);
+      this.loggedIn = true;
+    },
+  };
+  favorites = {
+    multiFolder: false,
+    loadComics: async () => ({comics: [], maxPage: 4}),
+    loadCachePage: async (page) => {
+      if (!this.loggedIn) {
+        await new Promise(resolve => this.finishPage[page] = resolve);
+        throw "Login expired";
+      }
+      return {comics: [], maxPage: 4};
+    },
+  };
+}
+''',
+        '$favoriteKey.js',
+        loadData: false,
+        scheduleInit: false,
+      );
+      source.data['account'] = ['test-user', 'test-password'];
+      ComicSourceManager().add(source);
+      addTearDown(() => ComicSourceManager().remove(favoriteKey));
+      final load = source.favoriteData!.loadCachePage!;
+      final first = load(2, '', null);
+      final late = load(3, '', null);
+      final concurrent = load(4, '', null);
+      JsEngine().runCode(
+        '$jsSource.finishPage[2](); $jsSource.finishPage[4]()',
+      );
+
+      final deadline = DateTime.now().add(const Duration(seconds: 3));
+      const ready = 'Boolean($jsSource.finishLogin)';
+      while (JsEngine().runCode(ready) != true &&
+          DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      expect(JsEngine().runCode(ready), isTrue);
+      expect(JsEngine().runCode('$jsSource.loginCount'), 1);
+      JsEngine().runCode('$jsSource.finishLogin()');
+      expect((await first).success, isTrue);
+      expect((await concurrent).success, isTrue);
+      JsEngine().runCode('$jsSource.finishPage[3]()');
+      expect((await late).success, isTrue);
+      expect(JsEngine().runCode('$jsSource.loginCount'), 1);
+    },
+    skip: _quickJsAvailable
+        ? null
+        : 'flutter_qjs native library is unavailable',
+  );
+
+  test(
     'shipped Picacg and Manwa scripts cross the real QuickJS bridge',
     () async {
       if (!_quickJsAvailable) return;

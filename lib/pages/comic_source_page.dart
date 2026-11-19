@@ -713,6 +713,25 @@ class _SliverComicSourceState extends State<_SliverComicSource> {
     );
   }
 
+  void _saveSourceSetting(String key, Object? value) {
+    final favorites = source.favoriteData;
+    final affectsFavorites =
+        favorites?.usesCollectionCache == true &&
+        favorites!.cacheSettings.contains(key);
+    final previousScope = affectsFavorites ? favorites.cacheScope : null;
+    source.data['settings'][key] = value;
+    source.saveData();
+    if (affectsFavorites && favorites.cacheScope != previousScope) {
+      final cache = NetworkFavoriteCacheManager();
+      if (favorites.cacheAccountSetting == key) {
+        cache.invalidateFavoriteSessionForSource(source.key);
+      } else {
+        cache.collections.settingsChanged(source.key);
+      }
+    }
+    setState(() {});
+  }
+
   Iterable<Widget> buildSourceSettings() sync* {
     // Try to get dynamic settings first (for getters), fall back to cached settings
     var settingsMap = source.runtimeContext == null
@@ -754,12 +773,8 @@ class _SliverComicSourceState extends State<_SliverComicSource> {
                     (e) => ((e['text'] ?? e['value']) as String).ts(source.key),
                   )
                   .toList(),
-              onTap: (i) {
-                source.data['settings'][key] =
-                    item.value['options'][i]['value'];
-                source.saveData();
-                setState(() {});
-              },
+              onTap: (i) =>
+                  _saveSourceSetting(key, item.value['options'][i]['value']),
             ),
           );
         } else if (type == "switch") {
@@ -768,11 +783,7 @@ class _SliverComicSourceState extends State<_SliverComicSource> {
             title: Text((item.value['title'] as String).ts(source.key)),
             trailing: Switch(
               value: current,
-              onChanged: (v) {
-                source.data['settings'][key] = v;
-                source.saveData();
-                setState(() {});
-              },
+              onChanged: (v) => _saveSourceSetting(key, v),
             ),
           );
         } else if (type == "input") {
@@ -796,9 +807,7 @@ class _SliverComicSourceState extends State<_SliverComicSource> {
                       ? null
                       : RegExp(item.value['validator']),
                   onConfirm: (value) {
-                    source.data['settings'][key] = value;
-                    source.saveData();
-                    setState(() {});
+                    _saveSourceSetting(key, value);
                     return null;
                   },
                 );

@@ -40,12 +40,25 @@ abstract mixin class _ComicPageActions {
   /// whether it already has a check record (007 Contract W2).
   void reloadScheduleIndicator();
 
+  Comic get _favoritePreview => Comic(
+    comic.title,
+    comic.cover,
+    comic.id,
+    comic.subTitle,
+    comic.tags.values.expand((tags) => tags).toList(),
+    '',
+    comic.sourceKey,
+    null,
+    null,
+  );
+
   void openFavPanel() {
     showSideBar(
       App.rootContext,
       _FavoritePanel(
         cid: comic.id,
         source: comicSource,
+        preview: _favoritePreview,
         isFavorite: isFavorite,
         onFavorite: (network) {
           isFavorite = network;
@@ -110,6 +123,7 @@ abstract mixin class _ComicPageActions {
       folder: NetworkFavoriteFolderRef(sourceKey: data.key, folderId: ''),
       comicId: comic.id,
       isAdding: !isFavorite,
+      comic: _favoritePreview,
     );
     isFavoriting = false;
     if (result.error) {

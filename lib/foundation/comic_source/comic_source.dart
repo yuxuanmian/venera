@@ -5,6 +5,8 @@ import 'dart:collection';
 import 'dart:convert';
 import 'dart:math' as math;
 
+import 'package:crypto/crypto.dart' show sha256;
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_qjs/flutter_qjs.dart';
 import 'package:venera/foundation/app.dart';

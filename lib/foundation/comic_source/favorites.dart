@@ -8,6 +8,25 @@ typedef AddOrDelFavFunc =
       String? favId,
     );
 
+typedef FavoriteCachePageLoader =
+    Future<Res<FavoriteCachePage>> Function(
+      int page,
+      String folder,
+      int? total,
+    );
+
+class FavoriteCachePage {
+  const FavoriteCachePage(this.comics, this.maxPage, this.total, {this.next});
+
+  final List<Comic> comics;
+  final int? maxPage;
+  final int? total;
+  final String? next;
+}
+
+typedef FavoriteCacheCursorLoader =
+    Future<Res<FavoriteCachePage>> Function(String? next, String folder);
+
 class FavoriteUpdateSnapshot {
   final List<Comic> comics;
   final int pageSize;
@@ -61,6 +80,26 @@ class FavoriteData {
   final bool singleFolderForSingleComic;
 
   final FavoriteUpdateCheckData? updateCheck;
+  final FavoriteCachePageLoader? loadCachePage;
+  final FavoriteCacheCursorLoader? loadCacheNext;
+  final List<String> cacheSettings;
+  final String? cacheAllFolder;
+  final String? cacheAccountSetting;
+
+  bool get usesCollectionCache =>
+      loadCachePage != null || loadCacheNext != null;
+
+  String get cacheScope {
+    if (cacheSettings.isEmpty) return '';
+    final source = ComicSource.find(key);
+    final settings = source?.data['settings'];
+    final values = jsonEncode([
+      for (final name in cacheSettings)
+        (settings is Map ? settings[name] : null) ??
+            source?.settings?[name]?['default'],
+    ]);
+    return sha256.convert(utf8.encode(values)).toString();
+  }
 
   const FavoriteData({
     required this.key,
@@ -74,6 +113,11 @@ class FavoriteData {
     this.addOrDelFavorite,
     this.singleFolderForSingleComic = false,
     this.updateCheck,
+    this.loadCachePage,
+    this.loadCacheNext,
+    this.cacheSettings = const [],
+    this.cacheAllFolder,
+    this.cacheAccountSetting,
   });
 }
 

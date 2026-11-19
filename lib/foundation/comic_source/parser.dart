@@ -1646,22 +1646,52 @@ class ComicSourceParser {
     final bool? singleFolderForSingleComic =
         _getValue("favorites.singleFolderForSingleComic") as bool?;
 
+    ({Object account, Completer<bool> result})? lastRelogin;
+
     Future<Res<T>> retryZone<T>(Future<Res<T>> Function() func) async {
       final source = ComicSource.find(_sourceKey!);
       if (source != null && !source.isLogged) {
         return const Res.error("Not login");
       }
-      var res = await func();
-      if (res.error && res.errorMessage!.contains("Login expired")) {
-        if (source == null) return res;
-        var reLoginRes = await source.reLogin();
-        if (!reLoginRes) {
-          return const Res.error("Login expired and re-login failed");
-        } else {
-          return func();
-        }
+      final Object? account = source?.data['account'];
+      final reloginAtStart = lastRelogin?.result;
+      final wasRelogging = reloginAtStart?.isCompleted == false;
+      final res = await func();
+      if (source == null ||
+          account == null ||
+          res.errorMessage?.contains('Login expired') != true) {
+        return res;
       }
-      return res;
+
+      bool matchesAccount(Object? other) =>
+          identical(other, account) ||
+          (other is List && account is List && listEquals(other, account));
+      bool isSameAccount() =>
+          identical(ComicSource.find(_sourceKey!), source) &&
+          matchesAccount(source.data['account']);
+      if (!isSameAccount()) return res;
+
+      // A delayed 401 from the same batch can use the login that already ran.
+      final current = lastRelogin;
+      final Completer<bool> relogin;
+      if (current != null &&
+          matchesAccount(current.account) &&
+          (wasRelogging || current.result != reloginAtStart)) {
+        relogin = current.result;
+      } else {
+        relogin = Completer<bool>();
+        lastRelogin = (account: account, result: relogin);
+        unawaited(
+          source.reLogin().then(
+            relogin.complete,
+            onError: relogin.completeError,
+          ),
+        );
+      }
+      if (!await relogin.future) {
+        return const Res.error('Login expired and re-login failed');
+      }
+      return isSameAccount() ? func() : res;
     }
 
     Future<Res<bool>> addOrDelFavFunc(
@@ -1740,6 +1770,60 @@ class ComicSourceParser {
       };
     }
 
+    Future<Res<FavoriteCachePage>> readCachePage(
+      String method,
+      List<Object?> arguments, {
+      required bool cursor,
+    }) => retryZone<FavoriteCachePage>(() async {
+      try {
+        final res = await _runCode('''
+          ComicSource.sources.$_key.favorites.$method(
+            ${arguments.map(jsonEncode).join(', ')})
+        ''');
+        if (res is! Map ||
+            res['comics'] is! List ||
+            (!cursor && res['maxPage'] is! int) ||
+            (cursor &&
+                (!res.containsKey('next') ||
+                    (res['next'] != null && res['next'] is! String))) ||
+            (res['total'] != null && res['total'] is! int)) {
+          return const Res.error('Invalid favorite cache page');
+        }
+        return Res(
+          FavoriteCachePage(
+            [
+              for (final item in res['comics'])
+                Comic.fromJson(item, _sourceKey!),
+            ],
+            cursor ? null : res['maxPage'],
+            res['total'],
+            next: cursor ? res['next'] : null,
+          ),
+        );
+      } catch (e) {
+        return Res.error(e.toString());
+      }
+    });
+
+    final FavoriteCachePageLoader? loadCachePage =
+        loadComic != null && _checkExists('favorites.loadCachePage')
+        ? (page, folder, total) => readCachePage('loadCachePage', [
+            page,
+            folder,
+            total,
+          ], cursor: false)
+        : null;
+    final FavoriteCacheCursorLoader? loadCacheNext =
+        loadCachePage == null &&
+            loadNext != null &&
+            _checkExists('favorites.loadCacheNext')
+        ? (next, folder) =>
+              readCachePage('loadCacheNext', [next, folder], cursor: true)
+        : null;
+    final cacheSettingKeys = _getValue('favorites.cacheSettings');
+    final allFolder = _getValue('favorites.cacheAllFolder');
+    final cacheAccountSetting = _getValue('favorites.cacheAccountSetting');
+
     // The list-level `favorites.updateCheck` channel was retired on the
     // application side by feature 005 (FR-044/FR-045): the full scan and
     // the judgment domain replaced it, and `FavoriteUpdateHint` is no longer
@@ -1813,6 +1897,15 @@ class ComicSourceParser {
       loadComic: loadComic,
       loadNext: loadNext,
       loadFolders: loadFolders,
+      loadCachePage: loadCachePage,
+      loadCacheNext: loadCacheNext,
+      cacheSettings: cacheSettingKeys is List
+          ? List.unmodifiable(cacheSettingKeys.whereType<String>())
+          : const [],
+      cacheAllFolder: allFolder is String ? allFolder : null,
+      cacheAccountSetting: cacheAccountSetting is String
+          ? cacheAccountSetting
+          : null,
       addFolder: addFolder,
       deleteFolder: deleteFolder,
       addOrDelFavorite: addOrDelFavFunc,

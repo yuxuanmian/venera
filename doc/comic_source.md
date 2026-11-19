@@ -604,6 +604,19 @@ cross-source mapping、per-comic detail filtering、取消参数，以及任何 
         loadComics: async (page, folder) => {
 
         },
+
+        // Optional. Opts numbered favorites into full snapshots. Return
+        // {comics, maxPage, total?}. When known, page one's total is passed
+        // back to later calls. Omit it when the source has no exact total.
+        // After page one, the client may request up to four pages concurrently.
+        // loadCachePage: async (page, folder, total) => {},
+
+        // For cursor sources, keep loadNext for older clients and opt in with
+        // loadCacheNext(next, folder) => {comics, next, total?} instead.
+        // Return next: null explicitly at the end.
+        // cacheSettings: ['favoriteSort'], // options that change the list
+        // cacheAccountSetting: 'domain', // optional account boundary option
+        // cacheAllFolder: '-1', // optional aggregate folder, not an add target
         /**
          * load comics with next page token
          * @param next {string | null} - next page token, null for first page

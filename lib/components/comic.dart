@@ -532,12 +532,10 @@ class _ComicDescription extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (tags != null) {
-      tags!.removeWhere((element) => element.removeAllBlank == "");
-      for (var s in tags!) {
-        s = s.replaceAll("\n", " ");
-      }
-    }
+    final displayTags = [
+      for (final tag in tags ?? const <String>[])
+        if (tag.removeAllBlank.isNotEmpty) tag.replaceAll('\n', ' '),
+    ];
     var enableTranslate =
         App.locale.languageCode == 'zh' && this.enableTranslate;
     return Column(
@@ -562,7 +560,7 @@ class _ComicDescription extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
           ),
         const SizedBox(height: 4),
-        if (tags != null && tags!.isNotEmpty)
+        if (displayTags.isNotEmpty)
           Expanded(
             child: LayoutBuilder(
               builder: (context, constraints) {
@@ -582,7 +580,7 @@ class _ComicDescription extends StatelessWidget {
                     spacing: 4,
                     runSpacing: 3,
                     children: [
-                      for (var s in tags!)
+                      for (final s in displayTags)
                         Container(
                           height: 21,
                           padding: const EdgeInsets.symmetric(horizontal: 4),
@@ -627,7 +625,7 @@ class _ComicDescription extends StatelessWidget {
                   Text(
                     description,
                     style: const TextStyle(fontSize: 12.0),
-                    maxLines: (tags == null || tags!.isEmpty) ? 3 : 2,
+                    maxLines: displayTags.isEmpty ? 3 : 2,
                     overflow: TextOverflow.ellipsis,
                   ),
                 ],
@@ -977,6 +975,9 @@ class ComicList extends StatefulWidget {
     this.refreshHandlerCallback,
     this.comicFilter,
     this.staticComics,
+    this.staticEmptyMessage,
+    this.firstPagePinnedComics = const [],
+    this.onFirstPageShown,
     this.enablePageStorage = false,
   });
 
@@ -1006,6 +1007,9 @@ class ComicList extends StatefulWidget {
 
   /// Locally supplied items rendered without invoking a paging source.
   final List<Comic>? staticComics;
+  final String? staticEmptyMessage;
+  final List<Comic> firstPagePinnedComics;
+  final VoidCallback? onFirstPageShown;
 
   final bool enablePageStorage;
 
@@ -1072,17 +1076,6 @@ class ComicListState extends State<ComicList> {
     _page = storedPage is int && storedPage > 0 ? storedPage : 1;
     _error = state['error'] is String ? state['error'] as String : null;
     _loading.clear();
-    final rawLoading = state['loading'];
-    if (rawLoading is Map) {
-      for (final entry in rawLoading.entries) {
-        final page = entry.key is int
-            ? entry.key as int
-            : int.tryParse(entry.key.toString());
-        if (page != null && entry.value is bool) {
-          _loading[page] = entry.value as bool;
-        }
-      }
-    }
     _nextUrl = state['nextUrl'] is String ? state['nextUrl'] as String : null;
     _requestTokens.clear();
     final rawRequestTokens = state['requestTokens'];
@@ -1212,6 +1205,26 @@ class ComicListState extends State<ComicList> {
     }
   }
 
+  void updateComicCovers(Map<String, String> covers) {
+    bool changed = false;
+    for (final page in _data.values) {
+      for (var i = 0; i < page.length; i++) {
+        final comic = page[i];
+        final cover = covers[comic.id];
+        if (cover == null || cover == comic.cover) continue;
+        page[i] = Comic.fromJson({
+          ...comic.toJson(),
+          'cover': cover,
+        }, comic.sourceKey);
+        changed = true;
+      }
+    }
+    if (changed && mounted) {
+      storeState();
+      setState(() {});
+    }
+  }
+
   Iterable<int> loadedPagesContainingAnyComicIds(Set<String> comicIds) sync* {
     for (final entry in _data.entries) {
       if (entry.value.any((comic) => comicIds.contains(comic.id))) {
@@ -1253,6 +1266,18 @@ class ComicListState extends State<ComicList> {
     final comics = <Comic>[];
     final rankingPlaces = <int, int>{};
     for (final page in pages) {
+      if (page.key == 1 && widget.firstPagePinnedComics.isNotEmpty) {
+        final visibleIds = {for (final comic in page.value) comic.id};
+        comics.addAll(
+          widget.firstPagePinnedComics.where(
+            (comic) =>
+                !visibleIds.contains(comic.id) && filter?.call(comic) != false,
+          ),
+        );
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) widget.onFirstPageShown?.call();
+        });
+      }
       final awardMedals = widget.showRankingMedals && page.key == 1;
       for (final (index, comic) in page.value.indexed) {
         if (filter?.call(comic) == false) continue;
@@ -1410,7 +1435,7 @@ class ComicListState extends State<ComicList> {
       }
     } finally {
       _loading[page] = false;
-      storeState();
+      if (mounted) storeState();
     }
   }
 
@@ -1449,7 +1474,11 @@ class ComicListState extends State<ComicList> {
         if (comics.isEmpty)
           SliverFillRemaining(
             hasScrollBody: false,
-            child: Center(child: Text('No cached favorites found'.tl)),
+            child: Center(
+              child: Text(
+                widget.staticEmptyMessage ?? 'No cached favorites found'.tl,
+              ),
+            ),
           )
         else
           SliverGridComics(

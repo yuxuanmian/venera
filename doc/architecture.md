@@ -149,6 +149,8 @@ Bootstrap 只展示本地翻译文案，不展示远端 message 或异常诊断�
 - `implicitData.json`：内部状态，不等同于用户设置。
 - `history.db`：阅读历史，也承载图片收藏相关表。
 - `network_favorite_cache.db`：远端收藏夹、分页漫画摘要和追更状态的设备级缓存；不参与导入导出或 WebDAV 同步。
+
+支持完整收藏快照的源通过 `favorites.loadCachePage`（页码）或 `favorites.loadCacheNext`（游标）接入。总数可省略。新首页和浏览分页先供当前列表使用，后台分页在校验通过后一次提交正式收藏、成员与完整性标记。`favorite_pending_changes` 保存源站已确认、尚待同步或尚待显示的收藏操作，按账号切换清除。`favorite_folders.cache_scope` 保存影响列表顺序的设置摘要。追更只从已发布的收藏读取缓存目标，缓存发布不使在途扫描失效。流程见 [018 收藏缓存](../../specs/018-favorite-cache-refresh/spec.md)。
 - `cookie.db`：网络 Cookie。
 - `comic_source/*.js`：用户安装的漫画源。
 - `comic_source/.managed/`：按完整 catalog revision 固定的受信任源制品与激活注册表。

@@ -99,6 +99,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         navigatorKey: App.rootNavigatorKey,
+        builder: (_, child) => OverlayWidget(child!),
         home: Scaffold(
           body: PageStorage(
             bucket: bucket,
@@ -123,6 +124,130 @@ void main() {
     await _pumpFrames(tester);
     expect(find.text('Page 2 / ?'), findsOneWidget);
   }
+
+  testWidgets('a failed cache batch shows one warning and keeps the snapshot', (
+    tester,
+  ) async {
+    const source = 'favorites-warning';
+    const folder = NetworkFavoriteFolderRef(sourceKey: source, folderId: '');
+    const warning = 'Could not cache favorites. Try again later.';
+    final calls = <int>[];
+    final failedPage = Completer<void>();
+    final latePage = Completer<void>();
+    var refreshing = false;
+    final data = FavoriteData(
+      key: source,
+      title: source,
+      multiFolder: false,
+      loadComic: (_, [folder]) async => throw StateError('Legacy page load'),
+      loadNext: null,
+      loadCachePage: (page, _, _) async {
+        calls.add(page);
+        if (refreshing && (page == 2 || page == 5)) {
+          await (page == 2 ? latePage : failedPage).future;
+          throw const SocketException('Connection lost');
+        }
+        final id = '${refreshing ? 'new' : 'old'}-$page';
+        return Res(FavoriteCachePage([_comic(source, id)], 6, 6));
+      },
+    );
+    await tester.runAsync(
+      () => cache
+          .cacheAllPages(data, folder, isCanceled: () => false)
+          .drain<void>(),
+    );
+    final published = cache.getFullCacheStatus(folder).completedAt;
+    calls.clear();
+    refreshing = true;
+    await pumpSource(tester, data, PageStorageBucket());
+    cache.collections.settleNow();
+    await _pumpFrames(tester);
+    expect(calls, [1, 2, 3, 4, 5]);
+
+    failedPage.complete();
+    await _pumpFrames(tester);
+    expect(find.text(warning), findsOneWidget);
+    expect(cache.getFullCacheStatus(folder).completedAt, published);
+    expect(cache.getCachedPage(folder, 1)!.comics.single.id, 'old-1');
+
+    latePage.complete();
+    await _pumpFrames(tester);
+    expect(find.text(warning), findsOneWidget);
+    expect(calls, [1, 2, 3, 4, 5]);
+    await tester.pump(const Duration(seconds: 2));
+    expect(find.text(warning), findsNothing);
+  });
+
+  testWidgets(
+    'collection resume keeps its page and an external addition reopens its homepage',
+    (tester) async {
+      const source = 'atomic-favorites-ui';
+      const folder = NetworkFavoriteFolderRef(sourceKey: source, folderId: '');
+      var ids = ['first-book', 'second-book'];
+      final calls = <int>[];
+      final data = FavoriteData(
+        key: source,
+        title: source,
+        multiFolder: false,
+        loadComic: (_, [folder]) async => throw StateError('Legacy page load'),
+        loadNext: null,
+        loadCachePage: (page, _, total) async {
+          calls.add(page);
+          return Res(
+            FavoriteCachePage(
+              [_comic(source, ids[page - 1])],
+              ids.length,
+              ids.length,
+            ),
+          );
+        },
+      );
+      await tester.runAsync(
+        () => cache
+            .cacheAllPages(data, folder, isCanceled: () => false)
+            .drain<void>(),
+      );
+      calls.clear();
+      final bucket = PageStorageBucket();
+      await pumpSource(tester, data, bucket, key: UniqueKey());
+      await showPageTwo(tester);
+      expect(calls, [1]);
+
+      final detail = App.rootNavigatorKey.currentState!.push<void>(
+        MaterialPageRoute(builder: (_) => const Scaffold(body: Text('detail'))),
+      );
+      await tester.pumpAndSettle();
+      cache.collections.recordChange(folder, 'second-book', false, null);
+      App.rootNavigatorKey.currentState!.pop();
+      await detail;
+      await tester.pumpAndSettle();
+      expect(find.text('Page 2 / 2'), findsOneWidget);
+      expect(find.text('second-book'), findsNothing);
+      expect(calls, [1]);
+
+      final b = _pagingData('other-favorites-ui', {
+        1: [_comic('other-favorites-ui', 'other-book')],
+      }, {});
+      await pumpSource(tester, b, bucket, key: UniqueKey());
+      cache.collections.recordChange(
+        folder,
+        'new-book',
+        true,
+        _comic(source, 'new-book'),
+      );
+      ids = ['first-book', 'new-book'];
+      await pumpSource(tester, data, bucket, key: UniqueKey());
+      expect(find.text('Page 1 / 2'), findsOneWidget);
+      expect(find.text('new-book'), findsOneWidget);
+      expect(calls, [1, 1]);
+      await tester.pump(const Duration(milliseconds: 420));
+      await _pumpFrames(tester);
+      expect(calls, [1, 1, 2]);
+      expect(find.text('Page 1 / 2'), findsOneWidget);
+      expect(find.text('new-book'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
 
   testWidgets(
     'cache notification keeps page two and explicit refresh targets it',
@@ -507,6 +632,51 @@ void main() {
 
     expect(find.text('Page 2 / ?'), findsOneWidget);
     expect(calls, ['cursor-1']);
+  });
+
+  testWidgets('snapshot cursor browsing follows only the selected folder', (
+    tester,
+  ) async {
+    const source = 'cursor-snapshot-ui';
+    final calls = <(String, String?)>[];
+    final previousDelay = cache.collections.settleDelay;
+    cache.collections.settleDelay = const Duration(minutes: 1);
+    addTearDown(() => cache.collections.settleDelay = previousDelay);
+    final data = FavoriteData(
+      key: source,
+      title: source,
+      multiFolder: true,
+      loadComic: null,
+      loadFolders: ([_]) async =>
+          const Res({'0': 'Category A', '1': 'Category B'}),
+      loadNext: (_, [folder]) async => throw StateError('Legacy request'),
+      loadCacheNext: (next, folder) async {
+        calls.add((folder, next));
+        return Res(
+          FavoriteCachePage(
+            [_comic(source, '$folder-${next ?? 'home'}')],
+            null,
+            null,
+            next: next == null ? '$folder-tail' : null,
+          ),
+        );
+      },
+    );
+    await cache.refreshFolders(data);
+    await pumpSource(tester, data, PageStorageBucket());
+    await tester.tap(find.text('Category A'));
+    await tester.pumpAndSettle();
+    expect(find.text('Page 1 / ?'), findsOneWidget);
+    await tester.tap(find.text('Next'));
+    await _pumpFrames(tester);
+    expect(find.text('Page 2 / 2'), findsOneWidget);
+    expect(calls, [('0', null), ('0', '0-tail')]);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Category B'));
+    await tester.pumpAndSettle();
+    expect(calls, [('0', null), ('0', '0-tail'), ('1', null)]);
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets('different favorite folders do not share page storage', (

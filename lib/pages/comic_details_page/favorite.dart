@@ -4,12 +4,14 @@ class _FavoritePanel extends StatefulWidget {
   const _FavoritePanel({
     required this.cid,
     required this.source,
+    required this.preview,
     required this.isFavorite,
     required this.onFavorite,
   });
 
   final String cid;
   final ComicSource source;
+  final Comic preview;
   final bool isFavorite;
   final ValueChanged<bool> onFavorite;
 
@@ -41,7 +43,8 @@ class _FavoritePanelState extends State<_FavoritePanel> {
     }
     _folders = {
       for (final folder in cache.getCachedFolders(_data.key))
-        folder.folderId: folder.title ?? folder.folderId,
+        if (folder.folderId != _data.cacheAllFolder)
+          folder.folderId: folder.title ?? folder.folderId,
     };
     if (_data.loadFolders == null || !widget.source.isLogged) {
       setState(() => _loading = false);
@@ -59,7 +62,7 @@ class _FavoritePanelState extends State<_FavoritePanel> {
       return;
     }
     setState(() {
-      _folders = result.data;
+      _folders = Map.of(result.data)..remove(_data.cacheAllFolder);
       // Only trust the membership list when the source actually returned
       // one; otherwise keep the device-cache value so already-favorited
       // folders do not suddenly show as "Add". An empty report is also
@@ -86,6 +89,7 @@ class _FavoritePanelState extends State<_FavoritePanel> {
       ),
       comicId: widget.cid,
       isAdding: isAdding,
+      comic: widget.preview,
     );
     if (!mounted) return;
     if (result.error) {

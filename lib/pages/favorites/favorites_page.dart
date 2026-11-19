@@ -455,10 +455,12 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
   GlobalKey<ComicListState> _comicListKey = GlobalKey<ComicListState>();
   final _searchController = TextEditingController();
   final _searchFocusNode = FocusNode();
-  List<FavoriteItem>? _searchResults;
+  List<Comic>? _searchResults;
   bool _fullCacheRunning = false;
   bool _searchExpanded = false;
   late int _cacheGeneration;
+  FavoriteCollectionVisit? _visit;
+  bool _routeVisible = false;
 
   bool get _usesPage => widget.data.loadComic != null;
 
@@ -473,10 +475,78 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
     _searchController.addListener(_onFilterChanged);
     _cache.addListener(_onCacheChanged);
     _cache.favoriteCoverChanges.addListener(_onFavoriteCoverChanged);
+    _cache.collections.mutations.addListener(_onCollectionMutation);
+    _openCollection();
+  }
+
+  void _openCollection({bool restart = false, bool usePublished = false}) {
+    final previous = _visit;
+    if (!widget.data.usesCollectionCache) {
+      _visit = null;
+    } else {
+      _visit = _cache.collections.open(
+        widget.data,
+        widget.folder,
+        restart: restart,
+        usePublished: usePublished,
+      );
+    }
+    if (previous != null && previous != _visit) {
+      _cache.collections.hide(previous);
+    }
+    if (_visit case final visit? when _routeVisible) {
+      _cache.collections.show(visit);
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final visible =
+        (ModalRoute.isCurrentOf(context) ?? true) &&
+        TickerMode.valuesOf(context).enabled;
+    if (_routeVisible == visible) return;
+    _routeVisible = visible;
+    if (visible) {
+      _openCollection();
+    } else if (_visit case final visit?) {
+      _cache.collections.hide(visit);
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _CachedFavoriteFolderPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.data != widget.data || oldWidget.folder != widget.folder) {
+      _openCollection();
+    }
+  }
+
+  void _onCollectionMutation() {
+    final visit = _visit;
+    if (!mounted || visit == null) return;
+    if (_routeVisible && !visit.isCurrent) {
+      _openCollection(restart: true);
+      _comicListKey = GlobalKey<ComicListState>();
+    }
+    if (_routeVisible && identical(visit, _visit) && visit.takeCacheWarning()) {
+      _showCacheWarning();
+    }
+    setState(() {});
+  }
+
+  void _showCacheWarning() {
+    showToast(
+      message: 'Could not cache favorites. Try again later.'.tl,
+      context: context,
+      icon: const Icon(Icons.warning_amber_rounded),
+    );
   }
 
   @override
   void dispose() {
+    if (_visit case final visit?) _cache.collections.hide(visit);
+    _cache.collections.mutations.removeListener(_onCollectionMutation);
     _searchController
       ..removeListener(_onFilterChanged)
       ..dispose();
@@ -507,13 +577,15 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
   void _onCacheChanged() {
     if (!mounted) return;
     final generation = _cache.cacheGeneration;
-    if (generation != _cacheGeneration) {
+    if (generation != _cacheGeneration || _visit?.isCurrent == false) {
       _cacheGeneration = generation;
+      _openCollection(restart: true);
       _comicListKey = GlobalKey<ComicListState>();
       _searchResults = null;
       setState(() {});
       return;
     }
+    if (_visit != null && _searchResults != null) return;
     _updateSearchResults();
   }
 
@@ -526,6 +598,25 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
     }
     final listState = _comicListKey.currentState;
     if (listState == null) return;
+    if (_visit != null) {
+      listState.updateComicCovers(change.covers);
+      if (_searchResults case final results?) {
+        setState(() {
+          _searchResults = [
+            for (final item in results)
+              if (change.covers[item.id] case final cover?
+                  when cover != item.cover)
+                Comic.fromJson({
+                  ...item.toJson(),
+                  'cover': cover,
+                }, item.sourceKey)
+              else
+                item,
+          ];
+        });
+      }
+      return;
+    }
     final changedIds = change.covers.keys.toSet();
     for (final page in listState.loadedPagesContainingAnyComicIds(changedIds)) {
       final cached = _cache.getCachedPageByIndex(widget.folder, page);
@@ -537,6 +628,11 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
   }
 
   void _updateSearchResults() {
+    if (_visit != null &&
+        !_cache.getFullCacheStatus(widget.folder).isComplete) {
+      if (mounted) setState(() => _searchResults = null);
+      return;
+    }
     final results = _isSearching
         ? _cache.searchCachedComics(widget.folder, _searchController.text)
         : null;
@@ -555,6 +651,14 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
   }
 
   Future<void> _refresh() async {
+    if (_visit != null) {
+      setState(() {
+        _openCollection(restart: true);
+        _comicListKey = GlobalKey<ComicListState>();
+        _searchController.clear();
+      });
+      return;
+    }
     final listState = _comicListKey.currentState;
     final page = listState?.currentPage ?? 1;
     final requestToken = listState?.currentRequestToken;
@@ -645,8 +749,14 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
     }
     if (!mounted || canceled) return;
     if (error != null) {
-      context.showMessage(message: error);
+      _showCacheWarning();
     } else if (completed) {
+      if (_visit != null) {
+        setState(() {
+          _openCollection(restart: true, usePublished: true);
+          _comicListKey = GlobalKey<ComicListState>();
+        });
+      }
       context.showMessage(message: 'Favorites cached'.tl);
     }
   }
@@ -662,9 +772,21 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
         (widget.data.loadComic != null || widget.data.loadNext != null) &&
         !_fullCacheRunning;
     final isSearching = _isSearching;
+    final visit = _visit;
+    final preparingSearch =
+        visit != null &&
+        isSearching &&
+        !_cache.getFullCacheStatus(widget.folder).isComplete;
     final searchResults = isSearching
-        ? (_searchResults ??
-              _cache.searchCachedComics(widget.folder, _searchController.text))
+        ? (preparingSearch
+                  ? const <Comic>[]
+                  : _searchResults ??
+                        _cache.searchCachedComics(
+                          widget.folder,
+                          _searchController.text,
+                        ))
+              .where((comic) => visit?.wasRemoved(comic.id) != true)
+              .toList()
         : null;
     final cachedComicCount = _cache.countCachedComics(widget.folder);
     final comicList = ComicList(
@@ -745,7 +867,23 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
       ),
       errorLeading: Appbar(title: Text(title)),
       staticComics: searchResults,
-      loadPage: widget.data.loadComic == null
+      staticEmptyMessage: preparingSearch
+          ? (visit.cacheFailed
+                ? 'Could not prepare favorites. Cache all favorites to retry.'
+                      .tl
+                : 'Preparing favorites for search'.tl)
+          : null,
+      firstPagePinnedComics: visit?.recent ?? const [],
+      onFirstPageShown: visit?.markRecentShown,
+      badgeBuilder: visit == null
+          ? null
+          : (comic) => visit.isRecent(comic.id) ? 'Just added'.tl : null,
+      comicFilter: visit == null
+          ? null
+          : (comic) => !visit.wasRemoved(comic.id),
+      loadPage: visit != null
+          ? visit.loadPage
+          : widget.data.loadComic == null
           ? null
           : (page) async {
               final result = await _cache.loadCachedThenRefreshPage(
@@ -761,7 +899,7 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
                     )
                   : Res.error(result.errorMessage!);
             },
-      loadNext: widget.data.loadNext == null
+      loadNext: visit != null || widget.data.loadNext == null
           ? null
           : (next) async {
               final result = await _cache.loadCachedThenRefreshNextPage(
@@ -815,8 +953,13 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
         widget.folder.sourceKey,
         widget.folder.folderId,
         _cacheGeneration,
+        // Use a separate PageStorage namespace when an explicit opening starts
+        // over on page one. Resuming a visit keeps the same key.
       )),
-      child: comicList,
+      child: KeyedSubtree(
+        key: visit == null ? null : PageStorageKey(visit.pageStorageKey),
+        child: comicList,
+      ),
     );
   }
 }

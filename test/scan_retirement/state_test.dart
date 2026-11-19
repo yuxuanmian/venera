@@ -83,6 +83,8 @@ void main() {
           'full_cache_at',
           'full_cache_pages',
           'full_cache_comics',
+          'last_probe_at',
+          'cache_scope',
         ],
         'favorite_pages': [
           'source_key',
@@ -113,6 +115,15 @@ void main() {
           'check_suspect_gone',
         ],
         'favorite_membership': ['source_key', 'folder_id', 'comic_id'],
+        'favorite_pending_changes': [
+          'source_key',
+          'folder_id',
+          'comic_id',
+          'is_added',
+          'comic_json',
+          'needs_sync',
+          'seen',
+        ],
         'comic_check_state': [
           'source_key',
           'comic_id',
@@ -281,6 +292,7 @@ void main() {
         'favorite_pages': ['source_key', 'folder_id', 'request_token'],
         'favorite_items': ['source_key', 'folder_id', 'page_index', 'comic_id'],
         'favorite_membership': ['source_key', 'folder_id', 'comic_id'],
+        'favorite_pending_changes': ['source_key', 'folder_id', 'comic_id'],
         'comic_check_state': ['source_key', 'comic_id'],
         'favorite_update_scan_state': ['source_key', 'folder_id'],
         'scan_queue': ['run_id', 'source_key', 'comic_id'],
