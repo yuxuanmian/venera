@@ -630,6 +630,15 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       );
     ''');
     _db.execute('''
+      CREATE TABLE IF NOT EXISTS favorite_source_unread (
+        source_key TEXT NOT NULL,
+        comic_id TEXT NOT NULL,
+        is_unread INTEGER NOT NULL,
+        request_order INTEGER NOT NULL,
+        PRIMARY KEY (source_key, comic_id)
+      );
+    ''');
+    _db.execute('''
       CREATE TABLE IF NOT EXISTS favorite_pages (
         source_key TEXT NOT NULL,
         folder_id TEXT NOT NULL,
@@ -1069,6 +1078,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     _db.execute('BEGIN');
     try {
       _db.execute('DELETE FROM favorite_items');
+      _db.execute('DELETE FROM favorite_source_unread');
       _db.execute('DELETE FROM favorite_pending_changes');
       _db.execute('DELETE FROM favorite_pages');
       _db.execute('DELETE FROM favorite_folders');
@@ -3379,6 +3389,9 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   /// reset of what the app has learned about the content.
   void _clearAccountScopedFavoriteCache(String sourceKey) {
     _db.execute('DELETE FROM favorite_items WHERE source_key = ?', [sourceKey]);
+    _db.execute('DELETE FROM favorite_source_unread WHERE source_key = ?', [
+      sourceKey,
+    ]);
     _db.execute('DELETE FROM favorite_pages WHERE source_key = ?', [sourceKey]);
     _db.execute('DELETE FROM favorite_pending_changes WHERE source_key = ?', [
       sourceKey,

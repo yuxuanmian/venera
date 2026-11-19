@@ -5,14 +5,21 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:venera/components/components.dart';
-import 'package:sqlite3/sqlite3.dart';
+import 'package:sqlite3/sqlite3.dart' show sqlite3;
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/res.dart';
+import 'package:venera/foundation/scan/models.dart';
+import 'package:venera/foundation/scan/source_adapter.dart';
+import 'package:venera/foundation/tracking/judgment.dart';
+import 'package:venera/foundation/tracking/judgment_state.dart';
+import 'package:venera/foundation/tracking/sqlite_judgment_repository.dart';
 import 'package:venera/pages/favorites/favorites_page.dart';
 import 'package:venera/utils/translations.dart';
+
+import 'scan_kernel/fakes.dart';
 
 String? _testImagePath;
 
@@ -58,6 +65,7 @@ void main() {
   setUpAll(() async {
     await AppTranslation.init();
     tempDir = await Directory.systemTemp.createTemp('venera-favorites-ui-');
+    App.dataPath = tempDir.path;
     databasePath =
         '${tempDir.path}${Platform.pathSeparator}network-favorites.db';
     final imageFile = File('${tempDir.path}${Platform.pathSeparator}cover.png');
@@ -82,6 +90,7 @@ void main() {
   tearDownAll(() async {
     appdata.settings['comicListDisplayMode'] = oldListMode;
     appdata.settings['comicDisplayMode'] = oldComicMode;
+    await judgmentStateRepository.close();
     cache.close();
     try {
       await tempDir.delete(recursive: true);
@@ -124,6 +133,124 @@ void main() {
     await _pumpFrames(tester);
     expect(find.text('Page 2 / ?'), findsOneWidget);
   }
+
+  Future<void> storeDetectedUpdate(String source, String comic) async {
+    await judgmentStateRepository.applyBatch([
+      JudgmentState(
+        sourceKey: source,
+        comicId: comic,
+        lastDecision: JudgmentConclusion.changed,
+        lastReason: JudgmentReason.different,
+        decidedAtMs: 1,
+        hasNewUpdate: true,
+      ),
+    ]);
+  }
+
+  testWidgets('favorites show a detected update in both cover layouts', (
+    tester,
+  ) async {
+    const source = 'detected-update-ui';
+    const longTitle =
+        'A very long comic title that keeps wrapping after its update dot';
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(360, 740);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    await tester.runAsync(() => storeDetectedUpdate(source, 'changed'));
+    final pages = {
+      1: <Comic>[
+        Comic.fromJson({
+          ..._comic(source, 'changed').toJson(),
+          'title': longTitle,
+        }, source),
+        _comic(source, 'unchanged'),
+      ],
+    };
+    final data = _pagingData(source, pages, {});
+    addTearDown(() => appdata.settings['comicDisplayMode'] = 'detailed');
+    for (final mode in ['detailed', 'brief']) {
+      appdata.settings['comicDisplayMode'] = mode;
+      await pumpSource(tester, data, PageStorageBucket(), key: UniqueKey());
+      expect(find.text('NEW'), findsOneWidget);
+      final title = tester.widget<Text>(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is Text &&
+              widget.textSpan?.toPlainText(includePlaceholders: false) ==
+                  longTitle,
+        ),
+      );
+      final firstSpan = (title.textSpan! as TextSpan).children!.first;
+      expect(firstSpan, isA<WidgetSpan>());
+      expect((firstSpan as WidgetSpan).alignment, PlaceholderAlignment.middle);
+      final tiles = tester.widgetList<ComicTile>(find.byType(ComicTile));
+      expect(
+        tiles
+            .where((tile) => tile.showUpdateRibbon)
+            .map((tile) => tile.comic.id),
+        ['changed'],
+      );
+    }
+  });
+
+  testWidgets('source unread badges also apply to cached favorite search', (
+    tester,
+  ) async {
+    const sourceKey = 'source-unread-update-ui';
+    const folder = NetworkFavoriteFolderRef(sourceKey: sourceKey, folderId: '');
+    final data = FavoriteData(
+      key: sourceKey,
+      title: sourceKey,
+      multiFolder: false,
+      loadComic: (_, [folder]) async => throw StateError('Legacy page load'),
+      loadNext: null,
+      loadCachePage: (_, _, _) async => Res(
+        FavoriteCachePage(
+          [
+            _comic(sourceKey, 'book-updated'),
+            _comic(sourceKey, 'book-read'),
+            _comic(sourceKey, 'book-unknown'),
+          ],
+          1,
+          3,
+          sourceUnread: const {'book-updated': true, 'book-read': false},
+        ),
+      ),
+    );
+    final source = makeScanTestSource(
+      sourceKey,
+      favoriteData: data,
+      scan: ScanCapabilities.supported(
+        primary: ScanProducer.collection,
+        collection: ScanCapability.collection(
+          (_, _, _) async => const {},
+          evidenceSchema: '{"sourceunread":"is_new"}',
+        ),
+      ),
+    );
+    ComicSourceManager().add(source);
+    addTearDown(() => ComicSourceManager().remove(sourceKey));
+    await tester.runAsync(() async {
+      await storeDetectedUpdate(sourceKey, 'book-read');
+      await storeDetectedUpdate(sourceKey, 'book-unknown');
+      await cache
+          .cacheAllPages(data, folder, isCanceled: () => false)
+          .drain<void>();
+    });
+    await pumpSource(tester, data, PageStorageBucket());
+    expect(find.text('NEW'), findsOneWidget);
+    await tester.tap(find.byTooltip('Search'));
+    await _pumpFrames(tester);
+    await tester.enterText(find.byType(TextField), 'book');
+    await _pumpFrames(tester);
+    expect(find.text('NEW'), findsOneWidget);
+    final tiles = tester.widgetList<ComicTile>(find.byType(ComicTile));
+    expect(
+      tiles.where((tile) => tile.showUpdateRibbon).map((tile) => tile.comic.id),
+      ['book-updated'],
+    );
+  });
 
   testWidgets('a failed cache batch shows one warning and keeps the snapshot', (
     tester,

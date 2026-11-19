@@ -38,6 +38,63 @@ void main() {
     NetworkFavoriteFolderRef folder,
   ) => cache.cacheAllPages(remote.data, folder, isCanceled: () => false).last;
 
+  test('source badges persist independently of the favorite snapshot', () async {
+    final remote = _Remote('a', ['one', 'two']);
+    final source = makeScanTestSource(
+      'a',
+      favoriteData: remote.data,
+      scan: ScanCapabilities.supported(
+        primary: ScanProducer.collection,
+        collection: ScanCapability.collection(
+          (_, _, _) async => const {},
+          evidenceSchema: '{"sourceunread":"is_new"}',
+        ),
+      ),
+    );
+    ComicSourceManager().add(source);
+    addTearDown(() => ComicSourceManager().remove(source.key));
+    expect((await publish(remote, a)).isComplete, isTrue);
+    final completed = cache.getFullCacheStatus(a).completedAt;
+    cache.takeFollowUpdateChangeBatch();
+
+    remote.calls.clear();
+    remote.sourceUnread = {'one': true};
+    await cache.collections.open(remote.data, a).loadPage(1);
+    expect(cache.collections.readSourceUnreadIds('a'), {'one'});
+    expect(remote.calls, [1]);
+    expect(cache.getFullCacheStatus(a).completedAt, completed);
+    expect(cache.takeFollowUpdateChangeBatch().isEmpty, isTrue);
+
+    remote.sourceUnread = {};
+    cache.close();
+    await openDb();
+    await cache.collections.open(remote.data, a).loadPage(1);
+    expect(cache.collections.readSourceUnreadIds('a'), {'one'});
+
+    // Both visits fetch the same page. The older affirmative reply lands last.
+    remote.sourceUnread = {'one': true};
+    final late = remote.hold(1);
+    final old = cache.collections
+        .open(remote.data, a, restart: true)
+        .loadPage(1);
+    remote.sourceUnread = {'one': false};
+    await cache.collections.open(remote.data, a, restart: true).loadPage(1);
+    late.complete();
+    expect((await old).success, isTrue);
+    expect(cache.collections.readSourceUnreadIds('a'), isEmpty);
+
+    remote.sourceUnread = {'one': true};
+    await cache.collections.open(remote.data, a, restart: true).loadPage(1);
+    final oldAccount = remote.hold(1);
+    final inFlight = cache.collections
+        .open(remote.data, a, restart: true)
+        .loadPage(1);
+    cache.invalidateFavoriteSessionForSource('a');
+    oldAccount.complete();
+    expect((await inFlight).error, isTrue);
+    expect(cache.collections.readSourceUnreadIds('a'), isEmpty);
+  });
+
   test(
     'publishes all pages once and an unchanged opening only loads page one',
     () async {
@@ -382,6 +439,7 @@ class _Remote {
   final bool knownTotal;
   final List<String> cacheSettings;
   final calls = <int>[];
+  Map<String, bool> sourceUnread = {};
   final _holds = <int, Completer<void>>{};
 
   late final data = FavoriteData(
@@ -395,6 +453,7 @@ class _Remote {
     addOrDelFavorite: (_, __, ___, ____) async => const Res(true),
     loadCachePage: (page, _, total) async {
       calls.add(page);
+      final unread = sourceUnread;
       if (_holds.remove(page) case final hold?) await hold.future;
       expect(total, page == 1 || !knownTotal ? isNull : ids.length);
       return Res(
@@ -402,6 +461,7 @@ class _Remote {
           page <= ids.length ? [comic(ids[page - 1])] : [],
           ids.length,
           knownTotal ? ids.length : null,
+          sourceUnread: unread,
         ),
       );
     },

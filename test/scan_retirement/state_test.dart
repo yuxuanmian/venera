@@ -115,6 +115,12 @@ void main() {
           'check_suspect_gone',
         ],
         'favorite_membership': ['source_key', 'folder_id', 'comic_id'],
+        'favorite_source_unread': [
+          'source_key',
+          'comic_id',
+          'is_unread',
+          'request_order',
+        ],
         'favorite_pending_changes': [
           'source_key',
           'folder_id',

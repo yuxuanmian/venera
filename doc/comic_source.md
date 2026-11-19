@@ -614,6 +614,9 @@ cross-source mapping、per-comic detail filtering、取消参数，以及任何 
         // For cursor sources, keep loadNext for older clients and opt in with
         // loadCacheNext(next, folder) => {comics, next, total?} instead.
         // Return next: null explicitly at the end.
+        // A source that declares sourceUnread can return sourceUnread?:
+        // { [comicId]: boolean } with either cache loader. It only controls
+        // favorite-card badges. Omit unknown values, and include false to clear.
         // cacheSettings: ['favoriteSort'], // options that change the list
         // cacheAccountSetting: 'domain', // optional account boundary option
         // cacheAllFolder: '-1', // optional aggregate folder, not an add target

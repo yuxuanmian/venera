@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart' show setEquals;
 import 'package:flutter/material.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
@@ -9,6 +12,8 @@ import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_updates.dart';
 import 'package:venera/foundation/follow_updates_service.dart';
 import 'package:venera/foundation/res.dart';
+import 'package:venera/foundation/tracking/judgment_service.dart';
+import 'package:venera/foundation/tracking/sqlite_judgment_repository.dart';
 import 'package:venera/utils/translations.dart';
 
 const _favoriteSidebarWidth = 256.0;
@@ -461,6 +466,9 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
   late int _cacheGeneration;
   FavoriteCollectionVisit? _visit;
   bool _routeVisible = false;
+  Set<String> _detectedUpdates = const {};
+  int _updateRequest = 0;
+  late final StreamSubscription<void> _judgmentBatches;
 
   bool get _usesPage => widget.data.loadComic != null;
 
@@ -476,6 +484,11 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
     _cache.addListener(_onCacheChanged);
     _cache.favoriteCoverChanges.addListener(_onFavoriteCoverChanged);
     _cache.collections.mutations.addListener(_onCollectionMutation);
+    _judgmentBatches = judgmentService.events.listen((batch) {
+      if (batch.rows.any((row) => row.sourceKey == widget.data.key)) {
+        unawaited(_refreshDetectedUpdates());
+      }
+    });
     _openCollection();
   }
 
@@ -509,6 +522,7 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
     _routeVisible = visible;
     if (visible) {
       _openCollection();
+      unawaited(_refreshDetectedUpdates());
     } else if (_visit case final visit?) {
       _cache.collections.hide(visit);
     }
@@ -519,6 +533,27 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.data != widget.data || oldWidget.folder != widget.folder) {
       _openCollection();
+    }
+    if (oldWidget.data.key != widget.data.key) {
+      _detectedUpdates = const {};
+      unawaited(_refreshDetectedUpdates());
+    }
+  }
+
+  Future<void> _refreshDetectedUpdates() async {
+    final sourceKey = widget.data.key;
+    if (!_routeVisible || sourceDeclaresUnreadSignal(sourceKey)) return;
+    final request = ++_updateRequest;
+    try {
+      final ids = await judgmentStateRepository.readUnreadComicIds(sourceKey);
+      if (mounted &&
+          request == _updateRequest &&
+          sourceKey == widget.data.key &&
+          !setEquals(ids, _detectedUpdates)) {
+        setState(() => _detectedUpdates = ids);
+      }
+    } catch (_) {
+      // The update indicator is optional when the judgment store is unavailable.
     }
   }
 
@@ -553,6 +588,7 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
     _searchFocusNode.dispose();
     _cache.removeListener(_onCacheChanged);
     _cache.favoriteCoverChanges.removeListener(_onFavoriteCoverChanged);
+    unawaited(_judgmentBatches.cancel());
     super.dispose();
   }
 
@@ -766,6 +802,9 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
     final title = favoriteFolderDisplayTitle(
       widget.folder.title ?? widget.data.title,
     );
+    final updateIds = sourceDeclaresUnreadSignal(widget.data.key)
+        ? _cache.collections.readSourceUnreadIds(widget.data.key)
+        : _detectedUpdates;
     final source = ComicSource.find(widget.data.key);
     final canCacheAll =
         source?.isLogged == true &&
@@ -878,6 +917,7 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
       badgeBuilder: visit == null
           ? null
           : (comic) => visit.isRecent(comic.id) ? 'Just added'.tl : null,
+      updateBadgeBuilder: (comic) => updateIds.contains(comic.id),
       comicFilter: visit == null
           ? null
           : (comic) => !visit.wasRemoved(comic.id),

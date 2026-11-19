@@ -16,12 +16,19 @@ typedef FavoriteCachePageLoader =
     );
 
 class FavoriteCachePage {
-  const FavoriteCachePage(this.comics, this.maxPage, this.total, {this.next});
+  const FavoriteCachePage(
+    this.comics,
+    this.maxPage,
+    this.total, {
+    this.next,
+    this.sourceUnread = const {},
+  });
 
   final List<Comic> comics;
   final int? maxPage;
   final int? total;
   final String? next;
+  final Map<String, bool> sourceUnread;
 }
 
 typedef FavoriteCacheCursorLoader =

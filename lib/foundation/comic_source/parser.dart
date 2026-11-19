@@ -1789,15 +1789,23 @@ class ComicSourceParser {
             (res['total'] != null && res['total'] is! int)) {
           return const Res.error('Invalid favorite cache page');
         }
+        final comics = [
+          for (final item in res['comics']) Comic.fromJson(item, _sourceKey!),
+        ];
+        final unread = res['sourceUnread'];
         return Res(
           FavoriteCachePage(
-            [
-              for (final item in res['comics'])
-                Comic.fromJson(item, _sourceKey!),
-            ],
+            comics,
             cursor ? null : res['maxPage'],
             res['total'],
             next: cursor ? res['next'] : null,
+            sourceUnread: unread is Map
+                ? {
+                    for (final comic in comics)
+                      if (unread[comic.id] case final bool value)
+                        comic.id: value,
+                  }
+                : const {},
           ),
         );
       } catch (e) {

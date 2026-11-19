@@ -49,6 +49,7 @@ class FavoriteCollectionCache {
   _FavoriteCollectionSync? _sync;
   Timer? _settle;
   bool _settled = false;
+  int? _unreadRequestOrder;
 
   @visibleForTesting
   Duration settleDelay = const Duration(milliseconds: 400);
@@ -146,7 +147,10 @@ class FavoriteCollectionCache {
       _settled = false;
       _settle?.cancel();
     }
-    if (sourceKey == null) _settle?.cancel();
+    if (sourceKey == null) {
+      _settle?.cancel();
+      _unreadRequestOrder = null;
+    }
     if (_sync case final run? when matches(run.fetch.folder)) {
       _finish(run, canceled: true);
     }
@@ -155,6 +159,69 @@ class FavoriteCollectionCache {
   void settingsChanged(String sourceKey) {
     invalidate(sourceKey);
     mutations.value++;
+  }
+
+  Set<String> readSourceUnreadIds(String sourceKey) => {
+    for (final row in _cache._db.select(
+      '''SELECT comic_id FROM favorite_source_unread
+         WHERE source_key = ? AND is_unread = 1''',
+      [sourceKey],
+    ))
+      row['comic_id'] as String,
+  };
+
+  int _beginUnreadRequest() {
+    // The stored order makes request ordering monotonic across App restarts.
+    final previous =
+        _unreadRequestOrder ??
+        _cache._db.select('''
+          SELECT COALESCE(MAX(request_order), 0) AS latest FROM favorite_source_unread
+        ''').single['latest']
+            as int;
+    return _unreadRequestOrder = previous + 1;
+  }
+
+  void _recordSourceUnread(
+    String sourceKey,
+    int order,
+    FavoriteCachePage page,
+  ) {
+    if (page.sourceUnread.isEmpty) return;
+    final db = _cache._db;
+    var changed = false;
+    db.execute('BEGIN');
+    try {
+      for (final comic in page.comics) {
+        final unread = page.sourceUnread[comic.id];
+        if (unread == null) continue;
+        final previous = db
+            .select(
+              '''SELECT is_unread, request_order FROM favorite_source_unread
+             WHERE source_key = ? AND comic_id = ?''',
+              [sourceKey, comic.id],
+            )
+            .firstOrNull;
+        if (previous != null && (previous['request_order'] as int) >= order) {
+          continue;
+        }
+        db.execute(
+          '''INSERT OR REPLACE INTO favorite_source_unread
+             (source_key, comic_id, is_unread, request_order) VALUES (?, ?, ?, ?)''',
+          [sourceKey, comic.id, unread ? 1 : 0, order],
+        );
+        if ((previous?['is_unread'] == 1) != unread) changed = true;
+      }
+      db.execute('COMMIT');
+    } catch (error, stackTrace) {
+      db.execute('ROLLBACK');
+      Log.error(
+        'Favorite badges',
+        'Unable to save source unread state: $error',
+        stackTrace,
+      );
+      return;
+    }
+    if (changed) mutations.value++;
   }
 
   List<Row> _pending(NetworkFavoriteFolderRef folder) => _cache._db.select(
@@ -746,6 +813,9 @@ class _FavoritePages {
             if (cursor == null) return const Res.error('End of favorites');
           }
         }
+        final unreadOrder = sourceDeclaresUnreadSignal(folder.sourceKey)
+            ? cache.collections._beginUnreadRequest()
+            : null;
         final result = await Future.sync(
           () => usesCursor
               ? data.loadCacheNext!(cursor, folder.folderId)
@@ -789,6 +859,13 @@ class _FavoritePages {
         }
         if (!_discardBackground || _foreground.contains(page)) {
           pages[page] = value;
+          if (unreadOrder != null) {
+            cache.collections._recordSourceUnread(
+              folder.sourceKey,
+              unreadOrder,
+              value,
+            );
+          }
         }
         return result;
       } catch (error) {

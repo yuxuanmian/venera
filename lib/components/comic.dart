@@ -22,12 +22,45 @@ ImageProvider? _findImageProvider(Comic comic) {
   return image;
 }
 
+const _comicUpdateColor = Color(0xFFDF2B43);
+
+Widget _withComicUpdateDot(Text title, bool showDot) {
+  if (!showDot) return title;
+  return Text.rich(
+    TextSpan(
+      children: [
+        const WidgetSpan(
+          alignment: PlaceholderAlignment.middle,
+          child: Padding(
+            padding: EdgeInsetsDirectional.only(end: 6),
+            child: SizedBox.square(
+              dimension: 7,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _comicUpdateColor,
+                ),
+              ),
+            ),
+          ),
+        ),
+        TextSpan(text: title.data),
+      ],
+    ),
+    style: title.style,
+    maxLines: title.maxLines,
+    softWrap: title.softWrap,
+    overflow: title.overflow,
+  );
+}
+
 class ComicTile extends StatelessWidget {
   const ComicTile({
     super.key,
     required this.comic,
     this.enableLongPressed = true,
     this.badge,
+    this.showUpdateRibbon = false,
     this.rankingPlace,
     this.menuOptions,
     this.onTap,
@@ -40,6 +73,7 @@ class ComicTile extends StatelessWidget {
   final bool enableLongPressed;
 
   final String? badge;
+  final bool showUpdateRibbon;
 
   final int? rankingPlace;
 
@@ -205,13 +239,58 @@ class ComicTile extends StatelessWidget {
     return result;
   }
 
+  Widget _buildCover(BuildContext context, double coverWidth) {
+    // Narrow covers still need room for reading progress at the opposite corner.
+    final scale = math.min(1.0, coverWidth / 76);
+    return Stack(
+      children: [
+        Positioned.fill(child: buildImage(context)),
+        if (showUpdateRibbon)
+          Positioned(
+            top: 10 * scale,
+            right: -22 * scale,
+            child: IgnorePointer(
+              child: Semantics(
+                label: 'Has update'.tl,
+                excludeSemantics: true,
+                child: Transform.rotate(
+                  angle: math.pi / 4,
+                  child: ColoredBox(
+                    color: _comicUpdateColor,
+                    child: SizedBox(
+                      width: 72 * scale,
+                      height: 20 * scale,
+                      child: Center(
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: Text(
+                            'NEW',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 11 * scale,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
   Widget _buildDetailedMode(BuildContext context, Widget? medal) {
     return LayoutBuilder(
       builder: (context, constrains) {
-        final height = constrains.maxHeight - 16;
+        final coverWidth = (constrains.maxHeight - 16) * 0.68;
 
         Widget image = Container(
-          width: height * 0.68,
+          width: coverWidth,
           height: double.infinity,
           decoration: BoxDecoration(
             color: Theme.of(context).colorScheme.secondaryContainer,
@@ -225,7 +304,7 @@ class ComicTile extends StatelessWidget {
             ],
           ),
           clipBehavior: Clip.antiAlias,
-          child: Stack(children: [Positioned.fill(child: buildImage(context))]),
+          child: _buildCover(context, coverWidth),
         );
 
         if (heroID != null) {
@@ -251,6 +330,7 @@ class ComicTile extends StatelessWidget {
                     subtitle: comic.subtitle ?? '',
                     description: comic.description,
                     badge: badge ?? comic.language,
+                    showUpdateDot: showUpdateRibbon,
                     tags: comic.tags,
                     maxLines: 2,
                     enableTranslate:
@@ -271,8 +351,13 @@ class ComicTile extends StatelessWidget {
   }
 
   Widget _buildBriefMode(BuildContext context, Widget? medal) {
+    const horizontalPadding = 6.0;
     return LayoutBuilder(
       builder: (context, constraints) {
+        final coverWidth = math.max(
+          0.0,
+          constraints.maxWidth - 2 * horizontalPadding,
+        );
         Widget image = Container(
           decoration: BoxDecoration(
             color: context.colorScheme.secondaryContainer,
@@ -286,7 +371,7 @@ class ComicTile extends StatelessWidget {
             ],
           ),
           clipBehavior: Clip.antiAlias,
-          child: Stack(children: [Positioned.fill(child: buildImage(context))]),
+          child: _buildCover(context, coverWidth),
         );
 
         if (heroID != null) {
@@ -379,15 +464,18 @@ class ComicTile extends StatelessWidget {
               ),
               Padding(
                 padding: const EdgeInsets.fromLTRB(4, 4, 4, 0),
-                child: Text(
-                  comic.title.replaceAll('\n', ''),
-                  maxLines: 1,
-                  overflow: TextOverflow.clip,
-                  style: const TextStyle(fontWeight: FontWeight.w500),
+                child: _withComicUpdateDot(
+                  Text(
+                    comic.title.replaceAll('\n', ''),
+                    maxLines: 1,
+                    overflow: TextOverflow.clip,
+                    style: const TextStyle(fontWeight: FontWeight.w500),
+                  ),
+                  showUpdateRibbon,
                 ),
               ),
             ],
-          ).paddingHorizontal(6).paddingVertical(8),
+          ).paddingHorizontal(horizontalPadding).paddingVertical(8),
         );
       },
     );
@@ -516,6 +604,7 @@ class _ComicDescription extends StatelessWidget {
     required this.description,
     required this.enableTranslate,
     this.badge,
+    this.showUpdateDot = false,
     this.maxLines = 2,
     this.tags,
     this.rating,
@@ -525,6 +614,7 @@ class _ComicDescription extends StatelessWidget {
   final String subtitle;
   final String description;
   final String? badge;
+  final bool showUpdateDot;
   final List<String>? tags;
   final int maxLines;
   final bool enableTranslate;
@@ -541,12 +631,15 @@ class _ComicDescription extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        Text(
-          title.trim(),
-          style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 14.0),
-          maxLines: maxLines,
-          overflow: TextOverflow.ellipsis,
-          softWrap: true,
+        _withComicUpdateDot(
+          Text(
+            title.trim(),
+            style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 14.0),
+            maxLines: maxLines,
+            overflow: TextOverflow.ellipsis,
+            softWrap: true,
+          ),
+          showUpdateDot,
         ),
         if (subtitle != "")
           Text(
@@ -754,6 +847,7 @@ class SliverGridComics extends StatefulWidget {
     required this.comics,
     this.onLastItemBuild,
     this.badgeBuilder,
+    this.updateBadgeBuilder,
     this.rankingPlaces = const {},
     this.menuBuilder,
     this.onTap,
@@ -768,6 +862,7 @@ class SliverGridComics extends StatefulWidget {
   final void Function()? onLastItemBuild;
 
   final String? Function(Comic)? badgeBuilder;
+  final bool Function(Comic)? updateBadgeBuilder;
 
   /// Medal places keyed by the index in [comics], before blocked items are hidden.
   final Map<int, int> rankingPlaces;
@@ -848,6 +943,7 @@ class _SliverGridComicsState extends State<SliverGridComics> {
       selection: widget.selections,
       onLastItemBuild: widget.onLastItemBuild,
       badgeBuilder: widget.badgeBuilder,
+      updateBadgeBuilder: widget.updateBadgeBuilder,
       rankingPlaceAt: (index) => widget.rankingPlaces[_originalIndices[index]],
       menuBuilder: widget.menuBuilder,
       onTap: widget.onTap,
@@ -862,6 +958,7 @@ class _SliverGridComics extends StatelessWidget {
     required this.heroIDs,
     this.onLastItemBuild,
     this.badgeBuilder,
+    this.updateBadgeBuilder,
     required this.rankingPlaceAt,
     this.menuBuilder,
     this.onTap,
@@ -878,6 +975,7 @@ class _SliverGridComics extends StatelessWidget {
   final void Function()? onLastItemBuild;
 
   final String? Function(Comic)? badgeBuilder;
+  final bool Function(Comic)? updateBadgeBuilder;
   final int? Function(int index) rankingPlaceAt;
 
   final List<MenuEntry> Function(Comic)? menuBuilder;
@@ -900,6 +998,7 @@ class _SliverGridComics extends StatelessWidget {
         var comic = ComicTile(
           comic: comics[index],
           badge: badge,
+          showUpdateRibbon: updateBadgeBuilder?.call(comics[index]) ?? false,
           rankingPlace: rankingPlaceAt(index),
           menuOptions: menuBuilder?.call(comics[index]),
           onTap: onTap != null
@@ -970,6 +1069,7 @@ class ComicList extends StatefulWidget {
     this.errorLeading,
     this.menuBuilder,
     this.badgeBuilder,
+    this.updateBadgeBuilder,
     this.showRankingMedals = false,
     this.controller,
     this.refreshHandlerCallback,
@@ -994,6 +1094,7 @@ class ComicList extends StatefulWidget {
   final List<MenuEntry> Function(Comic)? menuBuilder;
 
   final String? Function(Comic comic)? badgeBuilder;
+  final bool Function(Comic comic)? updateBadgeBuilder;
 
   /// Show places one through three from the first page in source order.
   final bool showRankingMedals;
@@ -1292,6 +1393,7 @@ class ComicListState extends State<ComicList> {
       rankingPlaces: rankingPlaces,
       menuBuilder: widget.menuBuilder,
       badgeBuilder: widget.badgeBuilder,
+      updateBadgeBuilder: widget.updateBadgeBuilder,
       onLastItemBuild: onLastItemBuild,
     );
   }
@@ -1485,6 +1587,7 @@ class ComicListState extends State<ComicList> {
             comics: comics,
             menuBuilder: widget.menuBuilder,
             badgeBuilder: widget.badgeBuilder,
+            updateBadgeBuilder: widget.updateBadgeBuilder,
           ),
         if (widget.trailingSliver != null) widget.trailingSliver!,
       ],

@@ -193,6 +193,18 @@ class SqliteJudgmentRepository implements JudgmentStateRepository {
     }
   }
 
+  Future<Set<String>> readUnreadComicIds(String sourceKey) async {
+    await ensureOpen();
+    return {
+      for (final row in database.select(
+        '''SELECT comic_id FROM judgment_state
+           WHERE source_key = ? AND has_new_update != 0''',
+        [sourceKey],
+      ))
+        row['comic_id'] as String,
+    };
+  }
+
   Map<String, ({JudgmentState state, ComicScheduleInput input})>
   readComicRecoveryInputs() {
     final rows = database.select('''

@@ -143,6 +143,10 @@ class FavoriteCachePageSource extends ComicSource {
       comics: [new Comic({id: folder + page, title: "Favorite", cover: ""})],
       maxPage: 2,
       total: total ?? 19,
+      sourceUnread: Object.assign(Object.create(null), {
+        [folder + page]: page === 1,
+        unknown: true,
+      }),
     }),
   };
 }
@@ -157,9 +161,11 @@ class FavoriteCachePageSource extends ComicSource {
       final home = (await data.loadCachePage!(1, '', null)).data;
       expect(home.total, 19);
       expect(home.maxPage, 2);
+      expect(home.sourceUnread, {'1': true});
       final tail = (await data.loadCachePage!(2, '', home.total)).data;
       expect(tail.comics.single.id, '2');
       expect(tail.total, 19);
+      expect(tail.sourceUnread, {'2': false});
     },
     skip: _quickJsAvailable
         ? null
