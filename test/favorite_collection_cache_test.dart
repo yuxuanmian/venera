@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sqlite3/sqlite3.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/res.dart';
@@ -205,6 +206,92 @@ void main() {
     expect(aVisit.takeCacheWarning(), isFalse);
     cache.collections.hide(bVisit);
   });
+
+  test('opening updates keeps the hidden favorites sync running', () async {
+    cache.collections.settleDelay = const Duration(minutes: 1);
+    final remote = _Remote('a', ['one', 'two']);
+    final visit = cache.collections.open(remote.data, a);
+    final tail = remote.hold(2);
+    cache.collections.show(visit);
+    await visit.loadPage(1);
+    cache.collections.settleNow();
+    await _until(() => remote.calls.contains(2));
+
+    cache.collections.hide(visit);
+    final progress = await cache.collections.continueForUpdates(
+      remote.data,
+      isCanceled: () => false,
+    );
+    expect(progress, isNotNull);
+    cache.collections.settleNow();
+    tail.complete();
+
+    expect((await progress!.last).isComplete, isTrue);
+    expect(remote.calls, [1, 2]);
+    expect(cache.getFavoriteComicIds('a'), {'one', 'two'});
+  });
+
+  test(
+    'opening updates can join the directory request for an empty source',
+    () async {
+      final response = Completer<Res<Map<String, String>>>();
+      var requests = 0;
+      final data = FavoriteData(
+        key: 'a',
+        title: 'Remote favorites',
+        multiFolder: true,
+        loadComic: null,
+        loadNext: null,
+        loadFolders: ([_]) {
+          requests++;
+          return response.future;
+        },
+      );
+
+      final directoryRequest = cache.refreshFolders(data);
+      final updatesRequest = cache.refreshFolders(data);
+      expect(requests, 1);
+      expect(cache.hasLoadedFavoriteDirectory('a'), isFalse);
+
+      response.complete(const Res({}));
+      expect((await directoryRequest).data, isEmpty);
+      expect((await updatesRequest).data, isEmpty);
+      expect(cache.hasLoadedFavoriteDirectory('a'), isTrue);
+      cache.invalidateFavoriteSessionForSource('a');
+      expect(cache.hasLoadedFavoriteDirectory('a'), isFalse);
+    },
+  );
+
+  test(
+    'an unread probe reuses the first page when favorites changed',
+    () async {
+      final remote = _Remote('a', ['one', 'two']);
+      expect((await publish(remote, a)).isComplete, isTrue);
+      final db = sqlite3.open(path);
+      try {
+        db.execute('UPDATE favorite_folders SET full_cache_at = 1');
+      } finally {
+        db.dispose();
+      }
+      remote.calls.clear();
+      remote.ids = ['three', 'two'];
+      final stages = <String>[];
+
+      expect(
+        await cache.collections.refreshUnreadIfNeeded(
+          remote.data,
+          a,
+          onChecking: () => stages.add('checking'),
+          onSyncing: () => stages.add('syncing'),
+          isCanceled: () => false,
+        ),
+        isTrue,
+      );
+      expect(stages, ['checking', 'syncing']);
+      expect(remote.calls, [1, 2]);
+      expect(cache.getFavoriteComicIds('a'), {'two', 'three'});
+    },
+  );
 
   test(
     'numbered batches wait for the homepage and publish in page order',

@@ -401,25 +401,34 @@ void main() {
       );
     });
 
-    test('the flag is cleared for the previous account only', () async {
-      // A source that declares no unread signal would not be cleaned at all;
-      // confirm the guard, not just the write.
-      install(buildSource(plainSource, declaresUnread: false));
-      final plain = ComicSource.find(plainSource)!;
-      await cache.refreshFolders(plain.favoriteData!);
-      await cache.refreshPage(plain.favoriteData!, folderOf(plainSource), 1);
-      final before = cache.countCachedComicsInFolders([folderOf(plainSource)]);
+    test(
+      'legacy membership is cleared without resetting a local update',
+      () async {
+        install(buildSource(plainSource, declaresUnread: false));
+        final plain = ComicSource.find(plainSource)!;
+        await cache.refreshFolders(plain.favoriteData!);
+        await cache.refreshPage(plain.favoriteData!, folderOf(plainSource), 1);
+        await judgmentStateRepository.ensureOpen();
+        await judgmentStateRepository.applyBatch([
+          JudgmentState(
+            sourceKey: plainSource,
+            comicId: 'one',
+            lastDecision: JudgmentConclusion.changed,
+            lastReason: JudgmentReason.later,
+            decidedAtMs: 1,
+            hasNewUpdate: true,
+          ),
+        ]);
 
-      cache.invalidateFavoriteSessionForSource(plainSource);
+        cache.invalidateFavoriteSessionForSource(plainSource);
 
-      expect(
-        cache.countCachedComicsInFolders([folderOf(plainSource)]),
-        before,
-        reason:
-            'the guard returns early for a source that declares no '
-            'account-level signal',
-      );
-    });
+        expect(cache.countCachedComicsInFolders([folderOf(plainSource)]), 0);
+        expect(cache.needsFavoriteDirectoryReload(plainSource), isTrue);
+        expect(await judgmentStateRepository.readUnreadComicIds(plainSource), {
+          'one',
+        });
+      },
+    );
 
     test('the switch is recorded so the page can explain itself (FR-034)', () {
       NetworkFavoriteCacheManager.accountSwitchClearedSourceKey = null;
@@ -438,7 +447,7 @@ void main() {
       );
     });
 
-    test('an unread-signal-less source records nothing', () {
+    test('local update sources do not record a source unread reset', () {
       NetworkFavoriteCacheManager.accountSwitchClearedSourceKey = null;
       addTearDown(
         () => NetworkFavoriteCacheManager.accountSwitchClearedSourceKey = null,
@@ -450,7 +459,7 @@ void main() {
       expect(
         NetworkFavoriteCacheManager.accountSwitchClearedSourceKey,
         isNull,
-        reason: 'nothing was cleared, so there is nothing to explain',
+        reason: 'only the account membership cache was cleared',
       );
     });
   });

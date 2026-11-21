@@ -437,7 +437,7 @@ void main() {
     },
   );
 
-  testWidgets('follow-up being off hides the indicator even with a record', (
+  testWidgets('the legacy off setting no longer hides the indicator', (
     tester,
   ) async {
     appdata.settings['followUpdatesEnabled'] = false;
@@ -447,8 +447,8 @@ void main() {
           _record(autoHotUntil: DateTime.now().add(const Duration(hours: 1))),
     );
 
-    expect(_indicatorShown(tester), isFalse);
-    expect(find.byKey(_fireIcon), findsNothing);
+    expect(_indicatorShown(tester), isTrue);
+    expect(find.byKey(_fireIcon), findsOneWidget);
   });
 
   testWidgets('a read failure is shown as "no record" and breaks nothing', (

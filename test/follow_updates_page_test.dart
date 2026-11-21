@@ -4,12 +4,15 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite3/sqlite3.dart';
+import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_source/scan.dart';
 import 'package:venera/foundation/favorites.dart';
+import 'package:venera/foundation/follow_update_schedule.dart';
 import 'package:venera/foundation/follow_updates_service.dart';
+import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/foundation/scan/models.dart';
 import 'package:venera/foundation/schedule/schedule_state.dart';
@@ -17,31 +20,31 @@ import 'package:venera/foundation/schedule/sqlite_schedule_repository.dart';
 import 'package:venera/foundation/tracking/judgment.dart';
 import 'package:venera/foundation/tracking/judgment_state.dart';
 import 'package:venera/foundation/tracking/sqlite_judgment_repository.dart';
-import 'package:venera/pages/favorites/favorites_page.dart';
+import 'package:venera/pages/comic_details_page/comic_page.dart';
 import 'package:venera/pages/follow_updates_page.dart';
 import 'package:venera/utils/translations.dart';
 
-/// Contracts: `specs/006-local-follow-up-loop/contracts/follow-up-integration.md`
-/// F2 (the gate), F3.1/F3.3 (the single renderable list) and F3.4 (empty vs
-/// unreadable).
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   const sourceKey = 'gate_source';
+  const syncHelp = 'Select the source in Favorites and sync its favorites.';
   const folder = NetworkFavoriteFolderRef(
     sourceKey: sourceKey,
-    folderId: 'remote',
+    folderId: '',
     title: 'Remote',
   );
 
   late Directory tempDir;
+  late List<String> fixtureComicIds;
+  late Object? previousLanguage;
   late Object? previousEnabledSources;
   late Object? previousFavorites;
   late Object? previousFollowUpdatesEnabled;
 
   Future<void> markCacheComplete({
     String key = sourceKey,
-    String folderId = 'remote',
+    String folderId = '',
   }) async {
     final db = sqlite3.open(
       '${tempDir.path}${Platform.pathSeparator}network_favorite_cache.db',
@@ -57,10 +60,6 @@ void main() {
     }
   }
 
-  /// Writes one judgment row carrying the visible flag.
-  ///
-  /// The page has no other source for the update flag, so this is what "the
-  /// comic has an update" means in this build.
   Future<void> flagUpdate(String comicId, {String key = sourceKey}) async {
     await judgmentStateRepository.ensureOpen();
     await judgmentStateRepository.applyBatch([
@@ -76,28 +75,11 @@ void main() {
     ]);
   }
 
-  /// Makes the judgment store genuinely unreadable for the next read.
-  ///
-  /// Drops the table through a **second connection to the same file**: the real
-  /// repository stays installed, stays open, and simply finds no table — which
-  /// is what a damaged or foreign database looks like from the page's side.
-  /// Nothing is stubbed, so this cannot pass against a fake that behaves better
-  /// than the real store.
-  void breakJudgmentStore() {
-    final db = sqlite3.open(
-      '${tempDir.path}${Platform.pathSeparator}tracking_state.db',
-    );
-    try {
-      db.execute('DROP TABLE judgment_state');
-    } finally {
-      db.dispose();
-    }
-  }
-
   ComicSource buildSource({
     String key = sourceKey,
     String title = 'Gate source',
-    List<String> comicIds = const ['one', 'two', 'three'],
+    bool declaresUnread = false,
+    required List<String> comicIds,
   }) => ComicSource(
     title,
     key,
@@ -107,17 +89,28 @@ void main() {
     FavoriteData(
       key: key,
       title: title,
-      multiFolder: true,
+      multiFolder: false,
       loadComic: (page, [folder]) async =>
           Res([for (final id in comicIds) _comic(id, key: key)], subData: 1),
       loadNext: null,
-      loadFolders: ([String? _]) async =>
-          const Res(<String, String>{'remote': 'Remote'}),
     ),
     const [],
     null,
     null,
-    null,
+    (id) async => Res(
+      ComicDetails.fromJson({
+        'title': 'Comic $id',
+        'subtitle': 'Author',
+        'cover': _comic(id, key: key).cover,
+        'description': 'Details loaded',
+        'tags': <String, List<String>>{},
+        'chapters': {'chapter': 'Chapter 1'},
+        'sourceKey': key,
+        'comicId': id,
+        'isFavorite': true,
+        'isLiked': false,
+      }),
+    ),
     null,
     null,
     null,
@@ -148,7 +141,9 @@ void main() {
       primary: ScanProducer.comic,
       comic: ScanCapability.comic(
         (comicId, request) async => null,
-        evidenceSchema: '{"latestchapterid":"last_chapter.id"}',
+        evidenceSchema: declaresUnread
+            ? '{"latestchapterid":"last_chapter.id","sourceUnread":"unread"}'
+            : '{"latestchapterid":"last_chapter.id"}',
       ),
     ),
   );
@@ -159,16 +154,17 @@ void main() {
   /// all-or-nothing gate and the new per-source rule agree, so only a second
   /// source with the opposite state can tell them apart.  Its comics are named
   /// `c-*` so a title in an assertion identifies its source unambiguously.
-  Future<String> installCompleteSource() async {
+  Future<String> installCompleteSource({bool declaresUnread = false}) async {
     const completeKey = 'complete_source';
     const completeFolder = NetworkFavoriteFolderRef(
       sourceKey: completeKey,
-      folderId: 'remote',
+      folderId: '',
       title: 'Remote',
     );
     final source = buildSource(
       key: completeKey,
       title: 'Complete source',
+      declaresUnread: declaresUnread,
       comicIds: const ['c-one', 'c-two', 'c-three'],
     );
     source.data['account'] = <String, dynamic>{'fixture': true};
@@ -202,22 +198,24 @@ void main() {
   setUp(() async {
     previousEnabledSources = appdata.settings['enabledSources'];
     previousFavorites = appdata.settings['favorites'];
+    previousLanguage = appdata.settings['language'];
     previousFollowUpdatesEnabled = appdata.settings['followUpdatesEnabled'];
     tempDir = await Directory.systemTemp.createTemp('venera-follow-gate-');
     App.dataPath = tempDir.path;
     App.cachePath = tempDir.path;
 
+    await HistoryManager().init();
     final cache = NetworkFavoriteCacheManager();
     await cache.init(
       databasePath:
           '${tempDir.path}${Platform.pathSeparator}network_favorite_cache.db',
       migrateLegacy: false,
     );
-    final source = buildSource();
+    fixtureComicIds = ['one', 'two', 'three', 'expired', 'manual'];
+    final source = buildSource(comicIds: fixtureComicIds);
     source.data['account'] = <String, dynamic>{'fixture': true};
     ComicSourceManager().remove(sourceKey);
     ComicSourceManager().add(source);
-
     appdata.settings['enabledSources'] = <String>[sourceKey];
     appdata.settings['favorites'] = <String>[sourceKey];
     appdata.settings['followUpdatesEnabled'] = true;
@@ -228,7 +226,7 @@ void main() {
     final data = source.favoriteData!;
     await cache.refreshFolders(data);
     await cache.refreshPage(data, folder, 1);
-    expect(cache.countCachedComicsInFolders([folder]), 3);
+    expect(cache.countCachedComicsInFolders([folder]), fixtureComicIds.length);
     expect(cache.getFullCacheStatus(folder).isComplete, isFalse);
   });
 
@@ -238,7 +236,9 @@ void main() {
     ComicSourceManager().remove(sourceKey);
     appdata.settings['enabledSources'] = previousEnabledSources;
     appdata.settings['favorites'] = previousFavorites;
+    appdata.settings['language'] = previousLanguage;
     appdata.settings['followUpdatesEnabled'] = previousFollowUpdatesEnabled;
+    HistoryManager().close();
     NetworkFavoriteCacheManager().close();
     try {
       await tempDir.delete(recursive: true);
@@ -250,8 +250,6 @@ void main() {
   });
 
   Future<void> pumpPage(WidgetTester tester) async {
-    // The page's dialogs use App.rootContext, so the app's root navigator key
-    // must be attached to the test MaterialApp.
     await tester.pumpWidget(
       MaterialApp(
         navigatorKey: App.rootNavigatorKey,
@@ -261,269 +259,327 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  testWidgets('an incomplete cache shows the gate and no list at all', (
+  Iterable<List<String>> sectionIds(WidgetTester tester) => tester
+      .widgetList<SliverGridComics>(find.byType(SliverGridComics))
+      .map((section) => section.comics.map((comic) => comic.id).toList());
+
+  String dateLabel(WidgetTester tester, DateTime date) =>
+      MaterialLocalizations.of(
+        tester.element(find.byType(FollowUpdatesPage)),
+      ).formatFullDate(date);
+
+  Future<void> seedSchedule(List<ScheduleState> rows) async {
+    await scheduleStateRepository.ensureOpen();
+    await scheduleStateRepository.applyBatch(rows);
+  }
+
+  ScheduleState detected(
+    String comicId,
+    DateTime detectedAt, {
+    String key = sourceKey,
+  }) => ScheduleState(
+    sourceKey: key,
+    comicId: comicId,
+    autoHotUntilMs: detectedAt
+        .add(kFollowUpdateHotWindow)
+        .millisecondsSinceEpoch,
+    activityAtMs: DateTime(2020).millisecondsSinceEpoch,
+  );
+
+  Future<List<String>> seedPagedComics() async {
+    final ids = List.generate(
+      33,
+      (index) => 'paged-${index.toString().padLeft(2, '0')}',
+    );
+    fixtureComicIds
+      ..clear()
+      ..addAll(ids);
+    await NetworkFavoriteCacheManager().refreshPage(
+      ComicSource.find(sourceKey)!.favoriteData!,
+      folder,
+      1,
+    );
+    await markCacheComplete();
+    final latest = DateTime.now().subtract(const Duration(days: 1));
+    final earlier = latest.subtract(const Duration(days: 1));
+    await seedSchedule([
+      for (final id in ids.take(31)) detected(id, latest),
+      for (final id in ids.skip(31)) detected(id, earlier),
+    ]);
+    return ids;
+  }
+
+  testWidgets('the HOME card opens the recent updates page', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: const Scaffold(
+          body: CustomScrollView(slivers: [FollowUpdatesWidget()]),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Recent updates'.tl));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(FollowUpdatesPage), findsOneWidget);
+    expect(find.text('Recent updates'.tl), findsOneWidget);
+  });
+
+  testWidgets('an incomplete cache shows the gate until it is ready', (
     tester,
   ) async {
-    await flagUpdate('one');
+    final now = DateTime.now();
+    await seedSchedule([detected('one', now)]);
     await pumpPage(tester);
 
     expect(find.text('Favorites are not fully cached yet'.tl), findsOneWidget);
-    expect(
-      find.text('Cache favorites completely'.tl),
-      findsOneWidget,
-      reason: 'the gate must offer the entry point that resolves it',
-    );
-    // No list in any form: not the entries, not the empty state, not the
-    // historical notice (Contract F2.3).
-    expect(find.text('Comic one'.tl), findsNothing);
-    expect(find.text('No updates found'.tl), findsNothing);
-    expect(find.text('Unread updates'.tl), findsNothing);
-  });
+    expect(find.text(syncHelp.tl), findsOneWidget);
+    expect(find.text('Comic one'), findsNothing);
+    expect(find.byType(TextField), findsNothing);
 
-  testWidgets('a complete cache opens the gate and the flagged comic renders', (
-    tester,
-  ) async {
     await markCacheComplete();
-    await flagUpdate('one');
-    await pumpPage(tester);
+    NetworkFavoriteCacheManager().notifyCacheChanged();
+    await tester.pumpAndSettle();
 
     expect(find.text('Favorites are not fully cached yet'.tl), findsNothing);
-    expect(find.text('Unread updates'.tl), findsOneWidget);
-    expect(
-      find.text('Comic one'.tl),
-      findsOneWidget,
-      reason: 'F3.3: every listed entry renders its title and cover',
-    );
-    expect(
-      find.text('Comic two'.tl),
-      findsNothing,
-      reason: 'a comic without the visible flag is not listed',
-    );
+    expect(find.text('Comic one'), findsOneWidget);
   });
 
-  testWidgets('a complete cache with nothing flagged shows the empty state', (
+  testWidgets('groups active automatic windows by local detection date', (
+    tester,
+  ) async {
+    await markCacheComplete();
+    final latest = DateTime.now().subtract(const Duration(days: 1));
+    final earlier = latest.subtract(const Duration(days: 1));
+    final expired = latest.subtract(kFollowUpdateHotWindow);
+    await flagUpdate('expired');
+    await seedSchedule([
+      detected('two', latest),
+      detected('one', latest),
+      detected('three', earlier),
+      detected('expired', expired),
+      ScheduleState(
+        sourceKey: sourceKey,
+        comicId: 'manual',
+        manualHotEnabled: true,
+        manualHotUntilMs: latest
+            .add(kFollowUpdateHotWindow)
+            .millisecondsSinceEpoch,
+      ),
+    ]);
+    appdata.settings['followUpdatesEnabled'] = false;
+    await pumpPage(tester);
+
+    final latestHeader = find.text(dateLabel(tester, latest));
+    final earlierHeader = find.text(dateLabel(tester, earlier));
+    expect(latestHeader, findsOneWidget);
+    expect(earlierHeader, findsOneWidget);
+    expect(
+      tester.getTopLeft(latestHeader).dy,
+      lessThan(tester.getTopLeft(earlierHeader).dy),
+    );
+    expect(sectionIds(tester), [
+      ['one', 'two'],
+      ['three'],
+    ]);
+  });
+
+  testWidgets('a complete cache with no active windows shows the empty state', (
     tester,
   ) async {
     await markCacheComplete();
     await pumpPage(tester);
 
-    expect(find.text('Unread updates'.tl), findsOneWidget);
-    expect(
-      find.text('No updates found'.tl),
-      findsOneWidget,
-      reason: 'F3.4: an empty result is an explicit state, not a blank area',
-    );
+    expect(find.text('No recent updates found'.tl), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsNothing);
+  });
+
+  testWidgets('search covers unloaded title, author, and tag matches', (
+    tester,
+  ) async {
+    final ids = await seedPagedComics();
+    await pumpPage(tester);
+    expect(sectionIds(tester).single, ids.take(30));
+
+    final search = find.byKey(const ValueKey('follow-up-search-recent'));
+    for (final query in ['Omic paged-30', 'Late writer', 'Hidden genre']) {
+      await tester.enterText(search, query);
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pumpAndSettle();
+      expect(sectionIds(tester).single, ['paged-30']);
+    }
+    await tester.enterText(search, 'unmatched keyword');
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pumpAndSettle();
+    expect(find.text('No matching updates found'.tl), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Clear'.tl));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pumpAndSettle();
+    expect(sectionIds(tester).single, ids.take(30));
   });
 
   testWidgets(
-    'defaults to unread and recent keeps its own committed search and scroll state',
+    'the next cursor extends a date section and starts the next one',
     (tester) async {
-      await markCacheComplete();
-      await flagUpdate('one');
-      await scheduleStateRepository.ensureOpen();
-      final now = DateTime.now().millisecondsSinceEpoch;
-      await scheduleStateRepository.applyBatch([
-        ScheduleState(
-          sourceKey: sourceKey,
-          comicId: 'one',
-          autoHotUntilMs: now + const Duration(days: 1).inMilliseconds,
-        ),
-        ScheduleState(
-          sourceKey: sourceKey,
-          comicId: 'two',
-          autoHotUntilMs: now + const Duration(hours: 12).inMilliseconds,
-        ),
-      ]);
-      appdata.settings['language'] = 'zh-CN';
-
+      final ids = await seedPagedComics();
       await pumpPage(tester);
+      expect(sectionIds(tester).single, ids.take(30));
 
-      Finder title(String value) => find.byWidgetPredicate(
-        (widget) => widget is Text && widget.data == value,
-      );
-      final unreadTab = find.descendant(
-        of: find.byType(TabBar),
-        matching: find.text('Unread updates'.tl),
-      );
-
-      expect(unreadTab, findsOneWidget);
-      expect(find.text('追更'), findsNWidgets(2));
-      expect(find.text('更新'), findsNothing);
-      expect(find.text('Recent updates'.tl), findsOneWidget);
-      expect(title('Comic one'.tl), findsOneWidget);
-      expect(
-        title('Comic two'.tl),
-        findsNothing,
-        reason: 'recent-only schedule rows do not enter the default unread tab',
-      );
-
-      await tester.tap(find.text('Recent updates'.tl));
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, -10000));
       await tester.pumpAndSettle();
-      expect(title('Comic one'.tl), findsOneWidget);
-      expect(title('Comic two'.tl), findsOneWidget);
 
-      final recentSearch = find.byKey(
-        const ValueKey('follow-up-search-recent'),
-      );
-      await tester.enterText(recentSearch, 'Comic two');
-      await tester.pump(const Duration(milliseconds: 300));
-      await tester.pumpAndSettle();
-      expect(title('Comic two'.tl), findsOneWidget);
-      expect(title('Comic one'.tl), findsNothing);
-
-      await tester.tap(unreadTab);
-      await tester.pumpAndSettle();
-      final unreadSearch = tester.widget<TextField>(
-        find.byKey(const ValueKey('follow-up-search-unread')),
-      );
-      expect(unreadSearch.controller!.text, isEmpty);
-
-      await tester.tap(find.text('Recent updates'.tl));
-      await tester.pumpAndSettle();
-      final restoredRecentSearch = tester.widget<TextField>(recentSearch);
-      expect(restoredRecentSearch.controller!.text, 'Comic two');
-      expect(title('Comic two'.tl), findsOneWidget);
-      expect(title('Comic one'.tl), findsNothing);
+      expect(sectionIds(tester), [ids.take(31), ids.skip(31)]);
+      final last = tester
+          .widgetList<SliverGridComics>(find.byType(SliverGridComics))
+          .last;
+      final first = tester
+          .widgetList<SliverGridComics>(find.byType(SliverGridComics))
+          .first;
+      expect(first.key, isNot(last.key));
     },
   );
 
-  testWidgets('the progress entry never starts a round (F1.2)', (tester) async {
-    await markCacheComplete();
+  testWidgets('a changed snapshot restarts pagination from the first page', (
+    tester,
+  ) async {
+    final ids = await seedPagedComics();
     await pumpPage(tester);
+    expect(sectionIds(tester).single, ids.take(30));
 
-    await tester.tap(find.byTooltip('Update check progress'.tl));
-    await tester.pump();
-    await tester.pump(const Duration(seconds: 3));
-
-    // The entry reports; it does not trigger.  Nothing about the page's content
-    // changes as a result of tapping it.
-    expect(find.text('Unread updates'.tl), findsOneWidget);
-    expect(find.byType(CircularProgressIndicator), findsNothing);
-  });
-
-  testWidgets('the entry badge counts the same flagged comics the list shows '
-      '(F3.2)', (tester) async {
-    // FR-020: the badge and the list must agree.  They are asserted against the
-    // same seeded store rather than against each other, so this fails if either
-    // side starts reading somewhere else.
-    await markCacheComplete();
-    await flagUpdate('one');
-    await flagUpdate('two');
-
-    await tester.pumpWidget(
-      MaterialApp(
-        navigatorKey: App.rootNavigatorKey,
-        home: const Scaffold(
-          body: CustomScrollView(slivers: [FollowUpdatesWidget()]),
-        ),
-      ),
-    );
+    await seedSchedule([
+      detected('paged-00', DateTime.now().subtract(kFollowUpdateHotWindow)),
+    ]);
+    await tester.drag(find.byType(CustomScrollView), const Offset(0, -10000));
     await tester.pumpAndSettle();
+    expect(sectionIds(tester).single, ids.skip(1).take(30));
 
-    expect(
-      find.text('@c updates'.tlParams({'c': 2})),
-      findsOneWidget,
-      reason: 'the badge counts the flagged comics',
-    );
-
-    // The list agrees: the same two titles are present, and neither the badge
-    // nor the list invented a third.
-    await pumpPage(tester);
-    expect(find.text('Comic one'.tl), findsOneWidget);
-    expect(find.text('Comic two'.tl), findsOneWidget);
-    expect(find.text('@c updates'.tlParams({'c': 3})), findsNothing);
+    await tester.drag(find.byType(CustomScrollView), const Offset(0, -10000));
+    await tester.pumpAndSettle();
+    expect(sectionIds(tester), [ids.skip(1).take(30), ids.skip(31)]);
   });
 
-  testWidgets('the badge shows nothing when no comic is flagged (F3.2)', (
+  testWidgets('opening details preserves the flag and the recent entry', (
     tester,
   ) async {
     await markCacheComplete();
+    await flagUpdate('one');
+    await seedSchedule([detected('one', DateTime.now())]);
+    await pumpPage(tester);
 
-    await tester.pumpWidget(
-      MaterialApp(
-        navigatorKey: App.rootNavigatorKey,
-        home: const Scaffold(
-          body: CustomScrollView(slivers: [FollowUpdatesWidget()]),
-        ),
-      ),
-    );
+    await tester.tap(find.text('Comic one'));
     await tester.pumpAndSettle();
 
-    expect(find.text('@c updates'.tlParams({'c': 0})), findsNothing);
-    expect(find.text('Follow Updates'.tl), findsOneWidget);
+    final details = tester.widget<ComicPage>(find.byType(ComicPage));
+    expect(details.id, 'one');
+    final state = await judgmentStateRepository.readFor(sourceKey, 'one');
+    expect(state?.hasNewUpdate, isTrue);
+
+    App.rootNavigatorKey.currentState!.pop();
+    await tester.pumpAndSettle();
+    expect(find.text('Comic one'), findsOneWidget);
   });
 
-  testWidgets('an unreadable store is reported, never shown as empty (F3.4)', (
+  testWidgets('errors reading the schedule are reported and can be retried', (
     tester,
   ) async {
     await markCacheComplete();
-    // Seed a flag before breaking the store: a stale count is exactly what the
-    // failure path must not keep showing.
-    await flagUpdate('one');
-    breakJudgmentStore();
+    await seedSchedule([detected('one', DateTime.now())]);
+    final db = sqlite3.open(scheduleStateRepository.databasePath);
 
-    await tester.pumpWidget(
-      MaterialApp(
-        navigatorKey: App.rootNavigatorKey,
-        home: const Scaffold(
-          body: CustomScrollView(slivers: [FollowUpdatesWidget()]),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(
-      find.text('@c updates'.tlParams({'c': 1})),
-      findsNothing,
-      reason: 'F3.2: a failed read leaves no stale count behind',
-    );
-    expect(find.text('@c updates'.tlParams({'c': 0})), findsNothing);
+    db.execute('ALTER TABLE schedule_state RENAME TO unavailable_schedule');
 
     await pumpPage(tester);
-
     expect(find.text('Update state could not be read'.tl), findsOneWidget);
-    expect(
-      find.text('No updates found'.tl),
-      findsNothing,
-      reason: 'F3.4: unreadable is a reported state, not an empty list',
-    );
-    expect(find.text('Comic one'.tl), findsNothing);
-    expect(
-      find.text('Retry'.tl),
-      findsOneWidget,
-      reason: 'the notice must offer the way out of the failure',
-    );
+    expect(find.text('No recent updates found'.tl), findsNothing);
+
+    db.execute('ALTER TABLE unavailable_schedule RENAME TO schedule_state');
+    await tester.tap(find.text('Retry'.tl));
+    await tester.pumpAndSettle();
+    expect(find.text('Update state could not be read'.tl), findsNothing);
+    expect(find.text('Comic one'), findsOneWidget);
+    db.dispose();
   });
 
-  testWidgets('a disabled feature shows neither a count nor entries (F3.2)', (
+  testWidgets(
+    'eligible cached sources remain visible while another is pending',
+    (tester) async {
+      final completeKey = await installCompleteSource();
+      final now = DateTime.now();
+      await seedSchedule([
+        detected('one', now),
+        detected('c-one', now, key: completeKey),
+      ]);
+
+      await pumpPage(tester);
+      expect(find.text('Comic c-one'), findsOneWidget);
+      expect(find.text('Comic one'), findsNothing);
+      expect(
+        find.text('@c sources still pending'.tlParams({'c': 1})),
+        findsOneWidget,
+      );
+      expect(find.text(syncHelp.tl), findsOneWidget);
+    },
+  );
+
+  testWidgets('settings and source removal update the open page immediately', (
     tester,
   ) async {
+    final completeKey = await installCompleteSource();
     await markCacheComplete();
-    await flagUpdate('one');
-    appdata.settings['followUpdatesEnabled'] = false;
-
-    await tester.pumpWidget(
-      MaterialApp(
-        navigatorKey: App.rootNavigatorKey,
-        home: const Scaffold(
-          body: CustomScrollView(slivers: [FollowUpdatesWidget()]),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('@c updates'.tlParams({'c': 1})), findsNothing);
-    expect(find.text('Follow updates disabled'.tl), findsOneWidget);
-
+    final now = DateTime.now();
+    await seedSchedule([
+      detected('one', now),
+      detected('c-one', now, key: completeKey),
+    ]);
     await pumpPage(tester);
+    expect(sectionIds(tester).single, ['c-one', 'one']);
 
-    expect(find.text('Follow updates disabled'.tl), findsOneWidget);
-    expect(
-      find.text('Comic one'.tl),
-      findsNothing,
-      reason: 'F3.2: the list must agree with the badge that shows nothing',
+    appdata.settings['favorites'] = <String>[sourceKey];
+    await tester.pump();
+    expect(find.text('Comic c-one'), findsNothing);
+    expect(find.text('Comic one'), findsOneWidget);
+
+    appdata.settings['favorites'] = <String>[sourceKey, completeKey];
+    await tester.pumpAndSettle();
+    expect(find.text('Comic c-one'), findsOneWidget);
+
+    appdata.settings['enabledSources'] = <String>[completeKey];
+    await tester.pump();
+    expect(find.text('Comic one'), findsNothing);
+    expect(find.text('Comic c-one'), findsOneWidget);
+
+    ComicSourceManager().remove(completeKey);
+    await tester.pump();
+    expect(find.text('Comic c-one'), findsNothing);
+    expect(find.text('No source can be followed'.tl), findsOneWidget);
+  });
+
+  testWidgets('an account cache reset only hides the affected source', (
+    tester,
+  ) async {
+    final completeKey = await installCompleteSource(declaresUnread: true);
+    await markCacheComplete();
+    final now = DateTime.now();
+    await seedSchedule([
+      detected('one', now),
+      detected('c-one', now, key: completeKey),
+    ]);
+    final previous = NetworkFavoriteCacheManager.accountSwitchClearedSourceKey;
+    addTearDown(() {
+      NetworkFavoriteCacheManager.accountSwitchClearedSourceKey = previous;
+    });
+    await pumpPage(tester);
+    expect(sectionIds(tester).single, ['c-one', 'one']);
+
+    NetworkFavoriteCacheManager().invalidateFavoriteSessionForSource(
+      completeKey,
     );
+    await tester.pump();
+
+    expect(find.text('Comic one'), findsOneWidget);
+    expect(find.text('Comic c-one'), findsNothing);
+    expect(find.text(syncHelp.tl), findsOneWidget);
   });
 
   group('the progress wording (F5.2/F5.4)', () {
@@ -592,159 +648,6 @@ void main() {
       findsNothing,
       reason: 'the raw key must never reach the screen',
     );
-    expect(find.text('追更结果需要每个追更源的收藏缓存都已完整。'), findsOneWidget);
-    expect(
-      find.text(
-        'Follow-up results need a complete favorite cache for every tracked source.',
-      ),
-      findsNothing,
-    );
-  });
-
-  group('the favorites page urges caching the source it is about (F2.7)', () {
-    String prompt() =>
-        'This source is not followed yet: its favorites are not fully cached'
-            .tl;
-
-    Future<void> pumpSource(
-      WidgetTester tester, {
-      String key = sourceKey,
-    }) async {
-      await tester.pumpWidget(
-        MaterialApp(
-          navigatorKey: App.rootNavigatorKey,
-          home: Scaffold(
-            body: NetworkFavoritePage(
-              data: ComicSource.find(key)!.favoriteData!,
-            ),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-    }
-
-    testWidgets('an incompletely cached source is urged to cache', (
-      tester,
-    ) async {
-      // setUp cached the folder but deliberately left out the completeness
-      // mark, so this criterion source is pending.
-      await pumpSource(tester);
-
-      expect(find.text(prompt()), findsOneWidget);
-    });
-
-    testWidgets('the prompt goes away when this source finishes caching', (
-      tester,
-    ) async {
-      await pumpSource(tester);
-      expect(find.text(prompt()), findsOneWidget);
-
-      // The completion mark is written by a separate connection (as a finished
-      // full cache does through the settings/cache path), so the notification
-      // is what the prompt must react to: it is the listener, not a rebuild,
-      // that makes it disappear without leaving the page.
-      await markCacheComplete();
-      NetworkFavoriteCacheManager().notifyCacheChanged();
-      await tester.pump();
-
-      expect(find.text(prompt()), findsNothing);
-    });
-
-    testWidgets('only the source that still needs caching is urged', (
-      tester,
-    ) async {
-      // The crux of the change: an un-cached source must not make the *other*
-      // sources look unfinished, and the prompt must name the source it is on.
-      final completeKey = await installCompleteSource();
-
-      await pumpSource(tester);
-      expect(
-        find.text(prompt()),
-        findsOneWidget,
-        reason: 'this source is the pending one',
-      );
-
-      await pumpSource(tester, key: completeKey);
-      expect(
-        find.text(prompt()),
-        findsNothing,
-        reason: 'a fully cached source is followed; nothing to urge',
-      );
-    });
-
-    testWidgets('a disabled feature shows no prompt at all', (tester) async {
-      appdata.settings['followUpdatesEnabled'] = false;
-      await pumpSource(tester);
-
-      expect(find.text(prompt()), findsNothing);
-    });
-  });
-
-  group('a complete source is not held closed by an incomplete one (F2.3)', () {
-    String pendingLine(int count) =>
-        '@c sources are not fully cached yet, so they are not followed'
-            .tlParams({'c': count});
-
-    testWidgets('the cached source lists updates, the other one does not', (
-      tester,
-    ) async {
-      // The second source is complete; the fixture source stays incomplete
-      // (setUp cached its folder without the completeness mark).  Both have a
-      // flagged comic, and both comics are in their own cache, so "hidden" can
-      // only be the per-source rule — not a missing presentation row.
-      final completeKey = await installCompleteSource();
-      await flagUpdate('one');
-      await flagUpdate('c-one', key: completeKey);
-
-      await pumpPage(tester);
-
-      expect(
-        find.text('Comic c-one'.tl),
-        findsOneWidget,
-        reason: 'the fully cached source answers immediately',
-      );
-      expect(
-        find.text('Comic one'.tl),
-        findsNothing,
-        reason:
-            'a partial cache must not render a partial answer as the whole one',
-      );
-      expect(
-        find.text(pendingLine(1)),
-        findsOneWidget,
-        reason: 'the list says which source is still missing',
-      );
-      expect(
-        find.text('Favorites are not fully cached yet'.tl),
-        findsNothing,
-        reason: 'results exist, so this is no longer the nothing-to-show case',
-      );
-    });
-
-    testWidgets('the entry badge counts what the list shows (F3.2)', (
-      tester,
-    ) async {
-      final completeKey = await installCompleteSource();
-      await flagUpdate('one');
-      await flagUpdate('c-one', key: completeKey);
-
-      await tester.pumpWidget(
-        MaterialApp(
-          navigatorKey: App.rootNavigatorKey,
-          home: const Scaffold(
-            body: CustomScrollView(slivers: [FollowUpdatesWidget()]),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      expect(
-        find.text('@c updates'.tlParams({'c': 1})),
-        findsOneWidget,
-        reason: 'the hidden source must not be counted',
-      );
-      expect(find.text('@c updates'.tlParams({'c': 2})), findsNothing);
-    });
   });
 }
 
@@ -757,9 +660,9 @@ FavoriteItem _comic(String id, {String key = 'gate_source'}) => FavoriteItem(
   id: id,
   name: 'Comic $id',
   coverPath: 'file:///${_coverPath().replaceAll(r'\', '/')}',
-  author: 'Author',
+  author: id == 'paged-30' ? 'Late writer' : 'Author',
   sourceKeyValue: key,
-  tags: const ['tag'],
+  tags: id == 'paged-30' ? const ['Hidden genre'] : const ['tag'],
 );
 
 String _coverPath() =>

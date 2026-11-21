@@ -222,7 +222,7 @@ void main() {
     },
   );
 
-  test('repeated full-cache requests share one folder lock', () async {
+  test('repeated full-cache requests share progress and one fetch', () async {
     final source = RetirementFakeSource(sourceKey: retirementSourceA);
     const folder = NetworkFavoriteFolderRef(
       sourceKey: retirementSourceA,
@@ -230,11 +230,13 @@ void main() {
     );
     final started = Completer<void>();
     final release = Completer<void>();
+    var requests = 0;
     final data = FavoriteData(
       key: retirementSourceA,
       title: 'Lock test',
       multiFolder: false,
       loadComic: (page, [_]) async {
+        requests++;
         if (!started.isCompleted) started.complete();
         await release.future;
         return Res([source.comic('lock-page-$page')], subData: 1);
@@ -247,18 +249,16 @@ void main() {
         .toList();
     await started.future;
 
-    final secondFrames = await fixture.cache
+    final secondFramesFuture = fixture.cache
         .cacheAllPages(data, folder, isCanceled: () => false)
         .toList();
-    expect(secondFrames, hasLength(1));
-    expect(
-      secondFrames.single.errorMessage,
-      'A full cache operation is already running',
-    );
 
     release.complete();
     final firstFrames = await firstFramesFuture;
+    final secondFrames = await secondFramesFuture;
     expect(firstFrames.last.isComplete, isTrue);
+    expect(secondFrames.last.isComplete, isTrue);
+    expect(requests, 1);
     expect(fixture.cache.tryAcquireFullCacheLock(folder), isTrue);
     fixture.cache.releaseFullCacheLock(folder);
   });

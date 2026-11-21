@@ -31,7 +31,7 @@ const _picacgStartupScanInterval = Duration(hours: 12);
 
 /// Why a round was requested.  Recorded for diagnostics and used by tests to
 /// prove every trigger goes through one range rule.
-enum FollowUpdateTrigger { startup, cacheChanged, manual }
+enum FollowUpdateTrigger { startup, cacheChanged, manual, favoriteUpdates }
 
 /// The progress shown while a round runs (Contract F5).
 ///
@@ -335,6 +335,8 @@ class FollowUpdateCoordinator {
   bool _disposed = false;
   bool _cacheListenerAttached = false;
   FollowUpdateTrigger? _activeTrigger;
+  Completer<Map<String, int>>? _roundCompletion;
+  Set<String> _activeRoundSources = const {};
 
   StreamSubscription<JudgmentBatchEvent>? _scheduleSubscription;
   Future<void> _scheduleTail = Future<void>.value();
@@ -546,6 +548,44 @@ class FollowUpdateCoordinator {
   /// method exists because the app lifecycle already calls it.
   void onAppResumed() {}
 
+  /// Joins a follow-up round covering this source, or waits before requesting
+  /// a due-only check. A failure in a shared round can be retried in scope.
+  Future<bool> checkFavoriteSource(
+    String sourceKey, {
+    required bool Function() isCurrent,
+    required VoidCallback onWaiting,
+    required VoidCallback onChecking,
+  }) async {
+    while (isCurrent()) {
+      final completion = _roundCompletion;
+      if (completion == null) {
+        onChecking();
+        final started = runRound(
+          FollowUpdateTrigger.favoriteUpdates,
+          scopeSourceKeys: {sourceKey},
+        );
+        final scopedCompletion = _roundCompletion;
+        if (!await started || scopedCompletion == null) return false;
+        final revision = (await scopedCompletion.future)[sourceKey];
+        if (revision == null) return false;
+        if (revision == _cache.favoriteSourceRevision(sourceKey)) return true;
+        continue;
+      }
+      final coveringSource = _activeRoundSources.contains(sourceKey);
+      if (coveringSource) {
+        onChecking();
+      } else {
+        onWaiting();
+      }
+      if ((await completion.future)[sourceKey] ==
+          _cache.favoriteSourceRevision(sourceKey)) {
+        return true;
+      }
+      if (coveringSource && _cancelRequested) return false;
+    }
+    return false;
+  }
+
   /// Runs one round: due-filtered acquisition, then judgment, then settle.
   ///
   /// Returns true when a round was started, false when the request was
@@ -585,6 +625,9 @@ class FollowUpdateCoordinator {
     }
 
     _roundRunning = true;
+    final completion = _roundCompletion = Completer<Map<String, int>>();
+    final checkedSources = <String, int>{};
+    _activeRoundSources = scope ?? _criterionSourceKeys();
     _activeTrigger = trigger;
     // A new request chain starts uncancelled.  Clearing it here rather than in
     // `cancel()`'s counterpart is what makes a stale cancel harmless: a cancel
@@ -603,7 +646,15 @@ class FollowUpdateCoordinator {
       // At most two rounds per request: the triggered one, plus one coalesced
       // follow-up for work the first round could not cover (F1.2, revised).
       for (var index = 0; ; index++) {
-        await _runRoundOnce(scope: roundScope, trigger: roundTrigger);
+        final revisions = {
+          for (final source in _activeRoundSources)
+            source: _cache.favoriteSourceRevision(source),
+        };
+        final succeeded = await _runRoundOnce(
+          scope: roundScope,
+          trigger: roundTrigger,
+        );
+        if (succeeded) checkedSources.addAll(revisions);
         if (index >= 1) break;
         // F1.3: cancel stops the **request**, not just the round that happened
         // to be in flight when it arrived.  Without this the coalesced
@@ -616,6 +667,7 @@ class FollowUpdateCoordinator {
           owed.everySource ? null : owed.sourceKeys,
         );
         if (roundScope != null && roundScope.isEmpty) break;
+        _activeRoundSources = roundScope ?? _criterionSourceKeys();
         roundTrigger = FollowUpdateTrigger.cacheChanged;
         _activeTrigger = roundTrigger;
         _publish(
@@ -630,6 +682,9 @@ class FollowUpdateCoordinator {
     } finally {
       _roundRunning = false;
       _activeTrigger = null;
+      _activeRoundSources = const {};
+      _roundCompletion = null;
+      completion.complete(checkedSources);
     }
   }
 
@@ -723,7 +778,7 @@ class FollowUpdateCoordinator {
     return _OwedScope.sources(owed);
   }
 
-  Future<void> _runRoundOnce({
+  Future<bool> _runRoundOnce({
     required Set<String>? scope,
     required FollowUpdateTrigger trigger,
   }) async {
@@ -757,7 +812,8 @@ class FollowUpdateCoordinator {
                 scope: targetScope,
                 nowMs: nowMs,
               );
-              return trigger == FollowUpdateTrigger.startup
+              return trigger == FollowUpdateTrigger.startup ||
+                      trigger == FollowUpdateTrigger.favoriteUpdates
                   ? _skipFreshPicacgCollection(prepared, nowMs)
                   : prepared;
             },
@@ -774,8 +830,9 @@ class FollowUpdateCoordinator {
     // threshold, so the remainder has to be consumed here or the tail of every
     // round is never judged (Contract E2).  It is also what makes "progress
     // reached completion" mean "judgment has caught up" (F5.3).
+    final tracking.JudgmentSummary judgment;
     try {
-      await _judgmentService.run();
+      judgment = await _judgmentService.run();
     } finally {
       _observationsSinceJudgment = 0;
     }
@@ -793,6 +850,11 @@ class FollowUpdateCoordinator {
         comicFailures: summary.progress.failedItems,
       ),
     );
+    return !_cancelRequested &&
+        summary.disposition == FullScanDisposition.completed &&
+        summary.progress.failedWorks == 0 &&
+        summary.progress.failedItems == 0 &&
+        judgment.errorMessage == null;
   }
 
   Future<scan_kernel.ScanTargetSnapshot> _skipFreshPicacgCollection(
@@ -1295,8 +1357,6 @@ class FollowUpdateCoordinator {
 /// lazily (the same reason `SqliteScanResultRepository` is a top-level `final`
 /// in its own file).
 ///
-/// The master switch is wired to the product setting here, at the one place
-/// where the product's configuration is allowed to be read (Contract F1.4).
 final followUpdateCoordinator = FollowUpdateCoordinator(
   judgmentService: tracking.judgmentService,
   followUpdatesEnabledReader: () => followUpdatesEnabled,

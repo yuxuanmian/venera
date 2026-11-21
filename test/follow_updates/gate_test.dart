@@ -39,7 +39,6 @@ void main() {
   late Directory tempDir;
   late Object? previousEnabledSources;
   late Object? previousFavorites;
-  late Object? previousFollowUpdatesEnabled;
 
   ComicSource buildSource(String key, {required bool scanCapable}) =>
       ComicSource(
@@ -132,7 +131,6 @@ void main() {
   setUp(() async {
     previousEnabledSources = appdata.settings['enabledSources'];
     previousFavorites = appdata.settings['favorites'];
-    previousFollowUpdatesEnabled = appdata.settings['followUpdatesEnabled'];
     tempDir = await Directory.systemTemp.createTemp('venera-gate-');
     App.dataPath = tempDir.path;
     App.cachePath = tempDir.path;
@@ -141,7 +139,6 @@ void main() {
       databasePath: '${tempDir.path}${Platform.pathSeparator}cache.db',
       migrateLegacy: false,
     );
-    appdata.settings['followUpdatesEnabled'] = true;
     appdata.settings['language'] = 'system';
   });
 
@@ -152,7 +149,6 @@ void main() {
     }
     appdata.settings['enabledSources'] = previousEnabledSources;
     appdata.settings['favorites'] = previousFavorites;
-    appdata.settings['followUpdatesEnabled'] = previousFollowUpdatesEnabled;
     NetworkFavoriteCacheManager().close();
     try {
       await tempDir.delete(recursive: true);
@@ -311,7 +307,7 @@ void main() {
       await tester.pump();
     }
 
-    testWidgets('an incomplete cache shows no list, not a partial one', (
+    testWidgets('an incomplete cache directs the user to source Favorites', (
       tester,
     ) async {
       install(scanSource, scanCapable: true);
@@ -326,11 +322,13 @@ void main() {
         find.text('Favorites are not fully cached yet'.tl),
         findsOneWidget,
       );
-      expect(find.text('Cache favorites completely'.tl), findsOneWidget);
-      // No header, no entries, no empty-state placeholder.
-      expect(find.text('Updates'.tl), findsNothing);
+      expect(
+        find.text('Select the source in Favorites and sync its favorites.'.tl),
+        findsOneWidget,
+      );
+      expect(find.byType(TextField), findsNothing);
       expect(find.text('Comic one'.tl), findsNothing);
-      expect(find.text('No updates found'.tl), findsNothing);
+      expect(find.text('No recent updates found'.tl), findsNothing);
     });
 
     testWidgets('no criterion sources at all is a different message', (
@@ -351,7 +349,7 @@ void main() {
             'an empty criterion set is not a satisfied one, and it is not '
             'the same situation as an incomplete cache',
       );
-      expect(find.text('No updates found'.tl), findsNothing);
+      expect(find.text('No recent updates found'.tl), findsNothing);
     });
   });
 }

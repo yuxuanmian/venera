@@ -10,13 +10,13 @@ import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_source/scan.dart';
 import 'package:venera/foundation/favorites.dart';
+import 'package:venera/foundation/follow_update_schedule.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/image_provider/cached_image.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/foundation/scan/models.dart';
-import 'package:venera/foundation/tracking/judgment.dart';
-import 'package:venera/foundation/tracking/judgment_state.dart';
-import 'package:venera/foundation/tracking/sqlite_judgment_repository.dart';
+import 'package:venera/foundation/schedule/schedule_state.dart';
+import 'package:venera/foundation/schedule/sqlite_schedule_repository.dart';
 import 'package:venera/pages/comic_details_page/comic_page.dart';
 import 'package:venera/pages/favorites/favorites_page.dart';
 import 'package:venera/pages/follow_updates_page.dart';
@@ -165,7 +165,6 @@ void main() {
   late Object? previousComicMode;
   late Object? previousEnabledSources;
   late Object? previousFavorites;
-  late Object? previousFollowUpdatesEnabled;
   late Object? previousLanguage;
 
   setUpAll(() async {
@@ -192,7 +191,6 @@ void main() {
     previousComicMode = appdata.settings['comicDisplayMode'];
     previousEnabledSources = appdata.settings['enabledSources'];
     previousFavorites = appdata.settings['favorites'];
-    previousFollowUpdatesEnabled = appdata.settings['followUpdatesEnabled'];
     previousLanguage = appdata.settings['language'];
     appdata.settings['comicListDisplayMode'] = 'paging';
     appdata.settings['comicDisplayMode'] = 'detailed';
@@ -212,9 +210,8 @@ void main() {
     appdata.settings['comicDisplayMode'] = previousComicMode;
     appdata.settings['enabledSources'] = previousEnabledSources;
     appdata.settings['favorites'] = previousFavorites;
-    appdata.settings['followUpdatesEnabled'] = previousFollowUpdatesEnabled;
     appdata.settings['language'] = previousLanguage;
-    await judgmentStateRepository.close();
+    await scheduleStateRepository.close();
     cache.close();
     HistoryManager().close();
     try {
@@ -1001,7 +998,7 @@ void main() {
       });
     });
 
-    testWidgets('follow-up page updates the active list cover', (tester) async {
+    testWidgets('recent updates reloads the active list cover', (tester) async {
       const folder = NetworkFavoriteFolderRef(
         sourceKey: _sourceKey,
         folderId: 'remote',
@@ -1054,18 +1051,15 @@ void main() {
 
       appdata.settings['enabledSources'] = <String>[_sourceKey];
       appdata.settings['favorites'] = <String>[_sourceKey];
-      appdata.settings['followUpdatesEnabled'] = true;
       appdata.settings['language'] = 'system';
-      await judgmentStateRepository.ensureOpen();
-      await judgmentStateRepository.applyBatch([
-        JudgmentState(
+      await scheduleStateRepository.ensureOpen();
+      await scheduleStateRepository.applyBatch([
+        ScheduleState(
           sourceKey: _sourceKey,
           comicId: 'follow-ui',
-          lastDecision: JudgmentConclusion.changed,
-          lastReason: JudgmentReason.later,
-          decidedAtMs: 1,
-          hasNewUpdate: true,
-          algorithmVersion: judgmentAlgorithmVersion,
+          autoHotUntilMs: DateTime.now()
+              .add(kFollowUpdateHotWindow)
+              .millisecondsSinceEpoch,
         ),
       ]);
       await tester.pumpWidget(
@@ -1080,6 +1074,7 @@ void main() {
         tester,
         () => find.text('Comic follow-ui').evaluate().isNotEmpty,
       );
+      expect(_tileFor(tester, 'follow-ui').comic.cover, 'file://$oldImagePath');
       final snapshot = cache.captureFavoriteCoverSnapshot(
         _sourceKey,
         'follow-ui',

@@ -7,7 +7,9 @@ import 'package:sqlite3/sqlite3.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
+import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_updates_service.dart';
+import 'package:venera/foundation/schedule/sqlite_schedule_repository.dart';
 import 'package:venera/foundation/tracking/sqlite_judgment_repository.dart';
 import 'package:venera/pages/follow_updates_page.dart';
 import 'package:venera/utils/translations.dart';
@@ -18,37 +20,29 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   late Directory appDirectory;
-  late RetirementFixture fixture;
+  late String databasePath;
+  final cache = NetworkFavoriteCacheManager();
   late Object? previousEnabledSources;
   late Object? previousFavorites;
-  late Object? previousFollowUpdatesEnabled;
 
   setUpAll(() async {
     await AppTranslation.init();
+  });
+
+  setUp(() async {
     appDirectory = await Directory.systemTemp.createTemp(
       'venera-retirement-service-app-',
     );
     App.dataPath = appDirectory.path;
     App.cachePath = appDirectory.path;
-  });
-
-  tearDownAll(() async {
-    ComicSourceManager().remove(retirementSourceA);
-    try {
-      await appDirectory.delete(recursive: true);
-    } on PathAccessException {
-      // Windows may release a native SQLite handle just after dispose.
-    }
-  });
-
-  setUp(() async {
+    databasePath =
+        '${appDirectory.path}${Platform.pathSeparator}network_favorite_cache.db';
     previousEnabledSources = appdata.settings['enabledSources'];
     previousFavorites = appdata.settings['favorites'];
-    previousFollowUpdatesEnabled = appdata.settings['followUpdatesEnabled'];
     appdata.settings['enabledSources'] = <String>[retirementSourceA];
     appdata.settings['favorites'] = <String>[retirementSourceA];
-    appdata.settings['followUpdatesEnabled'] = true;
-    fixture = await createRetirementFixture();
+    await cache.init(databasePath: databasePath, migrateLegacy: false);
+    seedRetirementHistory(databasePath);
     FollowUpdatesService.disposeChecker();
   });
 
@@ -58,12 +52,18 @@ void main() {
     ComicSourceManager().remove('retire_source_a');
     appdata.settings['enabledSources'] = previousEnabledSources;
     appdata.settings['favorites'] = previousFavorites;
-    appdata.settings['followUpdatesEnabled'] = previousFollowUpdatesEnabled;
-    await fixture.dispose();
+    await judgmentStateRepository.close();
+    await scheduleStateRepository.close();
+    cache.close();
+    try {
+      await appDirectory.delete(recursive: true);
+    } on PathAccessException {
+      // Windows may release a native SQLite handle just after dispose.
+    }
   });
 
   void installLoggedInSource(RetirementFakeSource fake) {
-    final source = fake.buildComicSource();
+    final source = fake.buildComicSource(declaresSourceUnread: true);
     source.data['account'] = <String, dynamic>{'fixture': true};
     final manager = ComicSourceManager();
     manager.remove(fake.sourceKey);
@@ -71,7 +71,7 @@ void main() {
   }
 
   void seedServiceHistory(String sourceKey) {
-    final database = sqlite3.open(fixture.databasePath);
+    final database = sqlite3.open(databasePath);
     try {
       final now = fixtureNow.millisecondsSinceEpoch;
       final favoriteTime = fixtureNow
@@ -175,7 +175,7 @@ void main() {
     FollowUpdatesService.disposeChecker();
     FollowUpdatesService.disposeChecker();
     await FollowUpdatesService.initChecker();
-    fixture.cache.notifyListeners();
+    cache.notifyListeners();
 
     expect(FollowUpdatesService.taskRunning, isFalse);
   });
@@ -190,69 +190,74 @@ void main() {
     expect(FollowUpdatesService.taskRunning, isFalse);
   });
 
-  testWidgets(
-    'the page no longer derives its list from the retired marker store',
-    (tester) async {
-      const serviceSourceKey = 'retire_source_a';
-      final fake = RetirementFakeSource(sourceKey: serviceSourceKey);
-      installLoggedInSource(fake);
-      appdata.settings['enabledSources'] = <String>[serviceSourceKey];
-      appdata.settings['favorites'] = <String>[serviceSourceKey];
-      seedServiceHistory(serviceSourceKey);
+  testWidgets('legacy unread stays isolated from tracking and recent updates', (
+    tester,
+  ) async {
+    const serviceSourceKey = 'retire_source_a';
+    final fake = RetirementFakeSource(sourceKey: serviceSourceKey);
+    installLoggedInSource(fake);
+    appdata.settings['enabledSources'] = <String>[serviceSourceKey];
+    appdata.settings['favorites'] = <String>[serviceSourceKey];
+    seedServiceHistory(serviceSourceKey);
 
+    await tester.runAsync(() async {
       await FollowUpdatesService.initChecker();
       await FollowUpdatesService.initChecker();
-      await pumpPage(tester);
-
-      // `seedServiceHistory` sets `comic_check_state.has_new_update = 1` — the
-      // retired marker.  The page MUST NOT render from it: judgment state is the
-      // only source of the update flag now (Contract F3.1).
-      expect(
-        find.text('service-retire-a'),
-        findsNothing,
-        reason: 'the legacy has_new_update flag is no longer a list source',
+    });
+    // Startup ran with an incomplete cache. Detach its background consumer
+    // so the notification below exercises the page's local refresh in isolation.
+    FollowUpdatesService.disposeChecker();
+    final database = sqlite3.open(databasePath);
+    try {
+      database.execute(
+        '''UPDATE favorite_folders SET full_cache_at = ?
+             WHERE source_key = ? AND folder_id = ?''',
+        [fixtureNow.millisecondsSinceEpoch, serviceSourceKey, 'service-folder'],
       );
-      expect(fake.counters.detailCalls, 0);
-
-      // Startup runs no upgrade migration any more.  The legacy flag stays in
-      // its own table and is **not** copied into judgment state, and the 006
-      // marker is not written: old data may exist, but nothing treats it as the
-      // new baseline's authority.
-      await judgmentStateRepository.ensureOpen();
       expect(
-        await judgmentStateRepository.readFor(
-          serviceSourceKey,
-          'service-retire-a',
+        database
+            .select(
+              '''SELECT has_new_update FROM comic_check_state
+               WHERE source_key = ? AND comic_id = ?''',
+              [serviceSourceKey, 'service-retire-a'],
+            )
+            .single['has_new_update'],
+        1,
+      );
+      expect(
+        database.select(
+          "SELECT value FROM metadata WHERE key = 'follow_up_006_migration'",
         ),
-        isNull,
-        reason: 'legacy state is ignored, not migrated',
+        isEmpty,
+        reason: 'the legacy migration no longer exists',
       );
-      final database = sqlite3.open(fixture.databasePath);
-      try {
-        expect(
-          database.select(
-            "SELECT value FROM metadata WHERE key = 'follow_up_006_migration'",
-          ),
-          isEmpty,
-          reason: 'the legacy migration no longer exists',
-        );
-      } finally {
-        database.dispose();
-      }
+    } finally {
+      database.dispose();
+    }
 
-      // A cache notification refreshes the page but cannot conjure a judgment
-      // row, so the list stays empty and no source request is made.
-      final beforeNotification = snapshotRetirementState(fixture.databasePath);
-      fixture.cache.notifyListeners();
-      await tester.pump();
-      expect(find.text('service-retire-a'), findsNothing);
-      expect(fake.counters.detailCalls, 0);
-      expect(FollowUpdatesService.taskRunning, isFalse);
-      expect(snapshotRetirementState(fixture.databasePath), beforeNotification);
-
-      // Let the coalescing window elapse inside the test: the debounce timer is
-      // real, and a widget test fails if one outlives the tree.
-      await tester.pump(const Duration(seconds: 3));
-    },
-  );
+    expect(followUpdateCoordinator.evaluateGate().satisfiedSourceKeys, {
+      serviceSourceKey,
+    });
+    await pumpPage(tester);
+    await tester.pumpAndSettle();
+    expect(find.text('No recent updates found'.tl), findsOneWidget);
+    expect(find.text('service-retire-a'), findsNothing);
+    expect(fake.counters.detailCalls, 0);
+    final beforeNotification = snapshotRetirementState(databasePath);
+    cache.notifyListeners();
+    await tester.pump(const Duration(milliseconds: 150));
+    await tester.pumpAndSettle();
+    expect(find.text('No recent updates found'.tl), findsOneWidget);
+    expect(find.text('service-retire-a'), findsNothing);
+    expect(fake.counters.detailCalls, 0);
+    expect(FollowUpdatesService.taskRunning, isFalse);
+    expect(snapshotRetirementState(databasePath), beforeNotification);
+    expect(
+      await judgmentStateRepository.readFor(
+        serviceSourceKey,
+        'service-retire-a',
+      ),
+      isNull,
+    );
+  });
 }

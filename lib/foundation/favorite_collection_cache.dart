@@ -393,6 +393,139 @@ class FavoriteCollectionCache {
     );
   }
 
+  /// Keeps an in-flight collection sync alive when its updates page opens.
+  Future<Stream<FavoriteFullCacheProgress>?> continueForUpdates(
+    FavoriteData data, {
+    required bool Function() isCanceled,
+  }) async {
+    final pendingHome = _visits.values
+        .where((visit) => visit._fetch.data == data && visit.isCurrent)
+        .map((visit) => visit._fetch._requests[1])
+        .whereType<Future<Res<FavoriteCachePage>>>()
+        .firstOrNull;
+    if (_sync?.fetch.data != data && pendingHome != null) await pendingHome;
+    if (isCanceled()) return null;
+    final run = _sync;
+    if (run != null && run.fetch.data == data && run.fetch.isCurrent) {
+      run.manualCancel ??= isCanceled;
+      run.wake();
+      return run.watch();
+    }
+    final pending = _visits.values
+        .where(
+          (visit) =>
+              visit._fetch.data == data && visit.isCurrent && visit._wantsSync,
+        )
+        .firstOrNull;
+    return pending == null
+        ? null
+        : cacheAll(
+            data,
+            pending.folder,
+            isCanceled: isCanceled,
+            adoptRemoteCover: false,
+          );
+  }
+
+  /// Refreshes source unread signals using the normal first-page endpoint.
+  /// A validated response can update the markers without changing membership.
+  Future<bool> refreshUnreadIfNeeded(
+    FavoriteData data,
+    NetworkFavoriteFolderRef folder, {
+    required VoidCallback onChecking,
+    required VoidCallback onSyncing,
+    required bool Function() isCanceled,
+  }) async {
+    final row = _cache._db
+        .select(
+          '''SELECT last_probe_at, full_cache_at FROM favorite_folders
+         WHERE source_key = ? AND folder_id = ?''',
+          [folder.sourceKey, folder.folderId],
+        )
+        .firstOrNull;
+    final last = math.max(
+      row?['last_probe_at'] as int? ?? 0,
+      row?['full_cache_at'] as int? ?? 0,
+    );
+    final age = DateTime.now().millisecondsSinceEpoch - last;
+    if (age >= 0 &&
+        age <
+            NetworkFavoriteCacheManager
+                ._backgroundRefreshAfter
+                .inMilliseconds) {
+      return true;
+    }
+    onChecking();
+    final visit = _visits[folder];
+    final pending = visit?.isCurrent == true && visit?._fetch.data == data
+        ? visit?._fetch._requests[1]
+        : null;
+    final fetch = pending == null
+        ? _FavoritePages(_cache, data, folder, isCanceled: isCanceled)
+        : visit!._fetch;
+    final result = await (pending ?? fetch.load(1));
+    if (result.error || !fetch.isCurrent || isCanceled()) return false;
+    if (_needsSync(fetch, _readPublished(folder), result.data)) {
+      onSyncing();
+      final progress = await _cacheAll(
+        data,
+        folder,
+        isCanceled: isCanceled,
+        adoptRemoteCover: false,
+        prepared: fetch,
+      ).last;
+      return progress.isComplete;
+    }
+    _markProbed(folder);
+    return true;
+  }
+
+  bool hasPendingSync(FavoriteData data, NetworkFavoriteFolderRef folder) {
+    final scope = _cache._db
+        .select(
+          '''SELECT cache_scope FROM favorite_folders
+         WHERE source_key = ? AND folder_id = ?''',
+          [folder.sourceKey, folder.folderId],
+        )
+        .firstOrNull?['cache_scope'];
+    return (scope ?? '') != data.cacheScope ||
+        _pending(folder).any((row) => row['needs_sync'] == 1);
+  }
+
+  bool _needsSync(
+    _FavoritePages fetch,
+    Map<int, CachedFavoritePage> published,
+    FavoriteCachePage remote,
+  ) {
+    final status = _cache.getFullCacheStatus(fetch.folder);
+    final old = published[1];
+    final expectedPages = remote.maxPage ?? status.pageCount;
+    return !status.isComplete ||
+        old == null ||
+        hasPendingSync(fetch.data, fetch.folder) ||
+        status.pageCount != expectedPages ||
+        published.length != math.max(1, expectedPages) ||
+        (remote.total != null && status.comicCount != remote.total) ||
+        (fetch.usesCursor &&
+            (old.nextToken == null) != (remote.next == null)) ||
+        !listEquals(
+          old.comics.map((c) => c.id).toList(),
+          remote.comics.map((c) => c.id).toList(),
+        );
+  }
+
+  void _markProbed(NetworkFavoriteFolderRef folder) {
+    _cache._db.execute(
+      '''UPDATE favorite_folders SET last_probe_at = ?
+        WHERE source_key = ? AND folder_id = ?''',
+      [
+        DateTime.now().millisecondsSinceEpoch,
+        folder.sourceKey,
+        folder.folderId,
+      ],
+    );
+  }
+
   Future<Res<List<Comic>>> _load(
     FavoriteCollectionVisit visit,
     int page,
@@ -422,46 +555,11 @@ class FavoriteCollectionCache {
     final remote = reply.data;
     if (!visit._opened && page == 1) {
       visit._opened = true;
-      final status = _cache.getFullCacheStatus(visit.folder);
-      final old = visit._published[1];
-      final publishedScope =
-          _cache._db
-              .select(
-                '''SELECT cache_scope FROM favorite_folders
-        WHERE source_key = ? AND folder_id = ?''',
-                [visit.folder.sourceKey, visit.folder.folderId],
-              )
-              .firstOrNull?['cache_scope'] ??
-          '';
-      final expectedPages = remote.maxPage ?? status.pageCount;
-      final matches =
-          status.isComplete &&
-          old != null &&
-          publishedScope == fetch.scope &&
-          status.pageCount == expectedPages &&
-          visit._published.length == math.max(1, expectedPages) &&
-          (remote.total == null || status.comicCount == remote.total) &&
-          (!fetch.usesCursor ||
-              (old.nextToken == null) == (remote.next == null)) &&
-          listEquals(
-            old.comics.map((c) => c.id).toList(),
-            remote.comics.map((c) => c.id).toList(),
-          );
-      final needsSync =
-          !matches ||
-          _pending(visit.folder).any((row) => row['needs_sync'] == 1);
+      final needsSync = _needsSync(fetch, visit._published, remote);
       visit._wantsSync = needsSync && visit._allowAuto;
       visit._local = !needsSync;
       _cache._ensureFolder(visit.folder);
-      _cache._db.execute(
-        '''UPDATE favorite_folders SET last_probe_at = ?
-        WHERE source_key = ? AND folder_id = ?''',
-        [
-          DateTime.now().millisecondsSinceEpoch,
-          visit.folder.sourceKey,
-          visit.folder.folderId,
-        ],
-      );
+      _markProbed(visit.folder);
       if (identical(_visible, visit) && visit._wantsSync) _tryAutomatic();
     }
     final covers = _cache._loadFavoriteCoverProvenance(visit.folder.sourceKey, {
@@ -497,6 +595,20 @@ class FavoriteCollectionCache {
     FavoriteData data,
     NetworkFavoriteFolderRef folder, {
     required bool Function() isCanceled,
+    bool adoptRemoteCover = true,
+  }) => _cacheAll(
+    data,
+    folder,
+    isCanceled: isCanceled,
+    adoptRemoteCover: adoptRemoteCover,
+  );
+
+  Stream<FavoriteFullCacheProgress> _cacheAll(
+    FavoriteData data,
+    NetworkFavoriteFolderRef folder, {
+    required bool Function() isCanceled,
+    required bool adoptRemoteCover,
+    _FavoritePages? prepared,
   }) async* {
     var other = _sync;
     while (other != null && other.manual && other.fetch.folder != folder) {
@@ -515,19 +627,23 @@ class FavoriteCollectionCache {
     if (current != null && current.fetch.folder != folder) {
       _finish(current, canceled: true);
     }
-    final visible = _visible;
+    final visit = _visits[folder];
     final _FavoritePages fetch;
-    if (_sync == null &&
-        visible != null &&
-        visible.folder == folder &&
-        visible._wantsSync) {
-      visible._wantsSync = false;
-      fetch = visible._fetch;
+    if (prepared != null) {
+      fetch = prepared;
+    } else if (_sync == null &&
+        visit != null &&
+        visit.isCurrent &&
+        visit._fetch.data == data &&
+        (visit._wantsSync || visit._fetch._requests.containsKey(1))) {
+      visit._wantsSync = false;
+      fetch = visit._fetch;
     } else {
-      fetch = _FavoritePages(_cache, data, folder);
+      fetch = _FavoritePages(_cache, data, folder, isCanceled: isCanceled);
     }
     final run = _sync ?? _start(fetch, isCanceled: isCanceled);
     run.manualCancel ??= isCanceled;
+    if (adoptRemoteCover) run.adoptRemoteCover = true;
     run.wake();
     yield* run.watch();
   }
@@ -688,8 +804,8 @@ class FavoriteCollectionCache {
             maxPage: pageCount,
             nextToken: page.next,
             clearFollowingCursorPages: false,
-            preserveExistingCover: !run.manual,
-            adoptRemoteCover: run.manual,
+            preserveExistingCover: !run.adoptRemoteCover,
+            adoptRemoteCover: run.adoptRemoteCover,
           ),
         );
       }
@@ -762,13 +878,14 @@ class FavoriteCollectionCache {
 }
 
 class _FavoritePages {
-  _FavoritePages(this.cache, this.data, this.folder)
+  _FavoritePages(this.cache, this.data, this.folder, {this.isCanceled})
     : epoch = cache.captureFavoriteSessionEpoch(folder.sourceKey),
       scope = data.cacheScope;
 
   final NetworkFavoriteCacheManager cache;
   final FavoriteData data;
   final NetworkFavoriteFolderRef folder;
+  final bool Function()? isCanceled;
   final int epoch;
   final String scope;
   final Map<int, FavoriteCachePage> pages = {};
@@ -778,7 +895,8 @@ class _FavoritePages {
 
   bool get isCurrent =>
       cache.isFavoriteSessionEpochCurrent(folder.sourceKey, epoch) &&
-      data.cacheScope == scope;
+      data.cacheScope == scope &&
+      isCanceled?.call() != true;
   bool get usesCursor => data.loadCachePage == null;
   FavoriteCachePage? get first => pages[1];
   int get comicCount =>
@@ -877,25 +995,13 @@ class _FavoritePages {
   }
 }
 
-class _FavoriteCollectionSync {
-  _FavoriteCollectionSync(this.fetch);
-
-  final _FavoritePages fetch;
+class _FavoriteSyncProgress {
   final done = Completer<void>();
   final _events = StreamController<FavoriteFullCacheProgress>.broadcast();
   FavoriteFullCacheProgress? _latest;
-  Completer<void>? _resume;
-  bool Function()? manualCancel;
+  bool adoptRemoteCover = false;
 
-  bool get manual => manualCancel != null;
-  bool get isCanceled => manualCancel?.call() ?? false;
   bool get finished => done.isCompleted;
-
-  Future<void> pause() => (_resume ??= Completer<void>()).future;
-  void wake() {
-    _resume?.complete();
-    _resume = null;
-  }
 
   Stream<FavoriteFullCacheProgress> watch() => Stream.multi((out) {
     if (_latest case final latest?) out.add(latest);
@@ -914,8 +1020,34 @@ class _FavoriteCollectionSync {
 
   void finish(FavoriteFullCacheProgress progress) {
     emit(progress);
+    close();
+  }
+
+  void close() {
     done.complete();
-    wake();
     unawaited(_events.close());
+  }
+}
+
+class _FavoriteCollectionSync extends _FavoriteSyncProgress {
+  _FavoriteCollectionSync(this.fetch);
+
+  final _FavoritePages fetch;
+  Completer<void>? _resume;
+  bool Function()? manualCancel;
+
+  bool get manual => manualCancel != null;
+  bool get isCanceled => manualCancel?.call() ?? false;
+
+  Future<void> pause() => (_resume ??= Completer<void>()).future;
+  void wake() {
+    _resume?.complete();
+    _resume = null;
+  }
+
+  @override
+  void close() {
+    super.close();
+    wake();
   }
 }

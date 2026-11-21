@@ -557,13 +557,21 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   );
   final Set<String> _refreshing = {};
   final Set<String> _fullCaching = {};
+  final _legacyFavoriteSyncs =
+      <(FavoriteData, NetworkFavoriteFolderRef, int), _FavoriteSyncProgress>{};
   final Map<String, Map<String, _FavoriteCoverProvenance>>
   _fullCacheCoverProvenance = {};
   final ValueNotifier<FavoriteCoverChange?> favoriteCoverChanges =
       ValueNotifier(null);
   int _favoriteCoverChangeRevision = 0;
   final Map<String, int> _favoriteSessionEpochs = <String, int>{};
+  final _loadedFavoriteDirectories = <String, int>{};
+  final _favoriteDirectoryRefreshes =
+      <(FavoriteData, int, String), Future<Res<List<NetworkFavoriteFolder>>>>{};
   int _cacheGeneration = 0;
+  int _sourceChangeRevision = 0;
+  int _allSourcesChangedAt = 0;
+  final _sourceChangedAt = <String, int>{};
 
   /// Source keys whose cache changed since the last drain (Contract F1.4).
   ///
@@ -1271,8 +1279,9 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   }
 
   Future<Res<List<NetworkFavoriteFolder>>> refreshFolders(
-    FavoriteData data,
-  ) async {
+    FavoriteData data, {
+    bool Function()? isCurrent,
+  }) async {
     if (!data.multiFolder) {
       final folder = NetworkFavoriteFolder(
         sourceKey: data.key,
@@ -1286,7 +1295,38 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     if (data.loadFolders == null) {
       return const Res.error('Favorite folders are not supported');
     }
+    final epoch = captureFavoriteSessionEpoch(data.key);
+    final key = (data, epoch, data.cacheScope);
+    return _favoriteDirectoryRefreshes.putIfAbsent(key, () {
+      return _refreshRemoteFolders(data, epoch, key.$3, isCurrent).whenComplete(
+        () {
+          _favoriteDirectoryRefreshes.remove(key);
+        },
+      );
+    });
+  }
+
+  /// A successful empty directory needs no folder snapshots in this session.
+  bool hasLoadedFavoriteDirectory(String sourceKey) =>
+      _loadedFavoriteDirectories[sourceKey] ==
+      captureFavoriteSessionEpoch(sourceKey);
+
+  bool needsFavoriteDirectoryReload(String sourceKey) =>
+      captureFavoriteSessionEpoch(sourceKey) != 0 &&
+      !hasLoadedFavoriteDirectory(sourceKey);
+
+  Future<Res<List<NetworkFavoriteFolder>>> _refreshRemoteFolders(
+    FavoriteData data,
+    int epoch,
+    String scope,
+    bool Function()? isCurrent,
+  ) async {
     final result = await data.loadFolders!();
+    if (!isFavoriteSessionEpochCurrent(data.key, epoch) ||
+        data.cacheScope != scope ||
+        isCurrent?.call() == false) {
+      return const Res.error('Favorite session changed');
+    }
     if (result.error) return Res.error(result.errorMessage!);
     final now = DateTime.now();
     final folders = result.data.entries
@@ -1299,6 +1339,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
           ),
         )
         .toList();
+    _loadedFavoriteDirectories[data.key] = epoch;
     _upsertFolders(data.key, folders, removeMissing: true);
     return Res(folders);
   }
@@ -2112,10 +2153,70 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     FavoriteData data,
     NetworkFavoriteFolderRef folder, {
     required bool Function() isCanceled,
+    bool adoptRemoteCover = true,
   }) {
     if (data.usesCollectionCache) {
-      return collections.cacheAll(data, folder, isCanceled: isCanceled);
+      return collections.cacheAll(
+        data,
+        folder,
+        isCanceled: isCanceled,
+        adoptRemoteCover: adoptRemoteCover,
+      );
     }
+    final key = (data, folder, captureFavoriteSessionEpoch(folder.sourceKey));
+    final run = _legacyFavoriteSyncs.putIfAbsent(key, () {
+      final next = _FavoriteSyncProgress();
+      // Install the shared progress before the legacy loader can notify its
+      // listeners about the first folder or page.
+      scheduleMicrotask(() {
+        if (!isFavoriteSessionEpochCurrent(folder.sourceKey, key.$3)) {
+          _legacyFavoriteSyncs.remove(key);
+          next.finish(
+            const FavoriteFullCacheProgress(
+              pagesCached: 0,
+              comicsCached: 0,
+              isCanceled: true,
+            ),
+          );
+          return;
+        }
+        _cacheAllLegacyPages(
+          data,
+          folder,
+          isCanceled,
+          () => next.adoptRemoteCover,
+        ).listen(
+          next.emit,
+          onDone: () {
+            _legacyFavoriteSyncs.remove(key);
+            next.close();
+          },
+        );
+      });
+      return next;
+    });
+    if (adoptRemoteCover) run.adoptRemoteCover = true;
+    return run.watch();
+  }
+
+  Stream<FavoriteFullCacheProgress>? continueLegacyFavoriteSync(
+    FavoriteData data,
+  ) {
+    final epoch = captureFavoriteSessionEpoch(data.key);
+    for (final entry in _legacyFavoriteSyncs.entries) {
+      if (entry.key.$1 == data && entry.key.$3 == epoch) {
+        return entry.value.watch();
+      }
+    }
+    return null;
+  }
+
+  Stream<FavoriteFullCacheProgress> _cacheAllLegacyPages(
+    FavoriteData data,
+    NetworkFavoriteFolderRef folder,
+    bool Function() isCanceled,
+    bool Function() adoptRemoteCover,
+  ) {
     final stream = StreamController<FavoriteFullCacheProgress>();
     if (data.loadComic == null &&
         data.loadNext == null &&
@@ -2162,6 +2263,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
             stream,
             isCanceled,
             runEpoch,
+            adoptRemoteCover,
           );
         } else if (data.loadNext != null) {
           await _cacheAllCursorPages(
@@ -2170,6 +2272,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
             stream,
             isCanceled,
             runEpoch,
+            adoptRemoteCover,
           );
         } else {
           stream.add(
@@ -2203,6 +2306,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     StreamController<FavoriteFullCacheProgress> stream,
     bool Function() isCanceled,
     int runEpoch,
+    bool Function() adoptRemoteCover,
   ) async {
     if (isCanceled()) {
       stream.add(
@@ -2221,7 +2325,8 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       data,
       folder,
       1,
-      adoptRemoteCover: true,
+      preserveExistingCover: !adoptRemoteCover(),
+      adoptRemoteCover: adoptRemoteCover(),
       expectedEpoch: runEpoch,
     );
     if (first.error) {
@@ -2245,6 +2350,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         isCanceled,
         first.data,
         runEpoch,
+        adoptRemoteCover,
       );
       return;
     }
@@ -2263,6 +2369,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
       2,
       totalPages,
       runEpoch,
+      adoptRemoteCover,
     );
   }
 
@@ -2278,6 +2385,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     int startPage,
     int totalPages,
     int runEpoch,
+    bool Function() adoptRemoteCover,
   ) async {
     var completed = startPage - 1;
     for (
@@ -2303,7 +2411,8 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
             data,
             folder,
             p,
-            adoptRemoteCover: true,
+            preserveExistingCover: !adoptRemoteCover(),
+            adoptRemoteCover: adoptRemoteCover(),
             expectedEpoch: runEpoch,
           ),
       ]);
@@ -2356,6 +2465,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     bool Function() isCanceled,
     CachedFavoritePage firstPage,
     int runEpoch,
+    bool Function() adoptRemoteCover,
   ) async {
     if (firstPage.comics.isEmpty) {
       // An empty first page means an empty folder; drop the empty page row
@@ -2396,7 +2506,8 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
             data,
             folder,
             p,
-            adoptRemoteCover: true,
+            preserveExistingCover: !adoptRemoteCover(),
+            adoptRemoteCover: adoptRemoteCover(),
             expectedEpoch: runEpoch,
           ),
       ]);
@@ -2484,6 +2595,7 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     StreamController<FavoriteFullCacheProgress> stream,
     bool Function() isCanceled,
     int runEpoch,
+    bool Function() adoptRemoteCover,
   ) async {
     String? token;
     var page = 0;
@@ -2503,7 +2615,8 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
         data,
         folder,
         token,
-        adoptRemoteCover: true,
+        preserveExistingCover: !adoptRemoteCover(),
+        adoptRemoteCover: adoptRemoteCover(),
         expectedEpoch: runEpoch,
       );
       if (result.error) {
@@ -3215,13 +3328,19 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
   /// says *that* something changed, not *what*, and the follow-up consumer needs
   /// the second half in order to scope a round to the source that changed.
   void _notifySourceChanged(String? sourceKey) {
+    final revision = ++_sourceChangeRevision;
     if (sourceKey == null || sourceKey.isEmpty) {
       _everySourceChanged = true;
+      _allSourcesChangedAt = revision;
     } else {
       _changedSourceKeys.add(sourceKey);
+      _sourceChangedAt[sourceKey] = revision;
     }
     super.notifyListeners();
   }
+
+  int favoriteSourceRevision(String sourceKey) =>
+      math.max(_allSourcesChangedAt, _sourceChangedAt[sourceKey] ?? 0);
 
   void _notifyFavoriteCoverChanges(
     String sourceKey,
@@ -3297,8 +3416,27 @@ class NetworkFavoriteCacheManager with ChangeNotifier {
     // unread signal", NOT "does the retired observation channel exist".  The
     // old test would have silently stopped clearing anything the moment that
     // channel was removed, and the signal it guards is account-level.
-    if (!sourceDeclaresUnreadSignal(sourceKey) &&
-        getFavoriteDataOrNull(sourceKey)?.usesCollectionCache != true) {
+    final data = getFavoriteDataOrNull(sourceKey);
+    final useExistingCleanup =
+        sourceDeclaresUnreadSignal(sourceKey) ||
+        data?.usesCollectionCache == true;
+    if (!useExistingCleanup) {
+      if (data == null ||
+          ComicSource.find(sourceKey)?.scan?.isSupported != true) {
+        return;
+      }
+      // The per-source update list also consumes legacy favorite membership.
+      // Its local content judgment stays valid across accounts.
+      _db.execute('BEGIN');
+      try {
+        _clearAccountScopedFavoriteCache(sourceKey);
+        _db.execute('COMMIT');
+      } catch (_) {
+        _db.execute('ROLLBACK');
+        rethrow;
+      }
+      collections.invalidate(sourceKey);
+      _notifySourceChanged(sourceKey);
       return;
     }
     // Recorded so the follow-up page can explain why its results disappeared

@@ -31,8 +31,7 @@ class UpdateProgress {
   ]);
 }
 
-bool get followUpdatesEnabled =>
-    appdata.settings['followUpdatesEnabled'] == true;
+const bool followUpdatesEnabled = true;
 
 /// Whether a source uses the 016 collection-item-failure workflow.
 ///

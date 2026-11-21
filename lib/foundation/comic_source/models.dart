@@ -141,6 +141,28 @@ class Comic {
   toString() => "$sourceKey@$id";
 }
 
+String? blockedComicKeyword(
+  Iterable<String> words, {
+  required String title,
+  required String? subtitle,
+  required String description,
+  required Iterable<String> tags,
+}) {
+  for (final word in words) {
+    if (title.contains(word) ||
+        (subtitle?.contains(word) ?? false) ||
+        description.contains(word)) {
+      return word;
+    }
+    for (final tag in tags) {
+      if (tag == word || (tag.contains(':') && tag.split(':')[1] == word)) {
+        return word;
+      }
+    }
+  }
+  return null;
+}
+
 class FavoriteUpdateHint {
   const FavoriteUpdateHint({
     this.state,

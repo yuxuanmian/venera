@@ -16,6 +16,7 @@ import 'package:venera/foundation/scan/source_adapter.dart';
 import 'package:venera/foundation/tracking/judgment.dart';
 import 'package:venera/foundation/tracking/judgment_state.dart';
 import 'package:venera/foundation/tracking/sqlite_judgment_repository.dart';
+import 'package:venera/pages/favorites/favorite_updates_page.dart';
 import 'package:venera/pages/favorites/favorites_page.dart';
 import 'package:venera/utils/translations.dart';
 
@@ -67,7 +68,7 @@ void main() {
     tempDir = await Directory.systemTemp.createTemp('venera-favorites-ui-');
     App.dataPath = tempDir.path;
     databasePath =
-        '${tempDir.path}${Platform.pathSeparator}network-favorites.db';
+        '${tempDir.path}${Platform.pathSeparator}network_favorite_cache.db';
     final imageFile = File('${tempDir.path}${Platform.pathSeparator}cover.png');
     await imageFile.writeAsBytes(
       base64Decode(
@@ -146,6 +147,259 @@ void main() {
       ),
     ]);
   }
+
+  void installUnreadSource(FavoriteData data) {
+    final manager = ComicSourceManager();
+    final previousEnabled = appdata.settings['enabledSources'];
+    final previousFavorites = appdata.settings['favorites'];
+    manager.add(
+      makeScanTestSource(
+        data.key,
+        favoriteData: data,
+        scan: ScanCapabilities.supported(
+          primary: ScanProducer.collection,
+          collection: ScanCapability.collection(
+            (_, _, _) async => const {},
+            evidenceSchema: '{"sourceunread":"is_new"}',
+          ),
+        ),
+      ),
+    );
+    appdata.settings['enabledSources'] = [data.key];
+    appdata.settings['favorites'] = [data.key];
+    addTearDown(() {
+      appdata.settings['enabledSources'] = previousEnabled;
+      appdata.settings['favorites'] = previousFavorites;
+      manager.remove(data.key);
+    });
+  }
+
+  testWidgets('updated comics counts and searches the whole source', (
+    tester,
+  ) async {
+    const sourceKey = 'updates_across_pages';
+    const folder = NetworkFavoriteFolderRef(sourceKey: sourceKey, folderId: '');
+    var unread = true;
+    Completer<void>? pendingProbe;
+    final data = FavoriteData(
+      key: sourceKey,
+      title: 'Test favorites',
+      multiFolder: false,
+      loadComic: null,
+      loadNext: null,
+      loadCachePage: (page, _, _) async {
+        if (page == 1 && pendingProbe != null) await pendingProbe.future;
+        final comics = [
+          for (var index = (page - 1) * 18; index < page * 18; index++)
+            _comic(sourceKey, 'Book ${index.toString().padLeft(2, '0')}'),
+        ];
+        return Res(
+          FavoriteCachePage(
+            comics,
+            2,
+            36,
+            sourceUnread: {for (final comic in comics) comic.id: unread},
+          ),
+        );
+      },
+    );
+    installUnreadSource(data);
+    Future<void> publish() => cache
+        .cacheAllPages(data, folder, isCanceled: () => false)
+        .drain<void>();
+    await tester.runAsync(publish);
+    await pumpSource(tester, data, PageStorageBucket());
+    await showPageTwo(tester);
+
+    final badge = find.byTooltip('Updated comics'.tl);
+    expect(find.byIcon(Icons.new_releases_outlined), findsOneWidget);
+    expect(
+      find.descendant(of: badge, matching: find.text('36')),
+      findsOneWidget,
+    );
+    await tester.tap(badge);
+    await tester.pumpAndSettle();
+
+    final updates = find.byType(FavoriteUpdatesPage);
+    Finder book(String id) => find.descendant(
+      of: updates,
+      matching: find.byWidgetPredicate(
+        (widget) => widget is ComicTile && widget.comic.id == id,
+      ),
+    );
+    final scrollable = find.descendant(
+      of: updates,
+      matching: find.byType(Scrollable),
+    );
+    await tester.scrollUntilVisible(
+      book('Book 35'),
+      400,
+      scrollable: scrollable.first,
+    );
+    expect(book('Book 35'), findsOneWidget);
+
+    final search = find.descendant(
+      of: updates,
+      matching: find.byType(TextField),
+    );
+    await tester.scrollUntilVisible(search, -400, scrollable: scrollable.first);
+    await tester.enterText(search, 'Book 35');
+    await tester.pump(const Duration(milliseconds: 220));
+    await tester.pumpAndSettle();
+    expect(book('Book 35'), findsOneWidget);
+    expect(book('Book 34'), findsNothing);
+
+    App.rootNavigatorKey.currentState!.pop();
+    await tester.pumpAndSettle();
+    expect(find.text('Page 2 / 2'), findsOneWidget);
+
+    await tester.tap(badge);
+    await tester.pumpAndSettle();
+    unread = false;
+    await tester.runAsync(publish);
+    await tester.pumpAndSettle();
+    expect(find.text('No unread updates'.tl), findsOneWidget);
+
+    App.rootNavigatorKey.currentState!.pop();
+    await tester.pumpAndSettle();
+    expect(badge, findsOneWidget);
+    expect(find.descendant(of: badge, matching: find.text('0')), findsNothing);
+
+    final db = sqlite3.open(databasePath);
+    db.execute(
+      '''UPDATE favorite_folders SET full_cache_at = 1, last_probe_at = 1
+         WHERE source_key = ? AND folder_id = ?''',
+      [sourceKey, ''],
+    );
+    db.dispose();
+    final probe = pendingProbe = Completer<void>();
+    await tester.tap(badge);
+    await _pumpFrames(tester);
+    expect(find.text('Checking for updates...'.tl), findsOneWidget);
+    expect(find.text('No unread updates'.tl), findsNothing);
+    probe.complete();
+    await tester.pumpAndSettle();
+    expect(find.text('No unread updates'.tl), findsOneWidget);
+    appdata.settings['enabledSources'] = <String>[];
+    await tester.pumpAndSettle();
+    expect(find.text('Favorite updates unavailable'.tl), findsOneWidget);
+
+    App.rootNavigatorKey.currentState!.pop();
+    await tester.pumpAndSettle();
+    expect(badge, findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('directory refresh and full folder sync have distinct actions', (
+    tester,
+  ) async {
+    const sourceKey = 'updates_in_directory';
+    const folder = NetworkFavoriteFolderRef(
+      sourceKey: sourceKey,
+      folderId: 'one',
+      title: 'Test folder',
+    );
+    final pending = Completer<void>();
+    final pages = <int>[];
+    var directoryLoads = 0;
+    var changeTail = false;
+    final data = FavoriteData(
+      key: sourceKey,
+      title: 'Test directory',
+      multiFolder: true,
+      loadFolders: ([_]) async {
+        directoryLoads++;
+        return const Res({'one': 'Test folder'});
+      },
+      loadComic: null,
+      loadNext: null,
+      loadCachePage: (page, _, _) async {
+        pages.add(page);
+        if (changeTail && page == 2) await pending.future;
+        final id = page == 1
+            ? 'First book'
+            : changeTail
+            ? 'New tail'
+            : 'Old tail';
+        return Res(FavoriteCachePage([_comic(sourceKey, id)], 2, 2));
+      },
+    );
+    installUnreadSource(data);
+    await tester.runAsync(
+      () => cache
+          .cacheAllPages(data, folder, isCanceled: () => false)
+          .drain<void>(),
+    );
+    pages.clear();
+    await pumpSource(tester, data, PageStorageBucket());
+    expect(find.byTooltip('Updated comics'.tl), findsOneWidget);
+    expect(find.byTooltip('Sync all favorites'.tl), findsNothing);
+    await tester.tap(find.byIcon(Icons.refresh));
+    await tester.pumpAndSettle();
+    expect(directoryLoads, 2);
+    expect(pages, isEmpty);
+
+    await tester.tap(find.text('Test folder'));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Updated comics'.tl), findsNothing);
+    await showPageTwo(tester);
+    expect(find.text('Old tail'), findsOneWidget);
+
+    changeTail = true;
+    pages.clear();
+    await tester.tap(find.byTooltip('Sync all favorites'.tl));
+    await _pumpFrames(tester);
+    expect(pages, [1, 2]);
+    expect(find.byType(LinearProgressIndicator), findsOneWidget);
+    expect(find.text('Old tail'), findsOneWidget);
+    expect(directoryLoads, 2);
+
+    pending.complete();
+    await tester.pumpAndSettle();
+    expect(cache.getCachedPageByIndex(folder, 2)!.comics.single.id, 'New tail');
+    expect(find.text('Page 2 / 2'), findsOneWidget);
+    expect(
+      tester
+          .widgetList<ComicTile>(find.byType(ComicTile))
+          .map((tile) => tile.comic.id),
+      contains('New tail'),
+    );
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('logged-in legacy favorites still sync every page', (
+    tester,
+  ) async {
+    const sourceKey = 'legacy_full_sync';
+    const folder = NetworkFavoriteFolderRef(sourceKey: sourceKey, folderId: '');
+    final calls = <int, int>{};
+    final pages = <int, List<Comic>>{
+      1: [_comic(sourceKey, 'First legacy book')],
+      2: [_comic(sourceKey, 'Old legacy tail')],
+    };
+    final data = _pagingData(sourceKey, pages, calls);
+    installUnreadSource(data);
+    ComicSource.find(sourceKey)!.data['account'] = {'fixture': true};
+    await tester.runAsync(
+      () => cache
+          .cacheAllPages(data, folder, isCanceled: () => false)
+          .drain<void>(),
+    );
+    await pumpSource(tester, data, PageStorageBucket());
+    await showPageTwo(tester);
+    expect(find.text('Old legacy tail'), findsOneWidget);
+
+    calls.clear();
+    pages[2] = [_comic(sourceKey, 'New legacy tail')];
+    await tester.tap(find.byTooltip('Sync all favorites'.tl));
+    await tester.pumpAndSettle();
+    expect(calls, {1: 1, 2: 1});
+    expect(find.text('Page 2 / 2'), findsOneWidget);
+    expect(find.text('New legacy tail'), findsOneWidget);
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets('favorites show a detected update in both cover layouts', (
     tester,

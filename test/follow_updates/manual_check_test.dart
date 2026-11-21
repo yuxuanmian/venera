@@ -717,6 +717,66 @@ void main() {
       expect(scan.cancelCalls, 1);
     });
   });
+
+  group('favorite updates check', () {
+    test(
+      'joins the current source and waits before checking another',
+      () async {
+        final coordinator = buildCoordinator(sources: {'src', 'other'});
+        scan.hold = true;
+        final opening = coordinator.runRound(
+          FollowUpdateTrigger.startup,
+          scopeSourceKeys: {'src'},
+        );
+        await scan.gate.started.future;
+        final phases = <String>[];
+        final same = coordinator.checkFavoriteSource(
+          'src',
+          isCurrent: () => true,
+          onWaiting: () => phases.add('src-waiting'),
+          onChecking: () => phases.add('src-checking'),
+        );
+        final other = coordinator.checkFavoriteSource(
+          'other',
+          isCurrent: () => true,
+          onWaiting: () => phases.add('other-waiting'),
+          onChecking: () => phases.add('other-checking'),
+        );
+        expect(phases, ['src-checking', 'other-waiting']);
+        expect(scan.scopes, [
+          {'src'},
+        ]);
+
+        scan.gate.release.complete();
+        expect(await opening, isTrue);
+        expect(await same, isTrue);
+        expect(await other, isTrue);
+        expect(scan.scopes, [
+          {'src'},
+          {'other'},
+        ]);
+        expect(phases.last, 'other-checking');
+      },
+    );
+
+    test('a scoped acquisition error is reported to the page', () async {
+      final coordinator = buildCoordinator();
+      scan.summary = ScanProgress(
+        phase: ScanProgressPhase.finished,
+        discoveredWorks: 1,
+        failedWorks: 1,
+      );
+      expect(
+        await coordinator.checkFavoriteSource(
+          'src',
+          isCurrent: () => true,
+          onWaiting: () {},
+          onChecking: () {},
+        ),
+        isFalse,
+      );
+    });
+  });
 }
 
 /// A `ScanService` that records the due set instead of acquiring.
@@ -731,6 +791,7 @@ class _RecordingScanService extends ScanService {
   /// as "do not filter" and an empty map as "nothing is due", so a stub that
   /// merges them cannot tell a working round from one that scans nothing.
   final List<Map<String, Set<String>>?> calls = [];
+  final List<Set<String>?> scopes = [];
   ScanProgress summary = ScanProgress(phase: ScanProgressPhase.finished);
   int cancelCalls = 0;
 
@@ -745,6 +806,7 @@ class _RecordingScanService extends ScanService {
     String? roundLabel,
   }) async {
     calls.add(dueComicIdsBySource);
+    scopes.add(scopeSourceKeys);
     if (hold) {
       if (!gate.started.isCompleted) gate.started.complete();
       await gate.release.future;

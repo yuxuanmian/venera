@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/foundation.dart' show ValueNotifier, visibleForTesting;
 
 import '../follow_update_recovery.dart';
 import '../scan/models.dart';
@@ -99,6 +99,7 @@ class JudgmentService {
   bool _running = false;
   JudgmentSummary? _lastSummary;
   final _eventController = StreamController<JudgmentBatchEvent>.broadcast();
+  final _unreadRevision = ValueNotifier<int>(0);
   Future<void> _comicBatchTail = Future<void>.value();
   int _waitingRuns = 0;
 
@@ -109,6 +110,9 @@ class JudgmentService {
   /// Broadcast, because the stream is a runtime notification with no replay and
   /// more than one consumer may subscribe.
   Stream<JudgmentBatchEvent> get events => _eventController.stream;
+
+  /// Invalidates local unread queries after committed judgments and clears.
+  ValueNotifier<int> get unreadRevision => _unreadRevision;
 
   /// Whether a run is currently in flight.  Debug reads this to report
   /// "already running" instead of silently starting a second run.
@@ -338,6 +342,7 @@ class JudgmentService {
       _eventController.add(
         JudgmentBatchEvent(rows: List.unmodifiable(eventRows)),
       );
+      _unreadRevision.value++;
     }
 
     return JudgmentSummary(
@@ -363,6 +368,7 @@ class JudgmentService {
     if (cancel != null) await cancel();
     await repository.clear();
     _lastSummary = null;
+    _unreadRevision.value++;
   }
 
   /// Clears the visible flag of every comic of one source (FR-027).
@@ -379,7 +385,9 @@ class JudgmentService {
       if (!state.hasNewUpdate) continue;
       rows.add(state.copyWith(hasNewUpdate: false));
     }
-    return repository.applyBatch(rows);
+    final cleared = await repository.applyBatch(rows);
+    if (cleared > 0) _unreadRevision.value++;
+    return cleared;
   }
 
   /// Clears the visible flag of one comic (FR-021, Contract E6).
@@ -396,7 +404,10 @@ class JudgmentService {
   Future<int> clearVisibleFlag(String sourceKey, String comicId) async {
     await repository.ensureOpen();
     final cleared = await repository.clearVisibleFlag(sourceKey, comicId);
-    if (cleared > 0) _operationHook?.call('judgment.clearVisibleFlag');
+    if (cleared > 0) {
+      _unreadRevision.value++;
+      _operationHook?.call('judgment.clearVisibleFlag');
+    }
     return cleared;
   }
 

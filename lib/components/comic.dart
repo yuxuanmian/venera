@@ -893,9 +893,18 @@ class _SliverGridComicsState extends State<SliverGridComics> {
 
   void _updateVisibleComics() {
     final nextComics = <Comic>[];
+    final blockedWords = (appdata.settings['blockedWords'] as List)
+        .cast<String>();
     _originalIndices.clear();
     for (final (index, comic) in widget.comics.indexed) {
-      if (isBlocked(comic) == null) {
+      if (blockedComicKeyword(
+            blockedWords,
+            title: comic.title,
+            subtitle: comic.subtitle,
+            description: comic.description,
+            tags: comic.tags ?? const [],
+          ) ==
+          null) {
         nextComics.add(comic);
         _originalIndices.add(index);
       }
@@ -1030,33 +1039,6 @@ class _SliverGridComics extends StatelessWidget {
       gridDelegate: SliverGridDelegateWithComics(),
     );
   }
-}
-
-/// return the first blocked keyword, or null if not blocked
-String? isBlocked(Comic item) {
-  for (var word in appdata.settings['blockedWords']) {
-    if (item.title.contains(word)) {
-      return word;
-    }
-    if (item.subtitle?.contains(word) ?? false) {
-      return word;
-    }
-    if (item.description.contains(word)) {
-      return word;
-    }
-    for (var tag in item.tags ?? <String>[]) {
-      if (tag == word) {
-        return word;
-      }
-      if (tag.contains(':')) {
-        tag = tag.split(':')[1];
-        if (tag == word) {
-          return word;
-        }
-      }
-    }
-  }
-  return null;
 }
 
 class ComicList extends StatefulWidget {
