@@ -7,6 +7,7 @@ import 'models.dart';
 enum CatalogSetupFailureKind {
   connectionFailed,
   contentPreparationFailed,
+  appVersionIncompatible,
   invalidRepositorySource,
   repositoryHeadUnavailable,
   invalidRepositoryHead,
@@ -24,14 +25,26 @@ enum CatalogSetupStage {
 }
 
 class CatalogSetupFailure {
-  const CatalogSetupFailure(this.kind, {this.diagnostic});
+  const CatalogSetupFailure(
+    this.kind, {
+    this.diagnostic,
+    this.minimumAppVersion,
+  });
 
   final CatalogSetupFailureKind kind;
+  final String? minimumAppVersion;
 
   /// Technical details for diagnostics only; never render in ordinary UI.
   final String? diagnostic;
 
   static CatalogSetupFailure? fromError(Object error, CatalogSetupStage stage) {
+    if (error is CatalogAppVersionException) {
+      return CatalogSetupFailure(
+        CatalogSetupFailureKind.appVersionIncompatible,
+        minimumAppVersion: error.minimumAppVersion,
+        diagnostic: '${stage.name}:appVersionIncompatible',
+      );
+    }
     final code = switch (error) {
       CatalogHttpException() => error.code,
       CatalogRepositorySourceException() => error.code,

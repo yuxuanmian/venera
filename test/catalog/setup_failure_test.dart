@@ -35,6 +35,9 @@ class _Transport implements CatalogTransport {
       });
     }
     if (snapshotError != null) throw snapshotError!;
+    if (uri.path.endsWith('/catalog.json')) {
+      return const CatalogBytesResponse(404, []);
+    }
     return CatalogBytesResponse(
       200,
       utf8.encode(
@@ -293,6 +296,10 @@ void main() {
           failure: CatalogSetupFailure(
             kind,
             diagnostic: 'UNTRUSTED MESSAGE SocketException C:/private SHA',
+            minimumAppVersion:
+                kind == CatalogSetupFailureKind.appVersionIncompatible
+                ? '2.0.0-beta.8'
+                : null,
           ),
         ),
         target,
@@ -315,6 +322,8 @@ void main() {
       final title = switch (kind) {
         CatalogSetupFailureKind.connectionFailed => '无法连接配置仓库',
         CatalogSetupFailureKind.contentPreparationFailed => '漫画源配置准备失败',
+        CatalogSetupFailureKind.appVersionIncompatible =>
+          '此漫画源配置需要 Venera 2.0.0-beta.8 或更高版本',
         CatalogSetupFailureKind.invalidRepositorySource => '配置来源无效',
         CatalogSetupFailureKind.repositoryHeadUnavailable => '无法获取配置分支的最新版本',
         CatalogSetupFailureKind.invalidRepositoryHead => '配置仓库返回的分支信息无效',

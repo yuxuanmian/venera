@@ -522,6 +522,10 @@ void main() {
             'object': {'type': 'commit', 'sha': revision},
           });
         }
+        if (request.uri ==
+            Uri.parse(pointer.indexUrl).resolve('catalog.json')) {
+          return const CatalogBytesResponse(404, []);
+        }
         if (request.uri == Uri.parse(pointer.indexUrl)) {
           return _jsonResponse([
             {

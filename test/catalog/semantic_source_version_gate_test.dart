@@ -562,6 +562,9 @@ class _Transport implements CatalogTransport {
     required int maxBytes,
     CatalogCancellationToken? cancellation,
   }) async {
+    if (uri.path.endsWith('/catalog.json')) {
+      return const CatalogBytesResponse(404, []);
+    }
     final response = responses[uri.toString()];
     if (response == null) throw StateError('missing response for $uri');
     return response;

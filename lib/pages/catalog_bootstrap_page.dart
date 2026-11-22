@@ -48,7 +48,7 @@ class _CatalogBootstrapPageState extends State<CatalogBootstrapPage> {
     );
     _error = widget.failure == null
         ? (widget.recovery ? _recoveryMessage : null)
-        : _failureMessage(widget.failure!.kind);
+        : _failureMessage(widget.failure!);
     widget.controller.addListener(_onControllerProgress);
   }
 
@@ -107,7 +107,7 @@ class _CatalogBootstrapPageState extends State<CatalogBootstrapPage> {
       } else {
         _error = verification.failure == null
             ? '配置来源验证未完成'.tl
-            : _failureMessage(verification.failure!.kind);
+            : _failureMessage(verification.failure!);
       }
     });
   }
@@ -145,12 +145,12 @@ class _CatalogBootstrapPageState extends State<CatalogBootstrapPage> {
       if (result is CatalogNeedsInitialization) {
         _error = result.failure == null
             ? null
-            : _failureMessage(result.failure!.kind);
+            : _failureMessage(result.failure!);
         _phase = result.failure == null ? '准备已取消' : '初始化未完成，请检查来源后重试';
       } else if (result is CatalogNeedsRecovery) {
         _error = result.failure == null
             ? _recoveryMessage
-            : _failureMessage(result.failure!.kind);
+            : _failureMessage(result.failure!);
         _phase = '恢复未完成';
       } else {
         _status = '漫画源配置已准备完成。';
@@ -269,8 +269,14 @@ class _CatalogBootstrapPageState extends State<CatalogBootstrapPage> {
 
 String get _recoveryMessage => '${'无法保存或读取本地漫画源配置'.tl}\n${'请检查本地存储后重试'.tl}';
 
-String _failureMessage(CatalogSetupFailureKind kind) {
-  final (title, guidance) = switch (kind) {
+String _failureMessage(CatalogSetupFailure failure) {
+  final (title, guidance) = switch (failure.kind) {
+    CatalogSetupFailureKind.appVersionIncompatible => (
+      'This comic source catalog requires Venera @version or later'.tlParams({
+        'version': failure.minimumAppVersion!,
+      }),
+      'Update Venera and try again',
+    ),
     CatalogSetupFailureKind.invalidRepositorySource => (
       '配置来源无效',
       '请输入公开 GitHub 仓库地址和有效分支',

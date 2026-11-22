@@ -9,6 +9,16 @@ Venera uses [flutter_qjs](https://github.com/wgh136/flutter_qjs) as js engine wh
 
 This document will describe how to write a comic source for Venera.
 
+## Config repository compatibility
+
+The optional root `catalog.json` declares the minimum App version for the
+entire Git commit, for example `{"minAppVersion": "2.0.0-beta.8"}`. Venera
+reads it at the resolved commit SHA before downloading source scripts. It
+uses SemVer precedence including prereleases and ignoring build metadata.
+The verified minimum travels with the downloaded snapshot and is checked
+again when loading it offline. Older commits without `catalog.json` keep
+the existing script validation, including the per-script `minAppVersion`.
+
 ## Favorite update evidence
 
 `favoriteUpdate` 是可选的优化扩展，字段可独立省略：`state`、`sourceUnread`、`marker` 和

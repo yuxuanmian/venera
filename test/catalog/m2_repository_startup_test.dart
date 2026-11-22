@@ -62,13 +62,14 @@ class _Environment {
 }
 
 class _Transport implements CatalogTransport {
-  _Transport(this.handler);
+  _Transport(this.handler, {this.metadata = const {}});
 
   final FutureOr<CatalogBytesResponse> Function(
     Uri uri,
     CatalogCancellationToken? cancellation,
   )
   handler;
+  final Map<Uri, CatalogBytesResponse> metadata;
   final requests = <Uri>[];
 
   @override
@@ -79,6 +80,9 @@ class _Transport implements CatalogTransport {
     CatalogCancellationToken? cancellation,
   }) async {
     requests.add(uri);
+    if (uri.path.endsWith('/catalog.json')) {
+      return metadata[uri] ?? const CatalogBytesResponse(404, []);
+    }
     return handler(uri, cancellation);
   }
 }
@@ -171,6 +175,116 @@ SourcePreferences _preferences(List<String>? initial) =>
     SourcePreferences(initial: initial);
 
 void main() {
+  test(
+    'catalog gate blocks a cold install, keeps the local snapshot, and survives an offline downgrade',
+    () async {
+      final environment = await _Environment.create();
+      final previousVersion = App.packageVersion;
+      App.packageVersion = '2.0.0-beta.7';
+      addTearDown(() async {
+        App.packageVersion = previousVersion;
+        await environment.dispose();
+      });
+      final legacy = _pointer('a' * 40);
+      final latest = _pointer('b' * 40);
+      final manifestUri = Uri.parse(latest.indexUrl).resolve('catalog.json');
+      var offline = false;
+      final transport = _Transport(
+        (uri, _) {
+          if (uri == _headUri('yxm')) {
+            if (offline) throw const SocketException('offline');
+            return _head('yxm', latest);
+          }
+          if (uri == Uri.parse(latest.indexUrl)) return _index(['demo']);
+          if (uri == Uri.parse(latest.indexUrl).resolve('demo.js')) {
+            return CatalogBytesResponse(200, utf8.encode('source demo'));
+          }
+          throw StateError('unexpected request $uri');
+        },
+        metadata: {
+          manifestUri: _json({'minAppVersion': '2.0.0-beta.8'}),
+        },
+      );
+      CatalogController newSession() {
+        final session = CatalogController(
+          store: environment.store,
+          httpClient: CatalogHttpClient(transport: transport),
+          runtimeLoader: _loader(),
+          appdata: environment.appdata,
+          legacyRoot: Directory(p.join(environment.root.path, 'comic_source')),
+        );
+        addTearDown(session.dispose);
+        return session;
+      }
+
+      final fresh = await newSession().boot() as CatalogNeedsInitialization;
+      expect(
+        fresh.failure?.kind,
+        CatalogSetupFailureKind.appVersionIncompatible,
+      );
+      expect(fresh.failure?.minimumAppVersion, '2.0.0-beta.8');
+      expect(transport.requests, [_headUri('yxm'), manifestUri]);
+      expect(environment.appdata.catalogRuntime, isNull);
+
+      await _writeSnapshot(environment.store, legacy, 'legacy-version', [
+        'demo',
+      ]);
+      environment.appdata.catalogRuntime = AppCatalogState(
+        active: legacy,
+      ).toJson();
+      transport.requests.clear();
+      final controller = newSession();
+      final fallback = await controller.boot() as CatalogReady;
+      expect(
+        fallback.localFallbackReason,
+        CatalogLocalFallbackReason.updateRequiresNewerApp,
+      );
+      expect(controller.runtimePointer, legacy);
+      expect(environment.appdata.readCatalogState()?.active, legacy);
+      expect(transport.requests, [_headUri('yxm'), manifestUri]);
+
+      final check = await controller.checkRepositoryUpdate();
+      expect(check.failure?.minimumAppVersion, '2.0.0-beta.8');
+      expect(check.latest, latest);
+      expect(controller.hasRepositoryUpdate, isFalse);
+
+      App.packageVersion = '2.0.0-beta.8';
+      final compatibleCheck = await controller.checkRepositoryUpdate();
+      expect(compatibleCheck.succeeded, isTrue);
+      expect(controller.hasRepositoryUpdate, isTrue);
+      final applied = await newSession().boot() as CatalogReady;
+      expect(applied.snapshot.manifest.pointer, latest);
+      expect(
+        (await environment.store.readSnapshot(latest))?.manifest.minAppVersion,
+        '2.0.0-beta.8',
+      );
+      expect(environment.appdata.readCatalogState()?.lkg, legacy);
+
+      offline = true;
+      App.packageVersion = '2.0.0-beta.7';
+      final damaged = _pointer('c' * 40);
+      await environment.store
+          .snapshotDirectory(damaged)
+          .create(recursive: true);
+      environment.appdata.catalogRuntime = AppCatalogState(
+        active: latest,
+        lkg: damaged,
+      ).toJson();
+      final recovery = await newSession().boot() as CatalogNeedsRecovery;
+      expect(recovery.failure?.minimumAppVersion, '2.0.0-beta.8');
+
+      environment.appdata.catalogRuntime = AppCatalogState(
+        active: latest,
+        lkg: legacy,
+      ).toJson();
+      transport.requests.clear();
+      final downgraded = await newSession().boot() as CatalogReady;
+      expect(downgraded.usedLocalFallback, isTrue);
+      expect(downgraded.snapshot.manifest.pointer, legacy);
+      expect(transport.requests, [_headUri('yxm')]);
+    },
+  );
+
   test(
     'fresh startup auto-installs the default repository with empty selection',
     () async {
@@ -437,7 +551,10 @@ void main() {
       expect((result as CatalogReady).usedLocalFallback, isFalse);
       expect(controller.sessionState?.active, pointer);
       expect(runtimePreparations, 1);
-      expect(transport.requests, [_headUri('yxm')]);
+      expect(transport.requests, [
+        _headUri('yxm'),
+        Uri.parse(pointer.indexUrl).resolve('catalog.json'),
+      ]);
     },
   );
 
@@ -631,7 +748,10 @@ void main() {
     expect(result, isA<CatalogReady>());
     expect((result as CatalogReady).usedLocalFallback, isTrue);
     expect(controller.sessionState?.active, active);
-    expect(transport.requests, [_headUri('yxm')]);
+    expect(transport.requests, [
+      _headUri('yxm'),
+      Uri.parse(lkg.indexUrl).resolve('catalog.json'),
+    ]);
   });
 
   test(
@@ -832,7 +952,7 @@ void main() {
       final check = await controller.checkRepositoryUpdate();
       expect(check.succeeded, isTrue);
       expect(controller.sessionState?.active, runtimeBefore);
-      expect(transport.requests, hasLength(requestsBefore + 1));
+      expect(transport.requests, hasLength(requestsBefore + 2));
 
       final verification = await controller.verifyAndSaveRepositorySource(
         nextSource,
@@ -843,12 +963,12 @@ void main() {
       expect(environment.appdata.readCatalogState()!.active, active);
       expect(environment.appdata.settings['catalogRepositoryBranch'], 'next');
       expect(
-        transport.requests.skip(requestsBefore + 1).map((uri) => uri.path),
+        transport.requests.skip(requestsBefore + 2).map((uri) => uri.path),
         contains('/repos/yuxuanmian/venera-configs/git/ref/heads/next'),
       );
       expect(
         transport.requests
-            .skip(requestsBefore + 1)
+            .skip(requestsBefore + 2)
             .every((uri) => !uri.path.endsWith('.js')),
         isTrue,
       );

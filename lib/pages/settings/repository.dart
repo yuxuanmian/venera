@@ -284,7 +284,7 @@ class _CatalogRepositorySettingsState extends State<CatalogRepositorySettings> {
           if (_failure != null) ...[
             const SizedBox(height: 12),
             Text(
-              _failureMessage(_failure!.kind),
+              _failureMessage(_failure!),
               style: TextStyle(color: Theme.of(context).colorScheme.error),
             ),
           ],
@@ -383,6 +383,8 @@ String _fallbackReasonText(CatalogLocalFallbackReason? reason) =>
       CatalogLocalFallbackReason.userSelected => '用户选择了本地版本',
       CatalogLocalFallbackReason.repositoryCheckFailed => '配置仓库检查失败',
       CatalogLocalFallbackReason.updatePreparationFailed => '新版本准备失败',
+      CatalogLocalFallbackReason.updateRequiresNewerApp =>
+        'The latest catalog requires a newer Venera version',
       null => '已保存的本地版本',
     }.tl;
 
@@ -396,12 +398,14 @@ String _checkStatusText(
   if (check.status == CatalogRepositoryCheckStatus.cancelled) {
     return '检查已取消'.tl;
   }
-  if (check.status == CatalogRepositoryCheckStatus.failed ||
-      check.failure != null) {
-    final failure = check.failure;
+  final failure = check.failure;
+  if (failure?.kind == CatalogSetupFailureKind.appVersionIncompatible) {
+    return _failureMessage(failure!);
+  }
+  if (check.status == CatalogRepositoryCheckStatus.failed || failure != null) {
     return failure == null
         ? '检查失败'.tl
-        : '${'检查失败'.tl}：${_failureMessage(failure.kind)}';
+        : '${'检查失败'.tl}：${_failureMessage(failure)}';
   }
   if (!sourceMatchesSaved) return '查询来源与已保存目标不同'.tl;
   final latest = check.latest;
@@ -417,8 +421,12 @@ String _checkStatusText(
   return '检查完成'.tl;
 }
 
-String _failureMessage(CatalogSetupFailureKind kind) {
-  final text = switch (kind) {
+String _failureMessage(CatalogSetupFailure failure) {
+  final text = switch (failure.kind) {
+    CatalogSetupFailureKind.appVersionIncompatible =>
+      'This comic source catalog requires Venera @version or later'.tlParams({
+        'version': failure.minimumAppVersion!,
+      }),
     CatalogSetupFailureKind.invalidRepositorySource => '配置来源无效',
     CatalogSetupFailureKind.repositoryHeadUnavailable => '无法获取分支最新提交',
     CatalogSetupFailureKind.invalidRepositoryHead => '分支响应无效',

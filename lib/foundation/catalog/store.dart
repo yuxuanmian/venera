@@ -52,7 +52,7 @@ class CatalogCandidate {
 }
 
 /// Filesystem-only Catalog storage. App state remains in appdata; this class
-/// owns immutable snapshots and never chooses an active pointer.
+/// owns snapshots of immutable revisions and never chooses an active pointer.
 class CatalogStore {
   CatalogStore(this.root);
 
@@ -106,6 +106,7 @@ class CatalogStore {
     required List<int> indexBytes,
     required CatalogIndex index,
     String? attemptId,
+    String? minAppVersion,
   }) async {
     pointer.validate();
     if (indexBytes.length > catalogMaxIndexBytes) {
@@ -130,6 +131,7 @@ class CatalogStore {
       pointer: pointer,
       indexSha256: sha256Hex(indexBytes),
       files: const [],
+      minAppVersion: minAppVersion,
     );
     return CatalogCandidate(
       pointer: pointer,
@@ -204,6 +206,7 @@ class CatalogStore {
       pointer: candidate.pointer,
       indexSha256: sha256Hex(candidate.indexBytes),
       files: files,
+      minAppVersion: candidate.manifest.minAppVersion,
     );
     await _writeExclusive(
       File(p.join(candidate.directory.path, 'index.json')),
@@ -286,6 +289,36 @@ class CatalogStore {
       indexBytes: verified.indexBytes,
       index: verified.index,
       rootPath: p.join(finalDirectory.path),
+    );
+  }
+
+  /// Backfills the declaration on a verified snapshot cached by an older App.
+  Future<CatalogSnapshot> recordMinimumAppVersion(
+    CatalogSnapshot snapshot,
+    String? minimum, {
+    required Future<void> Function(File, File) replaceAtomically,
+  }) async {
+    final previous = snapshot.manifest;
+    if (minimum == null || previous.minAppVersion != null) return snapshot;
+    final manifest = CatalogSnapshotManifest(
+      pointer: previous.pointer,
+      indexSha256: previous.indexSha256,
+      files: previous.files,
+      minAppVersion: minimum,
+    );
+    final target = File(p.join(snapshot.rootPath, 'snapshot.json'));
+    final staged = File('${target.path}.${const Uuid().v4()}.tmp');
+    try {
+      await staged.writeAsString(jsonEncode(manifest.toJson()), flush: true);
+      await replaceAtomically(staged, target);
+    } finally {
+      if (await staged.exists()) await staged.delete();
+    }
+    return CatalogSnapshot(
+      manifest: manifest,
+      indexBytes: snapshot.indexBytes,
+      index: snapshot.index,
+      rootPath: snapshot.rootPath,
     );
   }
 

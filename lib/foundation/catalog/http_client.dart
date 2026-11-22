@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:venera/foundation/app.dart';
 import 'package:venera/network/app_dio.dart';
+import 'package:venera/utils/semantic_version.dart';
 
 import 'models.dart';
 import 'store.dart';
@@ -13,6 +14,7 @@ const catalogNormalPrepareBudget = Duration(seconds: 30);
 const catalogBootstrapPrepareBudget = Duration(seconds: 120);
 const catalogFileRequestTimeout = Duration(seconds: 15);
 const catalogMaxGitRefBytes = 64 << 10;
+const catalogMaxMetadataBytes = 16 << 10;
 const catalogMaxConcurrentDownloads = 4;
 
 class CatalogHttpException implements Exception {
@@ -467,6 +469,63 @@ class CatalogHttpClient {
     return Uri.parse(pointer.indexUrl);
   }
 
+  Future<String?> checkCompatibility(
+    CatalogPointer pointer, {
+    required CatalogAttempt attempt,
+  }) => attempt.waitFor(() async {
+    final response = await _get(
+      indexUri(pointer).resolve('catalog.json'),
+      attempt: attempt,
+      maxBytes: catalogMaxMetadataBytes,
+    );
+    if (response.statusCode == HttpStatus.notFound) return null;
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw CatalogHttpException(
+        'catalog_metadata_query_failed',
+        'catalog.json 请求失败（HTTP ${response.statusCode}）',
+      );
+    }
+    if (response.bytes.length > catalogMaxMetadataBytes) {
+      throw const CatalogHttpException(
+        'response_too_large',
+        'catalog.json 响应过大',
+      );
+    }
+    final String minimum;
+    try {
+      final data = jsonDecode(utf8.decode(response.bytes));
+      if (data is! Map) {
+        throw const CatalogFormatException('catalog.json must be an object');
+      }
+      minimum = parseCatalogMinimumAppVersion(data['minAppVersion']);
+    } on FormatException catch (error) {
+      throw CatalogHttpException(
+        'invalid_catalog_metadata',
+        'catalog.json 无效',
+        error,
+      );
+    } on CatalogFormatException catch (error) {
+      throw CatalogHttpException(
+        'invalid_catalog_metadata',
+        'catalog.json 无效',
+        error,
+      );
+    }
+    requireCompatibleApp(minimum);
+    return minimum;
+  });
+
+  void requireCompatibleApp(String? minimumAppVersion) {
+    if (minimumAppVersion == null) return;
+    final comparison = compareSemanticVersions(
+      App.packageVersion,
+      minimumAppVersion,
+    );
+    if (comparison == null || comparison < 0) {
+      throw CatalogAppVersionException(minimumAppVersion);
+    }
+  }
+
   Uri sourceUri(CatalogPointer pointer, String fileName) {
     pointer.validate();
     final entry = Uri.parse(pointer.indexUrl);
@@ -489,6 +548,7 @@ class CatalogHttpClient {
     pointer.validate();
     CatalogCandidate? candidate;
     try {
+      final minAppVersion = await checkCompatibility(pointer, attempt: attempt);
       final indexResponse = await _get(
         indexUri(pointer),
         attempt: attempt,
@@ -507,6 +567,7 @@ class CatalogHttpClient {
         indexBytes: indexBytes,
         index: index,
         attemptId: attempt.id,
+        minAppVersion: minAppVersion,
       );
       onProgress?.call(0, index.entries.length);
       var next = 0;

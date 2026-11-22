@@ -26,6 +26,9 @@ class _Transport implements CatalogTransport {
     required int maxBytes,
     CatalogCancellationToken? cancellation,
   }) async {
+    if (uri.path.endsWith('/catalog.json')) {
+      return const CatalogBytesResponse(404, []);
+    }
     if (uri.toString() ==
         'https://api.github.com/repos/yuxuanmian/venera-configs/git/ref/heads/yxm') {
       return CatalogBytesResponse(

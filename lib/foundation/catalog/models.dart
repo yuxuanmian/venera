@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
 
+import '../../utils/semantic_version.dart';
+
 const catalogSchemaVersion = 1;
 const catalogMaxIndexBytes = 2 << 20;
 const catalogMaxSourceBytes = 5 << 20;
@@ -135,6 +137,32 @@ class CatalogFormatException implements Exception {
 
   @override
   String toString() => cause == null ? message : '$message: $cause';
+}
+
+// pub_semver accepts leading zeros in numeric identifiers. Catalog metadata
+// uses the stricter SemVer format while sharing the app's version comparator.
+final _catalogVersionPattern = RegExp(
+  r'^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)'
+  r'(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+  r'(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?'
+  r'(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$',
+);
+
+String parseCatalogMinimumAppVersion(Object? value) {
+  if (value is! String ||
+      _catalogVersionPattern.firstMatch(value)?.end != value.length ||
+      !isSemanticVersionString(value)) {
+    throw const CatalogFormatException(
+      'minAppVersion must be a semantic version',
+    );
+  }
+  return value;
+}
+
+class CatalogAppVersionException implements Exception {
+  const CatalogAppVersionException(this.minimumAppVersion);
+
+  final String minimumAppVersion;
 }
 
 class CatalogPointer {
@@ -436,6 +464,7 @@ class CatalogSnapshotManifest {
     required this.pointer,
     required this.indexSha256,
     required this.files,
+    this.minAppVersion,
     this.schemaVersion = catalogSchemaVersion,
   });
 
@@ -443,6 +472,7 @@ class CatalogSnapshotManifest {
   final CatalogPointer pointer;
   final String indexSha256;
   final List<CatalogSnapshotFile> files;
+  final String? minAppVersion;
 
   factory CatalogSnapshotManifest.fromJson(Map<String, dynamic> json) {
     final schema = json['schemaVersion'];
@@ -458,6 +488,9 @@ class CatalogSnapshotManifest {
       pointer: CatalogPointer.fromJson(_requiredMap(json, 'catalog')),
       indexSha256: _requiredString(json, 'indexSha256'),
       files: files.map(CatalogSnapshotFile.fromJson).toList(growable: false),
+      minAppVersion: json.containsKey('minAppVersion')
+          ? parseCatalogMinimumAppVersion(json['minAppVersion'])
+          : null,
     );
     if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(result.indexSha256)) {
       throw const CatalogFormatException('invalid index digest');
@@ -470,6 +503,7 @@ class CatalogSnapshotManifest {
     'catalog': pointer.toJson(),
     'indexSha256': indexSha256,
     'files': files.map((file) => file.toJson()).toList(growable: false),
+    if (minAppVersion != null) 'minAppVersion': minAppVersion,
   };
 }
 

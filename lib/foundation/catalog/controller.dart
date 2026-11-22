@@ -26,6 +26,7 @@ enum CatalogLocalFallbackReason {
   userSelected,
   repositoryCheckFailed,
   updatePreparationFailed,
+  updateRequiresNewerApp,
 }
 
 enum CatalogRepositoryCheckStatus { success, failed, cancelled }
@@ -295,15 +296,21 @@ class CatalogController extends ChangeNotifier {
     _busy = true;
     final attempt = CatalogAttempt(
       id: 'repository-check-${DateTime.now().microsecondsSinceEpoch}',
-      deadline: DateTime.now().add(catalogHeadTimeout),
+      deadline: DateTime.now().add(
+        catalogHeadTimeout + catalogFileRequestTimeout,
+      ),
     );
     _currentAttempt = attempt;
+    CatalogPointer? pointer;
+    var stage = CatalogSetupStage.repositoryHead;
     try {
       _reportProgress('查询配置仓库', 0, 0);
-      final pointer = await httpClient.resolveRepositoryHead(
+      pointer = await httpClient.resolveRepositoryHead(
         selectedSource,
         attempt: attempt,
       );
+      stage = CatalogSetupStage.indexValidation;
+      await httpClient.checkCompatibility(pointer, attempt: attempt);
       final check = CatalogRepositoryCheck(
         source: selectedSource,
         checkedAt: checkedAt,
@@ -316,13 +323,14 @@ class CatalogController extends ChangeNotifier {
     } catch (error) {
       final cancelled =
           error is CatalogHttpException && error.code == 'cancelled';
-      final failure = _failureFor(error, CatalogSetupStage.repositoryHead);
+      final failure = _failureFor(error, stage);
       final check = CatalogRepositoryCheck(
         source: selectedSource,
         checkedAt: checkedAt,
         status: cancelled
             ? CatalogRepositoryCheckStatus.cancelled
             : CatalogRepositoryCheckStatus.failed,
+        latest: pointer,
         failure: failure,
       );
       latestRepositoryCheck = check;
@@ -383,6 +391,7 @@ class CatalogController extends ChangeNotifier {
       latestRepositoryCheck = check;
       stage = CatalogSetupStage.indexValidation;
       _reportProgress('验证漫画源配置索引', 0, 0);
+      await httpClient.checkCompatibility(pointer, attempt: attempt);
       await httpClient.readIndex(pointer, attempt: attempt);
       await appdata.persistRepositorySource(source);
       check = CatalogRepositoryCheck(
@@ -553,8 +562,15 @@ class CatalogController extends ChangeNotifier {
       }
       var index = 0;
       _lastTryFailure = null;
+      CatalogSetupFailure? versionFailure;
+      CatalogPointer? incompatibleLatest;
       for (final choice in choices) {
         index++;
+        // A pre-gate snapshot can lack the minimum version in its manifest.
+        if (choice.localOnly &&
+            incompatibleLatest?.sameIdentity(choice.pointer) == true) {
+          continue;
+        }
         final result = await _tryChoice(
           choice,
           state,
@@ -566,10 +582,25 @@ class CatalogController extends ChangeNotifier {
               : null,
         );
         if (result != null) return _remember(result);
+        final failure = _lastTryFailure;
+        if (failure?.kind == CatalogSetupFailureKind.appVersionIncompatible) {
+          versionFailure ??= failure;
+          if (!choice.localOnly) {
+            incompatibleLatest = choice.pointer;
+            latestRepositoryCheck = CatalogRepositoryCheck(
+              source: source,
+              checkedAt: checkedAt,
+              status: CatalogRepositoryCheckStatus.failed,
+              latest: choice.pointer,
+              failure: failure,
+            );
+          }
+        }
         if (!choice.localOnly &&
             _localFallbackReason != CatalogLocalFallbackReason.userSelected) {
-          _localFallbackReason =
-              CatalogLocalFallbackReason.updatePreparationFailed;
+          _localFallbackReason = incompatibleLatest == null
+              ? CatalogLocalFallbackReason.updatePreparationFailed
+              : CatalogLocalFallbackReason.updateRequiresNewerApp;
         }
         _reportProgress('尝试本地可用版本', index, choices.length);
       }
@@ -580,6 +611,7 @@ class CatalogController extends ChangeNotifier {
               : '没有可用的本地漫画源版本',
           repositorySource: source ?? CatalogRepositorySource.defaults,
           failure:
+              versionFailure ??
               _lastTryFailure ??
               headFailure ??
               const CatalogSetupFailure(
@@ -716,9 +748,17 @@ class CatalogController extends ChangeNotifier {
           sourceData: downloadedData,
         ),
       );
-      final promoted = await attempt.waitFor(
-        () => store.promoteCandidate(downloaded, replaceInvalid: true),
-      );
+      final promoted = await attempt.waitFor(() async {
+        final snapshot = await store.promoteCandidate(
+          downloaded,
+          replaceInvalid: true,
+        );
+        return store.recordMinimumAppVersion(
+          snapshot,
+          downloaded.manifest.minAppVersion,
+          replaceAtomically: appdata.replaceFileAtomically,
+        );
+      });
       candidate = null;
       final sourceData = downloadedData;
       final preparedRuntime = await attempt.waitFor(
@@ -909,6 +949,25 @@ class CatalogController extends ChangeNotifier {
       } on CatalogStorageException {
         invalidCachedSnapshot = true;
         lastDiagnostic = 'snapshot:invalid';
+      }
+      final cached = snapshot;
+      if (cached != null) {
+        final minAppVersion = cached.manifest.minAppVersion;
+        if (!choice.localOnly && minAppVersion == null) {
+          final minimum = await httpClient.checkCompatibility(
+            choice.pointer,
+            attempt: attempt,
+          );
+          snapshot = await attempt.waitFor(
+            () => store.recordMinimumAppVersion(
+              cached,
+              minimum,
+              replaceAtomically: appdata.replaceFileAtomically,
+            ),
+          );
+        } else {
+          httpClient.requireCompatibleApp(minAppVersion);
+        }
       }
       if (snapshot == null && !choice.localOnly) {
         final candidate = await attempt.waitFor(

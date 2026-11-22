@@ -251,6 +251,8 @@ class _CatalogGateState extends State<CatalogGate> {
       CatalogLocalFallbackReason.userSelected => '你选择了使用本地版本',
       CatalogLocalFallbackReason.repositoryCheckFailed => '配置仓库检查失败',
       CatalogLocalFallbackReason.updatePreparationFailed => '新版本准备失败',
+      CatalogLocalFallbackReason.updateRequiresNewerApp =>
+        'The latest catalog requires a newer Venera version',
       null => '当前使用已保存的版本',
     };
     WidgetsBinding.instance.addPostFrameCallback((_) {
