@@ -12,6 +12,8 @@ const String autoUpdateManifestUrl =
 const String appGithubUrl = "https://github.com/yuxuanmian/venera";
 
 const String appReleaseUrl = "https://github.com/yuxuanmian/venera/releases";
+const _appReleasesApi =
+    "https://api.github.com/repos/yuxuanmian/venera/releases";
 
 /// The outcome of one update check.
 ///
@@ -19,14 +21,13 @@ const String appReleaseUrl = "https://github.com/yuxuanmian/venera/releases";
 /// different outcomes: reporting an unknown result as "no new version" would
 /// tell the user their app is current when nothing was actually verified.
 enum AppUpdateOutcome {
-  /// The remote manifest declares a strictly newer semantic version.
+  /// A strictly newer version is available.
   available,
 
-  /// The remote manifest declares the same or an older semantic version.
+  /// The newest available version is the same or older.
   none,
 
-  /// The comparison could not be made: the local version is unknown, the remote
-  /// version is missing or malformed, or the manifest could not be fetched.
+  /// The running or available version could not be determined.
   unknown,
 }
 
@@ -204,44 +205,177 @@ Future<AppUpdateOutcome> checkUpdate() async {
   return outcome;
 }
 
-/// Runs one update check and reports the result to the user.
-///
-/// The three outcomes are reported differently on purpose: an available update
-/// opens the update dialog, "no new version" says so, and an undecidable result
-/// says that the latest version could not be determined — it never claims the
-/// app is current and never offers an upgrade.
-///
-/// [showMessageIfNoUpdate] must stay a positional optional argument: the
-/// start-up update check calls it as `checkUpdateUi(false, true)`.
-Future<void> checkUpdateUi([
+typedef AppUpdateCheck = ({
+  AppUpdateOutcome outcome,
+  String releasePage,
+  String? downloadUrl,
+});
+
+Future<List<dynamic>?> _fetchAppReleases() async {
+  final response = await AppDio().get<List<dynamic>>(
+    _appReleasesApi,
+    options: Options(
+      headers: {
+        'Accept': 'application/vnd.github+json',
+        'cache-time': 'no',
+        'Cache-Control': 'no-cache',
+      },
+    ),
+  );
+  return response.data;
+}
+
+String? _androidReleaseDownload(Map release, String tag, String version) {
+  final assets = release['assets'];
+  if (assets is! List) return null;
+  const prefix = 'venera-';
+  const suffix = '-android-arm64-release.apk';
+  for (final asset in assets) {
+    if (asset is! Map || asset['state'] != 'uploaded') continue;
+    final name = asset['name'];
+    if (name is! String ||
+        !name.startsWith('$prefix$version') ||
+        !name.endsWith(suffix)) {
+      continue;
+    }
+    // Earlier builds included +buildNumber in the asset filename.
+    final assetVersion = name.substring(
+      prefix.length,
+      name.length - suffix.length,
+    );
+    if (tryParseSemanticVersion(assetVersion)?.semantic != version) continue;
+    final expected =
+        '$appReleaseUrl/download/$tag/${Uri.encodeComponent(name)}';
+    if (asset['browser_download_url'] == expected) return expected;
+  }
+  return null;
+}
+
+Future<AppUpdateCheck> checkAppUpdate({
+  required bool androidArm64,
+  Future<List<dynamic>?> Function() readReleases = _fetchAppReleases,
+}) async {
+  if (!androidArm64) {
+    return (
+      outcome: await checkUpdate(),
+      releasePage: appReleaseUrl,
+      downloadUrl: null,
+    );
+  }
+  const unknown = (
+    outcome: AppUpdateOutcome.unknown,
+    releasePage: appReleaseUrl,
+    downloadUrl: null,
+  );
+  final localVersion = App.version;
+  if (!isSemanticVersionString(localVersion)) return unknown;
+
+  List<dynamic>? releases;
+  try {
+    releases = await readReleases();
+  } catch (e) {
+    Log.error('Check Update', 'The release list could not be fetched: $e');
+    return unknown;
+  }
+  if (releases == null) return unknown;
+
+  SemanticVersion? latestVersion;
+  String? releaseTag;
+  String? downloadUrl;
+  for (final release in releases) {
+    if (release is! Map || release['draft'] != false) continue;
+    final tag = release['tag_name'];
+    if (tag is! String || !tag.startsWith('v')) continue;
+    final version = tryParseSemanticVersion(tag.substring(1));
+    if (version == null ||
+        (latestVersion != null && version.version <= latestVersion.version)) {
+      continue;
+    }
+    final url = _androidReleaseDownload(release, tag, version.semantic);
+    if (url == null) continue;
+    latestVersion = version;
+    releaseTag = tag;
+    downloadUrl = url;
+  }
+
+  final outcome = resolveUpdateOutcome(
+    localVersion: localVersion,
+    remoteVersion: latestVersion?.semantic,
+  );
+  return (
+    outcome: outcome,
+    releasePage: releaseTag == null
+        ? appReleaseUrl
+        : '$appReleaseUrl/tag/$releaseTag',
+    downloadUrl: outcome == AppUpdateOutcome.available ? downloadUrl : null,
+  );
+}
+
+Future<void> _openUpdateLink(BuildContext context, String url) async {
+  try {
+    if (await launchUrlString(url, mode: LaunchMode.externalApplication)) {
+      return;
+    }
+  } catch (e, s) {
+    Log.error('Check Update', 'The update link could not be opened: $e', s);
+  }
+  if (context.mounted) {
+    context.showMessage(message: 'Unable to open update link'.tl);
+  }
+}
+
+/// Runs an update check and shows the download and release page when available.
+Future<void> checkUpdateUi({
   bool showMessageIfNoUpdate = true,
   bool delay = false,
-]) async {
+  Future<AppUpdateCheck> Function()? readUpdate,
+}) async {
   try {
     // Resolved inside the guard: the start-up check runs before the UI is
     // necessarily mounted, and a missing root context must not be fatal.
     final target = App.rootContext;
-    var outcome = await checkUpdate();
-    switch (outcome) {
+    final update =
+        await (readUpdate?.call() ??
+            checkAppUpdate(
+              androidArm64: App.isAndroid && Abi.current() == Abi.androidArm64,
+            ));
+    if (!target.mounted) return;
+    switch (update.outcome) {
       case AppUpdateOutcome.available:
         if (delay) {
           await Future.delayed(const Duration(seconds: 2));
+          if (!target.mounted) return;
         }
-        showDialog(
+        showDialog<void>(
           context: target,
           builder: (context) {
+            final downloadUrl = update.downloadUrl;
             return ContentDialog(
               title: "New version available".tl,
               content: Text(
                 "A new version is available. Do you want to update now?".tl,
               ).paddingHorizontal(16),
               actions: [
-                Button.text(
-                  onPressed: () {
-                    Navigator.pop(context);
-                    launchUrlString(appReleaseUrl);
-                  },
-                  child: Text("Update".tl),
+                Flexible(
+                  child: OverflowBar(
+                    alignment: MainAxisAlignment.end,
+                    overflowAlignment: OverflowBarAlignment.end,
+                    spacing: 8,
+                    overflowSpacing: 8,
+                    children: [
+                      Button.text(
+                        onPressed: () =>
+                            _openUpdateLink(context, update.releasePage),
+                        child: Text('View release page'.tl),
+                      ),
+                      if (downloadUrl != null)
+                        Button.filled(
+                          onPressed: () =>
+                              _openUpdateLink(context, downloadUrl),
+                          child: Text('Download APK'.tl),
+                        ),
+                    ],
+                  ),
                 ),
               ],
             );

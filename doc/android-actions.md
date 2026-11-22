@@ -71,9 +71,10 @@ debug/release 沿用现有 Gradle 配置，共用同一签名。缺少 Secrets �
 5. CI 单纯失败可直接 Re-run（`gh release upload ... --clobber` 会覆盖同名 asset），不需要改版本；
    如果发布内容真正变化并需要用户收到更新，应提升 semantic version，而不是只增加 `+buildNumber`。
 
-新版客户端直接读取 GitHub `master/pubspec.yaml` 检查更新。使用 CDN 镜像的旧客户端可能
-读到缓存的旧版本；发版后若出现此问题，可刷新 `gh/yuxuanmian/venera@master/pubspec.yaml`
-这一个 CDN 文件，再验证它返回的 `version:`。
+Android ARM64 客户端从 GitHub Releases 检查更新，包含预发布版。只有对应的 release APK
+上传后才会提示更新。「下载 APK」在外部浏览器打开该附件的直链，「查看发布页」打开对应版本。
+其他平台和旧版客户端仍从 `master/pubspec.yaml` 检查版本。使用 CDN 镜像的旧客户端可能
+读到缓存的旧版本。遇到这种情况，可刷新 `gh/yuxuanmian/venera@master/pubspec.yaml` 并验证版本。
 
 ## 产物和本地构建
 

@@ -152,7 +152,7 @@ Future<void> _checkAppUpdates() async {
   appdata.implicitData['lastCheckUpdate'] = now;
   appdata.writeImplicitData();
   if (appdata.settings['checkUpdateOnStart']) {
-    await checkUpdateUi(false, true);
+    await checkUpdateUi(showMessageIfNoUpdate: false, delay: true);
   }
 }
 

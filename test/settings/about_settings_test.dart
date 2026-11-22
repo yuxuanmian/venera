@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:venera/foundation/app.dart';
@@ -388,6 +389,170 @@ void main() {
         'Unable to determine the latest version'.tl,
         isNot('No new version available'.tl),
       );
+    });
+  });
+
+  group('Android release downloads', () {
+    Map<String, Object> apk(
+      String version, {
+      String state = 'uploaded',
+      String? name,
+      String? url,
+    }) {
+      final assetName = name ?? 'venera-$version-android-arm64-release.apk';
+      return {
+        'name': assetName,
+        'state': state,
+        'browser_download_url':
+            url ??
+            '$appReleaseUrl/download/v$version/${Uri.encodeComponent(assetName)}',
+      };
+    }
+
+    Map<String, Object> release(
+      String version,
+      List<Object> assets, {
+      bool draft = false,
+    }) => {
+      'tag_name': 'v$version',
+      'draft': draft,
+      'prerelease': true,
+      'assets': assets,
+    };
+
+    test('selects the newest uploaded ARM64 beta by semantic version', () async {
+      await setRuntimeVersion('2.0.0-beta.8');
+      final result = await checkAppUpdate(
+        androidArm64: true,
+        readReleases: () async => [
+          release('2.0.0-beta.11', []),
+          release('2.0.0-beta.9', [apk('2.0.0-beta.9')]),
+          release('2.0.0-beta.10', [apk('2.0.0-beta.10')]),
+          release('2.0.0-beta.12', [
+            apk('2.0.0-beta.12', state: 'starter'),
+            apk(
+              '2.0.0-beta.12',
+              name: 'venera-2.0.0-beta.12-android-arm64-debug.apk',
+            ),
+            apk(
+              '2.0.0-beta.12',
+              name: 'venera-2.0.0-beta.12-android-x64-release.apk',
+            ),
+          ]),
+          release('2.0.0-beta.13', [apk('2.0.0-beta.13')], draft: true),
+          release('2.0.0-beta.14', [
+            apk('2.0.0-beta.14', url: 'https://example.com/other.apk'),
+          ]),
+          release('2.0.0-beta.15', [
+            apk(
+              '2.0.0-beta.16',
+              url:
+                  '$appReleaseUrl/download/v2.0.0-beta.15/venera-2.0.0-beta.16-android-arm64-release.apk',
+            ),
+          ]),
+        ],
+      );
+
+      expect(result.outcome, AppUpdateOutcome.available);
+      expect(result.releasePage, '$appReleaseUrl/tag/v2.0.0-beta.10');
+      expect(result.downloadUrl, apk('2.0.0-beta.10')['browser_download_url']);
+    });
+
+    test('accepts older APK filenames with build metadata', () async {
+      await setRuntimeVersion('2.0.0-beta.2');
+      final result = await checkAppUpdate(
+        androidArm64: true,
+        readReleases: () async => [
+          release('2.0.0-beta.3', [
+            apk(
+              '2.0.0-beta.3',
+              name: 'venera-2.0.0-beta.3+167-android-arm64-release.apk',
+            ),
+          ]),
+        ],
+      );
+      expect(result.outcome, AppUpdateOutcome.available);
+      expect(
+        result.downloadUrl,
+        endsWith('beta.3%2B167-android-arm64-release.apk'),
+      );
+    });
+
+    test(
+      'waits for the newer APK to appear and distinguishes network failure',
+      () async {
+        await setRuntimeVersion('2.0.0-beta.8');
+        final pending = await checkAppUpdate(
+          androidArm64: true,
+          readReleases: () async => [
+            release('2.0.0-beta.9', []),
+            release('2.0.0-beta.8', [apk('2.0.0-beta.8')]),
+          ],
+        );
+        expect(pending.outcome, AppUpdateOutcome.none);
+        expect(pending.downloadUrl, isNull);
+
+        final offline = await checkAppUpdate(
+          androidArm64: true,
+          readReleases: () async => throw StateError('offline'),
+        );
+        expect(offline.outcome, AppUpdateOutcome.unknown);
+        expect(offline.downloadUrl, isNull);
+      },
+    );
+
+    test('other platforms retain the manifest and release page', () async {
+      await setRuntimeVersion('2.0.0-beta.8');
+      updateManifestReader = () async => 'version: 2.0.0-beta.9+173\n';
+      final result = await checkAppUpdate(
+        androidArm64: false,
+        readReleases: () async =>
+            throw StateError('Unexpected release request'),
+      );
+      expect(result.outcome, AppUpdateOutcome.available);
+      expect(result.releasePage, appReleaseUrl);
+      expect(result.downloadUrl, isNull);
+    });
+
+    testWidgets('the update dialog opens both URLs outside the app', (
+      tester,
+    ) async {
+      await setRuntimeVersion('2.0.0-beta.8');
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(360, 760);
+      addTearDown(tester.view.reset);
+      const launcher = MethodChannel('plugins.flutter.io/url_launcher');
+      final messenger = tester.binding.defaultBinaryMessenger;
+      final calls = <MethodCall>[];
+      messenger.setMockMethodCallHandler(launcher, (call) async {
+        calls.add(call);
+        return true;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(launcher, null));
+      await tester.pumpWidget(
+        MaterialApp(navigatorKey: App.rootNavigatorKey, home: const Scaffold()),
+      );
+
+      await checkUpdateUi(
+        readUpdate: () => checkAppUpdate(
+          androidArm64: true,
+          readReleases: () async => [
+            release('2.0.0-beta.9', [apk('2.0.0-beta.9')]),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Download APK'.tl));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('View release page'.tl));
+      await tester.pumpAndSettle();
+
+      expect(calls.map((call) => call.method), ['launch', 'launch']);
+      expect(calls.map((call) => call.arguments['useWebView']), [false, false]);
+      expect(calls.map((call) => call.arguments['url']), [
+        apk('2.0.0-beta.9')['browser_download_url'],
+        '$appReleaseUrl/tag/v2.0.0-beta.9',
+      ]);
     });
   });
 }
