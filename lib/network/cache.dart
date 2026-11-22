@@ -81,7 +81,8 @@ class NetworkCacheManager implements Interceptor {
   ) async {
     // Scans must observe the remote source and must not turn a stale
     // cached page (or a HEAD probe) into a scan result.
-    if (options.extra['veneraScan'] == true) {
+    if (options.extra['veneraScan'] == true ||
+        options.extra['catalogLiveRef'] == true) {
       return handler.next(options);
     }
     if (options.method != "GET") {
@@ -225,7 +226,8 @@ class NetworkCacheManager implements Interceptor {
     Response<dynamic> response,
     ResponseInterceptorHandler handler,
   ) {
-    if (response.requestOptions.extra['veneraScan'] == true) {
+    if (response.requestOptions.extra['veneraScan'] == true ||
+        response.requestOptions.extra['catalogLiveRef'] == true) {
       return handler.next(response);
     }
     if (response.requestOptions.method != "GET") {

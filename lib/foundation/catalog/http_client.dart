@@ -1,15 +1,20 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:venera/foundation/app.dart';
+import 'package:venera/foundation/log.dart';
 import 'package:venera/network/app_dio.dart';
 import 'package:venera/utils/semantic_version.dart';
 
 import 'models.dart';
 import 'store.dart';
 
-const catalogHeadTimeout = Duration(seconds: 3);
+part 'git_head.dart';
+
+const catalogHeadTimeout = Duration(seconds: 6);
+const catalogManualHeadTimeout = Duration(seconds: 10);
 const catalogNormalPrepareBudget = Duration(seconds: 30);
 const catalogBootstrapPrepareBudget = Duration(seconds: 120);
 const catalogFileRequestTimeout = Duration(seconds: 15);
@@ -30,11 +35,26 @@ class CatalogHttpException implements Exception {
 }
 
 class CatalogBytesResponse {
-  const CatalogBytesResponse(this.statusCode, this.bytes, {this.contentType});
+  const CatalogBytesResponse(
+    this.statusCode,
+    this.bytes, {
+    this.contentType,
+    this.headers = const {},
+  });
 
   final int statusCode;
   final List<int> bytes;
   final String? contentType;
+  final Map<String, List<String>> headers;
+
+  String? header(String name) => headers[name]?.firstOrNull;
+}
+
+class CatalogHeadRateLimitException extends CatalogHttpException {
+  const CatalogHeadRateLimitException(this.retryAt)
+    : super('head_rate_limited', 'GitHub API 请求额度已用完');
+
+  final DateTime retryAt;
 }
 
 abstract interface class CatalogTransport {
@@ -46,7 +66,20 @@ abstract interface class CatalogTransport {
   });
 }
 
-class IoCatalogTransport implements CatalogTransport {
+abstract interface class CatalogGitTransport implements CatalogTransport {
+  Future<CatalogBytesResponse> requestGit(
+    Uri uri, {
+    required Duration timeout,
+    required int maxBytes,
+    required CatalogCancellationToken cancellation,
+    Uint8List? body,
+  });
+}
+
+const _gitProtocolHeaders = {'Git-Protocol': 'version=2'};
+const _gitRequestContentType = 'application/x-git-upload-pack-request';
+
+class IoCatalogTransport implements CatalogGitTransport {
   const IoCatalogTransport();
 
   @override
@@ -55,14 +88,47 @@ class IoCatalogTransport implements CatalogTransport {
     required Duration timeout,
     required int maxBytes,
     CatalogCancellationToken? cancellation,
+  }) => _request(uri, timeout, maxBytes, cancellation);
+
+  @override
+  Future<CatalogBytesResponse> requestGit(
+    Uri uri, {
+    required Duration timeout,
+    required int maxBytes,
+    required CatalogCancellationToken cancellation,
+    Uint8List? body,
+  }) => _request(uri, timeout, maxBytes, cancellation, git: true, body: body);
+
+  Future<CatalogBytesResponse> _request(
+    Uri uri,
+    Duration timeout,
+    int maxBytes,
+    CatalogCancellationToken? cancellation, {
+    bool git = false,
+    Uint8List? body,
   }) async {
     if (cancellation?.isCancelled == true) {
       throw const CatalogHttpException('cancelled', '请求已取消');
     }
     final client = HttpClient();
+    final removeCancellation = cancellation?.onCancel(
+      () => client.close(force: true),
+    );
     try {
-      final request = await client.getUrl(uri).timeout(timeout);
+      final request = await client
+          .openUrl(body == null ? 'GET' : 'POST', uri)
+          .timeout(timeout);
       request.followRedirects = false;
+      request.headers.set('Cache-Control', 'no-cache');
+      if (git) _gitProtocolHeaders.forEach(request.headers.set);
+      if (body != null) {
+        request.headers.set(
+          HttpHeaders.contentTypeHeader,
+          _gitRequestContentType,
+        );
+        request.contentLength = body.length;
+        request.add(body);
+      }
       final response = await request.close().timeout(timeout);
       if (response.isRedirect) {
         throw const CatalogHttpException(
@@ -71,10 +137,13 @@ class IoCatalogTransport implements CatalogTransport {
         );
       }
       final bytes = await _readLimited(response, maxBytes).timeout(timeout);
+      final headers = <String, List<String>>{};
+      response.headers.forEach((name, values) => headers[name] = values);
       return CatalogBytesResponse(
         response.statusCode,
         bytes,
         contentType: response.headers.contentType?.mimeType,
+        headers: headers,
       );
     } on TimeoutException catch (error) {
       throw CatalogHttpException('timeout', 'Catalog 请求超时', error);
@@ -93,6 +162,7 @@ class IoCatalogTransport implements CatalogTransport {
         error,
       );
     } finally {
+      removeCancellation?.call();
       client.close(force: true);
     }
   }
@@ -101,7 +171,7 @@ class IoCatalogTransport implements CatalogTransport {
 /// Production Catalog transport. It deliberately goes through AppDio so the
 /// shared rhttp adapter supplies the app's proxy, DNS overrides, TLS policy,
 /// cookie boundary and cancellation path.
-class AppDioCatalogTransport implements CatalogTransport {
+class AppDioCatalogTransport implements CatalogGitTransport {
   AppDioCatalogTransport({AppDio? dio})
     : _dio =
           dio ??
@@ -120,6 +190,24 @@ class AppDioCatalogTransport implements CatalogTransport {
     required Duration timeout,
     required int maxBytes,
     CatalogCancellationToken? cancellation,
+  }) => _request(uri, timeout, maxBytes, cancellation);
+
+  @override
+  Future<CatalogBytesResponse> requestGit(
+    Uri uri, {
+    required Duration timeout,
+    required int maxBytes,
+    required CatalogCancellationToken cancellation,
+    Uint8List? body,
+  }) => _request(uri, timeout, maxBytes, cancellation, git: true, body: body);
+
+  Future<CatalogBytesResponse> _request(
+    Uri uri,
+    Duration timeout,
+    int maxBytes,
+    CatalogCancellationToken? cancellation, {
+    bool git = false,
+    Uint8List? body,
   }) async {
     if (cancellation?.isCancelled == true) {
       throw const CatalogHttpException('cancelled', '请求已取消');
@@ -130,21 +218,29 @@ class AppDioCatalogTransport implements CatalogTransport {
     );
     try {
       final response = await _dio
-          .get<List<int>>(
+          .request<List<int>>(
             uri.toString(),
+            data: body,
             cancelToken: cancelToken,
             options: Options(
+              method: body == null ? 'GET' : 'POST',
+              contentType: body == null ? null : _gitRequestContentType,
               responseType: ResponseType.bytes,
               followRedirects: false,
               maxRedirects: 0,
               sendTimeout: timeout,
               receiveTimeout: timeout,
-              headers: const {'Cache-Control': 'no-cache'},
+              headers: {
+                'Cache-Control': 'no-cache',
+                if (git) ..._gitProtocolHeaders,
+              },
               extra: {
                 // RHttpAdapter consumes these before Dio buffers a body. The
                 // ordinary AppDio path keeps its existing redirect policy.
                 'catalogNoRedirect': true,
                 'catalogMaxBytes': maxBytes,
+                // HEAD and Git advertisements must go directly to GitHub.
+                if (git || uri.host == 'api.github.com') 'catalogLiveRef': true,
               },
             ),
           )
@@ -158,14 +254,15 @@ class AppDioCatalogTransport implements CatalogTransport {
           'Catalog 请求不允许重定向',
         );
       }
-      final body = response.data ?? const <int>[];
-      if (body.length > maxBytes) {
+      final bytes = response.data ?? const <int>[];
+      if (bytes.length > maxBytes) {
         throw const CatalogHttpException('response_too_large', '响应过大');
       }
       return CatalogBytesResponse(
         response.statusCode ?? 0,
-        List<int>.from(body),
+        List<int>.from(bytes),
         contentType: response.headers.value('content-type'),
+        headers: response.headers.map,
       );
     } on TimeoutException catch (error) {
       // Future.timeout only abandons the Dart future. Explicitly cancel the
@@ -356,36 +453,83 @@ class CatalogHttpClient {
               : const IoCatalogTransport());
 
   final CatalogTransport transport;
+  DateTime? _restRateLimitedUntil;
 
   Future<CatalogPointer> resolveRepositoryHead(
     CatalogRepositorySource source, {
     CatalogAttempt? attempt,
-  }) {
-    if (attempt == null) {
-      return _resolveRepositoryHead(source);
+    Duration timeout = catalogHeadTimeout,
+  }) async {
+    final budget = _timeoutForAttempt(attempt, timeout);
+    final deadline = DateTime.now().add(budget);
+    final head = CatalogAttempt(
+      id: attempt?.id ?? 'repository-head',
+      deadline: attempt != null && attempt.deadline.isBefore(deadline)
+          ? attempt.deadline
+          : deadline,
+    );
+    final removeCancellation = attempt?.cancellation.onCancel(head.close);
+    try {
+      return await head.waitFor(() => _resolveRepositoryHead(source, head));
+    } finally {
+      removeCancellation?.call();
+      head.finish();
     }
-    _timeoutForAttempt(attempt, catalogHeadTimeout);
-    return attempt.waitFor(() => _resolveRepositoryHead(source, attempt));
   }
 
   Future<CatalogPointer> _resolveRepositoryHead(
-    CatalogRepositorySource source, [
-    CatalogAttempt? attempt,
-  ]) async {
-    final timeout = _timeoutForAttempt(attempt, catalogHeadTimeout);
+    CatalogRepositorySource source,
+    CatalogAttempt attempt,
+  ) async {
+    final git = transport;
+    if (git is CatalogGitTransport) {
+      try {
+        final pointer = await _queryGitBranch(git, source, attempt);
+        Log.info('Catalog', 'Repository HEAD resolved via Git HTTPS');
+        return pointer;
+      } on CatalogHttpException catch (error) {
+        if (error.code == 'branch_not_found' ||
+            error.code == 'cancelled' ||
+            !attempt.isOpen) {
+          rethrow;
+        }
+        Log.info(
+          'Catalog',
+          'Git HEAD query failed (${error.code}); trying REST',
+        );
+      }
+    }
+    return _resolveRestHead(source, attempt);
+  }
+
+  Future<CatalogPointer> _resolveRestHead(
+    CatalogRepositorySource source,
+    CatalogAttempt attempt,
+  ) async {
+    final retryAt = _restRateLimitedUntil;
+    if (retryAt != null && retryAt.isAfter(DateTime.now())) {
+      throw CatalogHeadRateLimitException(retryAt);
+    }
     final response = await transport
         .getBytes(
           _repositoryHeadUri(source),
-          timeout: timeout,
+          timeout: _timeoutForAttempt(attempt, attempt.remaining),
           maxBytes: catalogMaxGitRefBytes,
-          cancellation: attempt?.cancellation,
+          cancellation: attempt.cancellation,
         )
-        .timeout(timeout)
         .catchError((error) {
           throw _normalizeTransportError(error);
         });
     if (response.bytes.length > catalogMaxGitRefBytes) {
       throw const CatalogHttpException('response_too_large', 'GitHub 分支响应过大');
+    }
+    final rateLimit = _restRateLimitRetryAt(response, DateTime.now());
+    if (rateLimit != null) {
+      _restRateLimitedUntil = rateLimit;
+      throw CatalogHeadRateLimitException(rateLimit);
+    }
+    if (response.statusCode == HttpStatus.notFound) {
+      throw const CatalogHttpException('branch_not_found', '找不到配置仓库或分支');
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw CatalogHttpException(
@@ -406,10 +550,12 @@ class CatalogHttpClient {
         throw const CatalogFormatException('invalid repository head');
       }
       final revision = object['sha'] as String;
-      if (!RegExp(r'^[0-9a-f]{40}$').hasMatch(revision)) {
+      if (!_gitCommitSha.hasMatch(revision)) {
         throw const CatalogFormatException('invalid repository head revision');
       }
-      return source.pointerForRevision(revision);
+      final pointer = source.pointerForRevision(revision);
+      Log.info('Catalog', 'Repository HEAD resolved via GitHub REST');
+      return pointer;
     } on CatalogFormatException {
       throw const CatalogHttpException(
         'invalid_head_response',
@@ -646,6 +792,37 @@ class CatalogHttpClient {
           throw _normalizeTransportError(error);
         });
   }
+}
+
+DateTime? _restRateLimitRetryAt(CatalogBytesResponse response, DateTime now) {
+  final status = response.statusCode;
+  if (status != HttpStatus.forbidden && status != HttpStatus.tooManyRequests) {
+    return null;
+  }
+  final retryAfter = response.header('retry-after');
+  final exhausted = response.header('x-ratelimit-remaining') == '0';
+  if (status == HttpStatus.forbidden &&
+      !exhausted &&
+      retryAfter == null &&
+      !String.fromCharCodes(
+        response.bytes,
+      ).toLowerCase().contains('secondary rate limit')) {
+    return null;
+  }
+  // Bound integer conversions before creating a DateTime from untrusted headers.
+  const maxEpochSeconds = 253402300799;
+  final nowSeconds = now.millisecondsSinceEpoch ~/ 1000;
+  final delay = int.tryParse(retryAfter ?? '');
+  if (delay != null && delay > 0 && delay <= maxEpochSeconds - nowSeconds) {
+    return now.add(Duration(seconds: delay));
+  }
+  final reset = exhausted
+      ? int.tryParse(response.header('x-ratelimit-reset') ?? '')
+      : null;
+  if (reset != null && reset > nowSeconds && reset <= maxEpochSeconds) {
+    return DateTime.fromMillisecondsSinceEpoch(reset * 1000, isUtc: true);
+  }
+  return now.add(const Duration(minutes: 1));
 }
 
 Duration _timeoutForAttempt(CatalogAttempt? attempt, Duration maximum) {

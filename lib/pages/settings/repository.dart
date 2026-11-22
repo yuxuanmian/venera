@@ -442,6 +442,10 @@ String _failureMessage(CatalogSetupFailure failure) {
       }),
     CatalogSetupFailureKind.invalidRepositorySource => '配置来源无效',
     CatalogSetupFailureKind.repositoryHeadUnavailable => '无法获取分支最新提交',
+    CatalogSetupFailureKind.repositoryBranchNotFound =>
+      'Repository or branch not found',
+    CatalogSetupFailureKind.repositoryRateLimited =>
+      catalogRepositoryRateLimitMessage(failure),
     CatalogSetupFailureKind.invalidRepositoryHead => '分支响应无效',
     CatalogSetupFailureKind.connectionFailed => '无法连接配置仓库',
     CatalogSetupFailureKind.storageUnavailable => '无法保存本地配置',

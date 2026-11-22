@@ -70,12 +70,13 @@ class _ThrowingDio extends AppDio {
   _ThrowingDio(this.type);
   final DioExceptionType type;
   @override
-  Future<Response<T>> get<T>(
+  Future<Response<T>> request<T>(
     String path, {
     Object? data,
     Map<String, dynamic>? queryParameters,
     Options? options,
     CancelToken? cancelToken,
+    ProgressCallback? onSendProgress,
     ProgressCallback? onReceiveProgress,
   }) async => throw DioException(
     requestOptions: RequestOptions(path: path),
@@ -326,6 +327,10 @@ void main() {
           '此漫画源配置需要 Venera 2.0.0-beta.8 或更高版本',
         CatalogSetupFailureKind.invalidRepositorySource => '配置来源无效',
         CatalogSetupFailureKind.repositoryHeadUnavailable => '无法获取配置分支的最新版本',
+        CatalogSetupFailureKind.repositoryBranchNotFound =>
+          'Repository or branch not found'.tl,
+        CatalogSetupFailureKind.repositoryRateLimited =>
+          'GitHub API rate limit reached'.tl,
         CatalogSetupFailureKind.invalidRepositoryHead => '配置仓库返回的分支信息无效',
         CatalogSetupFailureKind.storageUnavailable => '无法保存或读取本地配置',
         CatalogSetupFailureKind.operationInProgress => '另一个配置操作正在进行',

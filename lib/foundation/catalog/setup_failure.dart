@@ -10,6 +10,8 @@ enum CatalogSetupFailureKind {
   appVersionIncompatible,
   invalidRepositorySource,
   repositoryHeadUnavailable,
+  repositoryBranchNotFound,
+  repositoryRateLimited,
   invalidRepositoryHead,
   storageUnavailable,
   operationInProgress,
@@ -29,15 +31,24 @@ class CatalogSetupFailure {
     this.kind, {
     this.diagnostic,
     this.minimumAppVersion,
+    this.retryAt,
   });
 
   final CatalogSetupFailureKind kind;
   final String? minimumAppVersion;
+  final DateTime? retryAt;
 
   /// Technical details for diagnostics only; never render in ordinary UI.
   final String? diagnostic;
 
   static CatalogSetupFailure? fromError(Object error, CatalogSetupStage stage) {
+    if (error is CatalogHeadRateLimitException) {
+      return CatalogSetupFailure(
+        CatalogSetupFailureKind.repositoryRateLimited,
+        diagnostic: '${stage.name}:${error.code}',
+        retryAt: error.retryAt,
+      );
+    }
     if (error is CatalogAppVersionException) {
       return CatalogSetupFailure(
         CatalogSetupFailureKind.appVersionIncompatible,
@@ -69,7 +80,9 @@ class CatalogSetupFailure {
         'connection_failed' => CatalogSetupFailureKind.connectionFailed,
         'head_query_failed' =>
           CatalogSetupFailureKind.repositoryHeadUnavailable,
+        'branch_not_found' => CatalogSetupFailureKind.repositoryBranchNotFound,
         'invalid_head_response' ||
+        'invalid_git_head_response' ||
         'response_too_large' => CatalogSetupFailureKind.invalidRepositoryHead,
         _ => CatalogSetupFailureKind.repositoryHeadUnavailable,
       },

@@ -297,7 +297,7 @@ class CatalogController extends ChangeNotifier {
     final attempt = CatalogAttempt(
       id: 'repository-check-${DateTime.now().microsecondsSinceEpoch}',
       deadline: DateTime.now().add(
-        catalogHeadTimeout + catalogFileRequestTimeout,
+        catalogManualHeadTimeout + catalogFileRequestTimeout,
       ),
     );
     _currentAttempt = attempt;
@@ -308,6 +308,7 @@ class CatalogController extends ChangeNotifier {
       pointer = await httpClient.resolveRepositoryHead(
         selectedSource,
         attempt: attempt,
+        timeout: catalogManualHeadTimeout,
       );
       stage = CatalogSetupStage.indexValidation;
       await httpClient.checkCompatibility(pointer, attempt: attempt);
@@ -381,6 +382,7 @@ class CatalogController extends ChangeNotifier {
       pointer = await httpClient.resolveRepositoryHead(
         source,
         attempt: attempt,
+        timeout: catalogManualHeadTimeout,
       );
       var check = CatalogRepositoryCheck(
         source: source,
@@ -707,7 +709,11 @@ class CatalogController extends ChangeNotifier {
           preferences.enabledSources ?? _readEnabledFromSettings();
       _reportProgress('查询配置仓库', 0, 0);
       final pointer = await attempt.waitFor(
-        () => httpClient.resolveRepositoryHead(source, attempt: attempt),
+        () => httpClient.resolveRepositoryHead(
+          source,
+          attempt: attempt,
+          timeout: catalogManualHeadTimeout,
+        ),
       );
       resolvedPointer = pointer;
       latestRepositoryCheck = CatalogRepositoryCheck(

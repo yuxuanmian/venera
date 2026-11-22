@@ -269,6 +269,14 @@ class _CatalogBootstrapPageState extends State<CatalogBootstrapPage> {
 
 String get _recoveryMessage => '${'无法保存或读取本地漫画源配置'.tl}\n${'请检查本地存储后重试'.tl}';
 
+String catalogRepositoryRateLimitMessage(CatalogSetupFailure failure) {
+  final retryAt = failure.retryAt;
+  if (retryAt == null) return 'GitHub API rate limit reached'.tl;
+  return 'GitHub API rate limit reached. Try again after @time.'.tlParams({
+    'time': retryAt.toLocal().toString().substring(0, 19),
+  });
+}
+
 String _failureMessage(CatalogSetupFailure failure) {
   final (title, guidance) = switch (failure.kind) {
     CatalogSetupFailureKind.appVersionIncompatible => (
@@ -285,6 +293,10 @@ String _failureMessage(CatalogSetupFailure failure) {
       '无法获取配置分支的最新版本',
       '请检查仓库、分支和网络后重试',
     ),
+    CatalogSetupFailureKind.repositoryBranchNotFound => (
+      'Repository or branch not found',
+      '请检查仓库、分支和网络后重试',
+    ),
     CatalogSetupFailureKind.invalidRepositoryHead => (
       '配置仓库返回的分支信息无效',
       '请确认仓库和分支属于公开 GitHub 仓库',
@@ -297,6 +309,10 @@ String _failureMessage(CatalogSetupFailure failure) {
     ),
     CatalogSetupFailureKind.operationInProgress => ('另一个配置操作正在进行', '请等待当前操作完成'),
     CatalogSetupFailureKind.cancelled => ('配置操作已取消', '可以根据需要重试'),
+    CatalogSetupFailureKind.repositoryRateLimited => (
+      catalogRepositoryRateLimitMessage(failure),
+      null,
+    ),
   };
-  return '${title.tl}\n${guidance.tl}';
+  return guidance == null ? title : '${title.tl}\n${guidance.tl}';
 }
