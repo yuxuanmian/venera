@@ -46,6 +46,12 @@ class Appdata with Init {
 
   Completer<void>? _writeTail;
 
+  Future<void> waitForPendingWrites() async {
+    while (_writeTail != null) {
+      await _writeTail!.future;
+    }
+  }
+
   /// Test/integration hook for exercising the failed-replace contract.
   Future<void> Function(File source, File target)? atomicReplace;
 

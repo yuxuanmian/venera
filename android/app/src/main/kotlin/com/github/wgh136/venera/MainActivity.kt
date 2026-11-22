@@ -2,6 +2,7 @@ package com.github.wgh136.venera
 
 import android.Manifest
 import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.ContentResolver
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -110,6 +111,18 @@ class MainActivity : FlutterFragmentActivity() {
         ).setMethodCallHandler { call, res ->
             when (call.method) {
                 "getProxy" -> res.success(getProxy())
+                "restartApp" -> {
+                    if (!lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) || isFinishing) {
+                        res.error("restart_unavailable", "The main activity is not in the foreground", null)
+                    } else {
+                        try {
+                            startActivity(RestartActivity.createIntent(this))
+                            res.success(null)
+                        } catch (error: ActivityNotFoundException) {
+                            res.error("restart_unavailable", error.message, null)
+                        }
+                    }
+                }
                 "setScreenOn" -> {
                     val set = call.argument<Boolean>("set") ?: false
                     if (set) {

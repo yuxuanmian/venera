@@ -54,6 +54,11 @@
                 <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".RestartActivity"
+            android:exported="false"
+            android:process=":restart"
+            android:theme="@style/LaunchTheme" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

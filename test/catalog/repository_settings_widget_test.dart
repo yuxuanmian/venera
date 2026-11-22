@@ -263,9 +263,17 @@ void main() {
     expect(controller.checkCalls, 1);
     expect(controller.checkedSource, source);
     expect(find.textContaining('发现可用更新'), findsOneWidget);
-    expect(find.byKey(const Key('restart-update-button')), findsOneWidget);
+    final restartButton = find.byKey(const Key('restart-update-button'));
+    final branchField = find.byKey(const Key('repository-branch-field'));
+    expect(restartButton, findsOneWidget);
 
-    await tester.tap(find.byKey(const Key('restart-update-button')));
+    await tester.enterText(branchField, 'unsaved');
+    await tester.pumpAndSettle();
+    expect(tester.widget<FilledButton>(restartButton).onPressed, isNull);
+    await tester.enterText(branchField, source.branch);
+    await tester.pumpAndSettle();
+
+    await tester.tap(restartButton);
     await tester.pumpAndSettle();
     expect(restarted, 1);
     expect(controller.runtimePointer, runtime);

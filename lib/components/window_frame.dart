@@ -12,6 +12,7 @@ import 'package:venera/foundation/scan/models.dart';
 import 'package:venera/foundation/scan/failure_sanitizer.dart';
 import 'package:venera/foundation/scan/scan_service.dart';
 import 'package:venera/foundation/tracking/judgment_service.dart';
+import 'package:venera/utils/app_restart.dart';
 import 'package:venera/utils/translations.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -252,8 +253,9 @@ Future<void> showDebugMenuSheet() async {
     context: App.rootContext,
     useRootNavigator: true,
     builder: (context) => SafeArea(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
+      child: ListView(
+        shrinkWrap: true,
+        padding: EdgeInsets.zero,
         children: [
           ListTile(
             leading: const Icon(Icons.delete_sweep_outlined),
@@ -279,6 +281,11 @@ Future<void> showDebugMenuSheet() async {
             leading: const Icon(Icons.shuffle),
             title: Text('Random Refresh Comics'.tl),
             onTap: () => context.pop('refreshRandomComics'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.restart_alt),
+            title: Text('Restart App'.tl),
+            onTap: () => context.pop('restartApp'),
           ),
         ],
       ),
@@ -307,6 +314,9 @@ void handleDebugMenuSelected(String value) {
       break;
     case 'refreshRandomComics':
       _debugResult(followUpdateScannerUnavailableMessage.tl);
+      break;
+    case 'restartApp':
+      unawaited(restartAndroidApp(App.rootContext));
       break;
   }
 }

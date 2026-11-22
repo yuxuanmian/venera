@@ -166,9 +166,17 @@ class _CatalogRepositorySettingsState extends State<CatalogRepositorySettings> {
   }
 
   Future<void> _restartToUpdate() async {
-    final action = widget.restartAction;
+    if (_busy || _draftDirty) return;
+    final action =
+        widget.restartAction ??
+        (App.isAndroid ? () => restartAndroidApp(context) : null);
     if (action != null) {
-      await action();
+      setState(() => _busy = true);
+      try {
+        await action();
+      } finally {
+        if (mounted) setState(() => _busy = false);
+      }
       return;
     }
     if (!mounted) return;
@@ -322,12 +330,17 @@ class _CatalogRepositorySettingsState extends State<CatalogRepositorySettings> {
             const SizedBox(height: 16),
             FilledButton.icon(
               key: const Key('restart-update-button'),
-              onPressed: _busy ? null : _restartToUpdate,
+              onPressed: _busy || _draftDirty ? null : _restartToUpdate,
               icon: const Icon(Icons.restart_alt),
               label: Text('重启并更新'.tl),
             ),
             const SizedBox(height: 6),
-            Text('保存的目标有新提交。完全关闭再打开后，应用会检查并更新配置。'.tl),
+            Text(
+              (App.isAndroid
+                      ? 'Venera will restart and check the saved branch for updates.'
+                      : '保存的目标有新提交。完全关闭再打开后，应用会检查并更新配置。')
+                  .tl,
+            ),
           ],
           const SizedBox(height: 20),
           Text('来源和分支保存在本设备，不参与 WebDAV 或用户数据导入导出。'.tl),

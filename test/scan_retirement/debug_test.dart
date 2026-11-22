@@ -184,6 +184,28 @@ void main() {
     },
   );
 
+  testWidgets('the Android debug sheet can request an app restart', (
+    tester,
+  ) async {
+    const channel = MethodChannel('venera/method_channel');
+    final messenger = tester.binding.defaultBinaryMessenger;
+    final calls = <String>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      calls.add(call.method);
+      return null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    await pumpWindow(tester);
+
+    final sheet = showDebugMenuSheet();
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Restart App'.tl));
+    await tester.pumpAndSettle();
+    await sheet;
+
+    expect(calls, ['restartApp']);
+  });
+
   testWidgets('the retired and mislabelled debug entries are gone', (
     tester,
   ) async {

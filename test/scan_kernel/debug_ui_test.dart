@@ -226,13 +226,14 @@ void main() {
     // second selection must only report re-entry and must not reset progress.
     final sheet = showDebugMenuSheet();
     await tester.pumpAndSettle();
-    // Clear favorites, clear judgment data, force scan, rerun judgment,
-    // random refresh.
-    expect(find.byType(ListTile), findsNWidgets(5));
     // The sheet is intentionally anchored at the bottom of the oversized
     // test viewport. Invoke the real tile callback so this assertion remains
     // about menu wiring rather than pixel hit-testing.
-    tester.widget<ListTile>(find.byType(ListTile).at(2)).onTap!();
+    final forceScanTile = find.widgetWithText(
+      ListTile,
+      'Force Scan All Comics'.tl,
+    );
+    tester.widget<ListTile>(forceScanTile).onTap!();
     await sheet;
     await tester.pump();
     expect(service.isRunning, isTrue);
