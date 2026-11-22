@@ -716,13 +716,19 @@ class PageJumpTarget {
         ),
       );
     } else if (page == "category") {
-      var key = ComicSource.find(sourceKey)!.categoryData!.key;
+      final category = attributes?["category"];
+      if (category is! String ||
+          ComicSource.find(sourceKey)?.categoryComicsData == null) {
+        Log.error(
+          "Page Jump",
+          "Category is unavailable for source: $sourceKey",
+        );
+        return;
+      }
       context.to(
         () => CategoryComicsPage(
-          categoryKey: key,
-          category:
-              attributes?["category"] ??
-              (throw ArgumentError("Category name is required")),
+          sourceKey: sourceKey,
+          category: category,
           options: List.from(attributes?["options"] ?? []),
           param: attributes?["param"],
         ),

@@ -274,6 +274,9 @@ In this part, you can implement the explore page.
 
 A comic source can have multiple explore pages.
 
+Venera lists these pages after the selected source's category groups. Opening
+one of those entries loads its contents through the existing explore callback.
+
 There are three types of explore pages:
 - multiPartPage: An explore page contains multiple parts, each part contains multiple comics.
 - multiPageComicList: An explore page contains multiple comics, the comics are loaded page by page.

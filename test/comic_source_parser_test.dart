@@ -82,6 +82,62 @@ class ParserReadChaptersSource extends ComicSource {
     },
   );
 
+  test(
+    'explore loaders retain their pagination and both View more formats',
+    () async {
+      const key = 'parser_explore_compatibility';
+      final source = await ComicSourceParser().parse('''
+class ExploreCompatibilitySource extends ComicSource {
+  name = "Explore compatibility";
+  key = "$key";
+  version = "1.0.0";
+  minAppVersion = "1.0.0";
+  category = {title: "Empty category", parts: [{
+    name: "Empty", type: "fixed", categories: [],
+  }]};
+  explore = [
+    {title: "Legacy", type: "singlePageWithMultiPart", load: async () => ({Old: []})},
+    {title: "Numbered", type: "multiPageComicList", load: async (page) => ({
+      comics: [], maxPage: page + 1,
+    })},
+    {title: "Cursor", type: "multiPageComicList", loadNext: async (next) => ({
+      comics: [], next: next === null ? "tail" : null,
+    })},
+    {title: "Mixed", type: "mixed", load: async () => ({
+      data: [
+        {title: "Old", comics: [], viewMore: "category:Recent@recent"},
+        {title: "New", comics: [], viewMore: {page: "ranking"}},
+        {title: "Without link", comics: []},
+      ],
+      maxPage: 1,
+    })},
+    {title: "Parts", type: "multiPartPage", load: async () => [
+      {title: "Without link", comics: []},
+    ]},
+  ];
+}
+''', '$key.js');
+
+      expect(source.categoryData!.categories, isEmpty);
+      final [legacy, numbered, cursor, mixed, parts] = source.explorePages;
+      expect((await legacy.loadMultiPart!()).data.single.title, 'Old');
+      expect((await numbered.loadPage!(2)).subData, 3);
+      expect((await cursor.loadNext!(null)).subData, 'tail');
+      expect((await cursor.loadNext!('tail')).subData, isNull);
+      final sections = (await mixed.loadMixed!(1)).data.cast<ExplorePagePart>();
+      final legacyTarget = sections[0].viewMore!;
+      expect(legacyTarget.sourceKey, key);
+      expect(legacyTarget.page, 'category');
+      expect(legacyTarget.attributes, {
+        'category': 'Recent',
+        'param': 'recent',
+      });
+      expect(sections[1].viewMore!.page, 'ranking');
+      expect(sections[2].viewMore, isNull);
+      expect((await parts.loadMultiPart!()).data.single.viewMore, isNull);
+    },
+  );
+
   test('retains search data and tag suggestion callback', () async {
     const key = 'parser_full_search_case';
     final source = await ComicSourceParser().parse('''

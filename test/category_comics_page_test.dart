@@ -33,7 +33,7 @@ void main() {
 
     await tester.pumpWidget(
       MaterialApp(
-        home: CategoryComicsPage(category: 'All', categoryKey: _categoryKey),
+        home: CategoryComicsPage(category: 'All', sourceKey: _sourceKey),
       ),
     );
     await tester.pumpAndSettle();

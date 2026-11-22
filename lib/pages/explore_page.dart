@@ -1,362 +1,86 @@
 import 'package:flutter/material.dart';
 import 'package:venera/components/components.dart';
-import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/catalog/source_preferences.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
-import 'package:venera/foundation/global_state.dart';
 import 'package:venera/foundation/res.dart';
-import 'package:venera/pages/comic_source_page.dart';
-import 'package:venera/pages/settings/settings_page.dart';
-import 'package:venera/utils/ext.dart';
 import 'package:venera/utils/translations.dart';
 
-class ExplorePage extends StatefulWidget {
-  const ExplorePage({super.key});
+class SourceExplorePage extends StatefulWidget {
+  const SourceExplorePage({
+    super.key,
+    required this.source,
+    required this.data,
+  });
+
+  final ComicSource source;
+  final ExplorePageData data;
 
   @override
-  State<ExplorePage> createState() => _ExplorePageState();
+  State<SourceExplorePage> createState() => _SourceExplorePageState();
 }
 
-class _ExplorePageState extends State<ExplorePage>
-    with TickerProviderStateMixin, AutomaticKeepAliveClientMixin<ExplorePage> {
-  late TabController controller;
-
-  bool showFB = true;
-
-  double location = 0;
-
-  late List<String> pages;
-
-  void onSettingsChanged() {
-    var explorePages = List<String>.from(appdata.settings["explore_pages"]);
-    var all = ComicSource.all()
-        .where((source) => isSourceEnabled(source.key))
-        .map((e) => e.explorePages)
-        .expand((e) => e.map((e) => e.title))
-        .toList();
-    explorePages = explorePages.where((e) => all.contains(e)).toList();
-    if (!pages.isEqualTo(explorePages)) {
-      setState(() {
-        pages = explorePages;
-        controller = TabController(length: pages.length, vsync: this);
-      });
-    }
-  }
-
-  void onNaviItemTapped(int index) {
-    if (index == 2) {
-      int page = controller.index;
-      String currentPageId = pages[page];
-      GlobalState.find<_SingleExplorePageState>(currentPageId).toTop();
-    }
-  }
-
-  void addPage() {
-    showPopUpWidget(App.rootContext, setExplorePagesWidget());
-  }
-
-  NaviPaneState? naviPane;
-
-  @override
-  void initState() {
-    pages = List<String>.from(appdata.settings["explore_pages"]);
-    var all = ComicSource.all()
-        .where((source) => isSourceEnabled(source.key))
-        .map((e) => e.explorePages)
-        .expand((e) => e.map((e) => e.title))
-        .toList();
-    pages = pages.where((e) => all.contains(e)).toList();
-    controller = TabController(length: pages.length, vsync: this);
-    appdata.settings.addListener(onSettingsChanged);
-    NaviPane.of(context).addNaviItemTapListener(onNaviItemTapped);
-    super.initState();
-  }
-
-  @override
-  void didChangeDependencies() {
-    naviPane = NaviPane.of(context);
-    super.didChangeDependencies();
-  }
-
-  @override
-  void dispose() {
-    controller.dispose();
-    appdata.settings.removeListener(onSettingsChanged);
-    naviPane?.removeNaviItemTapListener(onNaviItemTapped);
-    super.dispose();
-  }
-
-  void refresh() {
-    int page = controller.index;
-    String currentPageId = pages[page];
-    GlobalState.find<_SingleExplorePageState>(currentPageId).refresh();
-  }
-
-  Widget buildFAB() => Material(
-    color: Colors.transparent,
-    child: FloatingActionButton(
-      key: const Key("FAB"),
-      onPressed: refresh,
-      child: const Icon(Icons.refresh),
-    ),
-  );
-
-  Tab buildTab(String i) {
-    var comicSource = ComicSource.all()
-        .where((source) => isSourceEnabled(source.key))
-        .firstWhere((e) => e.explorePages.any((e) => e.title == i));
-    return Tab(text: i.ts(comicSource.key), key: Key(i));
-  }
-
-  Widget buildBody(String i) =>
-      Material(child: _SingleExplorePage(i, key: PageStorageKey(i)));
-
-  Widget buildEmpty() {
-    var msg = "No Explore Pages".tl;
-    msg += '\n';
-    VoidCallback onTap;
-    if (ComicSource.isEmpty) {
-      msg += "Please add some sources".tl;
-      onTap = () {
-        context.to(() => ComicSourcePage());
-      };
-    } else {
-      msg += "Please check your settings".tl;
-      onTap = addPage;
-    }
-    return NetworkError(
-      message: msg,
-      retry: onTap,
-      withAppbar: false,
-      buttonText: "Manage".tl,
-    );
-  }
+class _SourceExplorePageState extends State<SourceExplorePage> {
+  final _changes = Listenable.merge([appdata.settings, ComicSourceManager()]);
+  VoidCallback? _refresh;
 
   @override
   Widget build(BuildContext context) {
-    super.build(context);
-    if (pages.isEmpty) {
-      return buildEmpty();
-    }
-
-    Widget tabBar = Material(
-      child: AppTabBar(
-        key: PageStorageKey(pages.toString()),
-        tabs: pages.map((e) => buildTab(e)).toList(),
-        controller: controller,
-        actionButton: TabActionButton(
-          icon: const Icon(Icons.add),
-          text: "Add".tl,
-          onPressed: addPage,
-        ),
-      ),
-    ).paddingTop(context.padding.top);
-
-    return Stack(
-      children: [
-        Positioned.fill(
-          child: Column(
-            children: [
-              tabBar,
-              Expanded(
-                child: NotificationListener<ScrollNotification>(
-                  onNotification: (notifications) {
-                    if (notifications.metrics.axis == Axis.horizontal) {
-                      if (!showFB) {
-                        setState(() {
-                          showFB = true;
-                        });
-                      }
-                      return true;
-                    }
-
-                    var current = notifications.metrics.pixels;
-                    var overflow = notifications.metrics.outOfRange;
-                    if (current > location && current != 0 && showFB) {
-                      setState(() {
-                        showFB = false;
-                      });
-                    } else if ((current < location - 50 || current == 0) &&
-                        !showFB) {
-                      setState(() {
-                        showFB = true;
-                      });
-                    }
-                    if ((current > location || current < location - 50) &&
-                        !overflow) {
-                      location = current;
-                    }
-                    return false;
-                  },
-                  child: MediaQuery.removePadding(
-                    context: context,
-                    removeTop: true,
-                    child: TabBarView(
-                      controller: controller,
-                      children: pages.map((e) => buildBody(e)).toList(),
-                    ),
-                  ),
+    final source = widget.source;
+    final data = widget.data;
+    return ListenableBuilder(
+      listenable: _changes,
+      builder: (context, _) {
+        final available =
+            isSourceEnabled(source.key) &&
+            identical(ComicSource.find(source.key), source);
+        return Scaffold(
+          appBar: Appbar(
+            title: Text(data.title.ts(source.key)),
+            actions: [
+              if (available)
+                IconButton(
+                  icon: const Icon(Icons.refresh),
+                  tooltip: 'Refresh'.tl,
+                  onPressed: () => _refresh?.call(),
                 ),
-              ),
             ],
           ),
-        ),
-        Positioned(
-          right: 16,
-          bottom: 16,
-          child: AnimatedSwitcher(
-            duration: const Duration(milliseconds: 150),
-            reverseDuration: const Duration(milliseconds: 150),
-            child: showFB ? buildFAB() : const SizedBox(),
-            transitionBuilder: (widget, animation) {
-              var tween = Tween<Offset>(
-                begin: const Offset(0, 1),
-                end: const Offset(0, 0),
-              );
-              return SlideTransition(
-                position: tween.animate(animation),
-                child: widget,
-              );
-            },
-          ),
-        ),
-      ],
+          body: available
+              ? _buildContent(data)
+              : Center(child: Text('Not found'.tl)),
+        );
+      },
     );
   }
 
-  @override
-  bool get wantKeepAlive => true;
-}
+  Widget _buildContent(ExplorePageData data) {
+    void registerRefresh(VoidCallback refresh) => _refresh = refresh;
 
-class _SingleExplorePage extends StatefulWidget {
-  const _SingleExplorePage(this.title, {super.key});
-
-  final String title;
-
-  @override
-  State<_SingleExplorePage> createState() => _SingleExplorePageState();
-}
-
-class _SingleExplorePageState extends AutomaticGlobalState<_SingleExplorePage>
-    with AutomaticKeepAliveClientMixin<_SingleExplorePage> {
-  late final ExplorePageData data;
-
-  late final String comicSourceKey;
-
-  bool _wantKeepAlive = true;
-
-  var scrollController = ScrollController();
-
-  VoidCallback? refreshHandler;
-
-  void onSettingsChanged() {
-    var explorePages = appdata.settings["explore_pages"];
-    if (!explorePages.contains(widget.title)) {
-      _wantKeepAlive = false;
-      updateKeepAlive();
-    }
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    for (var source in ComicSource.all().where(
-      (source) => isSourceEnabled(source.key),
-    )) {
-      for (var d in source.explorePages) {
-        if (d.title == widget.title) {
-          data = d;
-          comicSourceKey = source.key;
-          return;
-        }
-      }
-    }
-    appdata.settings.addListener(onSettingsChanged);
-    throw "Explore Page ${widget.title} Not Found!";
-  }
-
-  @override
-  void dispose() {
-    appdata.settings.removeListener(onSettingsChanged);
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    super.build(context);
     if (data.loadMultiPart != null) {
       return _MultiPartExplorePage(
-        key: const PageStorageKey("comic_list"),
         data: data,
-        controller: scrollController,
-        comicSourceKey: comicSourceKey,
-        refreshHandlerCallback: (c) {
-          refreshHandler = c;
-        },
+        refreshHandlerCallback: registerRefresh,
       );
-    } else if (data.loadPage != null || data.loadNext != null) {
+    }
+    if (data.loadPage != null || data.loadNext != null) {
       return ComicList(
-        enablePageStorage: true,
         loadPage: data.loadPage,
         loadNext: data.loadNext,
-        key: const PageStorageKey("comic_list"),
-        controller: scrollController,
-        refreshHandlerCallback: (c) {
-          refreshHandler = c;
-        },
-      );
-    } else if (data.loadMixed != null) {
-      return _MixedExplorePage(
-        data,
-        comicSourceKey,
-        key: const PageStorageKey("comic_list"),
-        controller: scrollController,
-        refreshHandlerCallback: (c) {
-          refreshHandler = c;
-        },
-      );
-    } else {
-      return const Center(child: Text("Empty Page"));
-    }
-  }
-
-  @override
-  Object? get key => widget.title;
-
-  @override
-  void refresh() {
-    refreshHandler?.call();
-  }
-
-  @override
-  bool get wantKeepAlive => _wantKeepAlive;
-
-  void toTop() {
-    if (scrollController.hasClients) {
-      scrollController.animateTo(
-        scrollController.position.minScrollExtent,
-        duration: const Duration(milliseconds: 200),
-        curve: Curves.easeInOut,
+        refreshHandlerCallback: registerRefresh,
       );
     }
+    if (data.loadMixed != null) {
+      return _MixedExplorePage(data, refreshHandlerCallback: registerRefresh);
+    }
+    return Center(child: Text('Not found'.tl));
   }
 }
 
 class _MixedExplorePage extends StatefulWidget {
-  const _MixedExplorePage(
-    this.data,
-    this.sourceKey, {
-    super.key,
-    this.controller,
-    required this.refreshHandlerCallback,
-  });
+  const _MixedExplorePage(this.data, {required this.refreshHandlerCallback});
 
   final ExplorePageData data;
-
-  final String sourceKey;
-
-  final ScrollController? controller;
 
   final void Function(VoidCallback c) refreshHandlerCallback;
 
@@ -381,25 +105,24 @@ class _MixedExplorePageState
     for (var part in data) {
       if (part is ExplorePagePart) {
         if (cache.isNotEmpty) {
-          yield SliverGridComics(comics: (cache));
+          yield SliverGridComics(comics: cache);
           yield const SliverToBoxAdapter(child: Divider());
-          cache.clear();
+          cache = [];
         }
-        yield* _buildExplorePagePart(part, widget.sourceKey);
+        yield* _buildExplorePagePart(part, context);
         yield const SliverToBoxAdapter(child: Divider());
       } else {
         cache.addAll(part as List<Comic>);
       }
     }
     if (cache.isNotEmpty) {
-      yield SliverGridComics(comics: (cache));
+      yield SliverGridComics(comics: cache);
     }
   }
 
   @override
   Widget buildContent(BuildContext context, List<Object> data) {
     return SmoothCustomScrollView(
-      controller: widget.controller,
       slivers: [
         ...buildSlivers(context, data),
         const SliverListLoadingIndicator(),
@@ -424,7 +147,7 @@ class _MixedExplorePageState
 
 Iterable<Widget> _buildExplorePagePart(
   ExplorePagePart part,
-  String sourceKey,
+  BuildContext context,
 ) sync* {
   Widget buildTitle(ExplorePagePart part) {
     return SliverToBoxAdapter(
@@ -434,20 +157,20 @@ Iterable<Widget> _buildExplorePagePart(
           padding: const EdgeInsets.fromLTRB(16, 10, 5, 10),
           child: Row(
             children: [
-              Text(
-                part.title,
-                style: const TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w500,
+              Expanded(
+                child: Text(
+                  part.title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w500,
+                  ),
                 ),
               ),
-              const Spacer(),
               if (part.viewMore != null)
                 TextButton(
-                  onPressed: () {
-                    var context = App.mainNavigatorKey!.currentContext!;
-                    part.viewMore!.jump(context);
-                  },
+                  onPressed: () => part.viewMore!.jump(context),
                   child: Text("View more".tl),
                 ),
             ],
@@ -467,18 +190,11 @@ Iterable<Widget> _buildExplorePagePart(
 
 class _MultiPartExplorePage extends StatefulWidget {
   const _MultiPartExplorePage({
-    super.key,
     required this.data,
-    required this.controller,
-    required this.comicSourceKey,
     required this.refreshHandlerCallback,
   });
 
   final ExplorePageData data;
-
-  final ScrollController controller;
-
-  final String comicSourceKey;
 
   final void Function(VoidCallback c) refreshHandlerCallback;
 
@@ -487,100 +203,45 @@ class _MultiPartExplorePage extends StatefulWidget {
 }
 
 class _MultiPartExplorePageState extends State<_MultiPartExplorePage> {
-  late final ExplorePageData data;
-
-  List<ExplorePagePart>? parts;
-
-  bool loading = true;
-
-  String? message;
-
-  Map<String, dynamic> get state => {
-    "loading": loading,
-    "message": message,
-    "parts": parts,
-  };
-
-  void restoreState(dynamic state) {
-    if (state == null) return;
-    loading = state["loading"];
-    message = state["message"];
-    parts = state["parts"];
-  }
-
-  void storeState() {
-    PageStorage.of(context).writeState(context, state);
-  }
-
-  void refresh() {
-    setState(() {
-      loading = true;
-      message = null;
-      parts = null;
-    });
-    storeState();
-  }
+  late Future<Res<List<ExplorePagePart>>> _request;
 
   @override
   void initState() {
     super.initState();
-    data = widget.data;
+    _request = widget.data.loadMultiPart!();
+    widget.refreshHandlerCallback(_refresh);
   }
 
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    restoreState(PageStorage.of(context).readState(context));
-    widget.refreshHandlerCallback(refresh);
-  }
-
-  void load() async {
-    var res = await data.loadMultiPart!();
-    loading = false;
-    if (mounted) {
-      setState(() {
-        if (res.error) {
-          message = res.errorMessage;
-        } else {
-          parts = res.data;
-        }
-      });
-      storeState();
-    }
+  void _refresh() {
+    setState(() => _request = widget.data.loadMultiPart!());
   }
 
   @override
   Widget build(BuildContext context) {
-    if (loading) {
-      load();
-      return const Center(child: CircularProgressIndicator());
-    } else if (message != null) {
-      return NetworkError(
-        message: message!,
-        retry: () {
-          setState(() {
-            loading = true;
-            message = null;
-          });
-        },
-        withAppbar: false,
-      );
-    } else {
-      return buildPage();
-    }
-  }
+    return FutureBuilder(
+      future: _request,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Center(child: CircularProgressIndicator());
+        }
 
-  Widget buildPage() {
-    return SmoothCustomScrollView(
-      key: const PageStorageKey('scroll'),
-      controller: widget.controller,
-      slivers: _buildPage().toList(),
+        final result = snapshot.data;
+        if (result == null || result.error) {
+          return NetworkError(
+            message: result?.errorMessage ?? snapshot.error.toString(),
+            retry: _refresh,
+            withAppbar: false,
+          );
+        }
+
+        return SmoothCustomScrollView(
+          key: const PageStorageKey('scroll'),
+          slivers: [
+            for (final part in result.data)
+              ..._buildExplorePagePart(part, context),
+          ],
+        );
+      },
     );
-  }
-
-  Iterable<Widget> _buildPage() sync* {
-    for (var part in parts!) {
-      yield* _buildExplorePagePart(part, widget.comicSourceKey);
-    }
   }
 }

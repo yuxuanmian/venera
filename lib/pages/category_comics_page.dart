@@ -8,7 +8,7 @@ class CategoryComicsPage extends StatefulWidget {
   const CategoryComicsPage({
     required this.category,
     this.param,
-    required this.categoryKey,
+    required this.sourceKey,
     this.options,
     super.key,
   });
@@ -17,7 +17,7 @@ class CategoryComicsPage extends StatefulWidget {
 
   final String? param;
 
-  final String categoryKey;
+  final String sourceKey;
 
   final List<String>? options;
 
@@ -30,38 +30,17 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
   late List<CategoryComicsOptions>? options;
   late final CategoryOptionsLoader? optionsLoader;
   late List<String> optionsValue;
-  late String sourceKey;
   String? error;
 
   void findData() {
-    for (final source in ComicSource.all()) {
-      if (source.categoryData?.key == widget.categoryKey) {
-        if (source.categoryComicsData == null) {
-          throw "The comic source ${source.name} does not support category comics";
-        }
-        data = source.categoryComicsData!;
-        if (data.options != null) {
-          options = data.options!.where((element) {
-            if (element.notShowWhen.contains(widget.category)) {
-              return false;
-            } else if (element.showWhen != null) {
-              return element.showWhen!.contains(widget.category);
-            }
-            return true;
-          }).toList();
-        } else {
-          options = null;
-        }
-        if (data.optionsLoader != null) {
-          optionsLoader = data.optionsLoader;
-          loadOptions();
-        }
-        resetOptionsValue();
-        sourceKey = source.key;
-        return;
-      }
-    }
-    throw "${widget.categoryKey} Not found";
+    data = ComicSource.find(widget.sourceKey)!.categoryComicsData!;
+    options = data.options?.where((element) {
+      if (element.notShowWhen.contains(widget.category)) return false;
+      return element.showWhen?.contains(widget.category) ?? true;
+    }).toList();
+    optionsLoader = data.optionsLoader;
+    if (optionsLoader != null) loadOptions();
+    resetOptionsValue();
   }
 
   void resetOptionsValue() {
@@ -81,6 +60,7 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
 
   void loadOptions() async {
     final res = await optionsLoader!(widget.category, widget.param);
+    if (!mounted) return;
     if (res.error) {
       setState(() {
         error = res.errorMessage;
@@ -111,9 +91,7 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
 
     Widget body;
 
-    if (options == null) {
-      body = Center(child: CircularProgressIndicator());
-    } else if (error != null) {
+    if (error != null) {
       body = NetworkError(
         message: error!,
         retry: () {
@@ -123,6 +101,8 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
           loadOptions();
         },
       );
+    } else if (options == null) {
+      body = const Center(child: CircularProgressIndicator());
     } else {
       body = ComicList(
         key: Key(widget.category + optionsValue.toString()),
@@ -147,7 +127,7 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
     BuildContext context,
   ) {
     return OptionChip(
-      text: text.ts(sourceKey),
+      text: text.ts(widget.sourceKey),
       isSelected: value == optionsValue[group],
       onTap: () {
         if (value == optionsValue[group]) return;
@@ -167,7 +147,7 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
           Padding(
             padding: const EdgeInsets.only(bottom: 8.0, left: 4.0),
             child: Text(
-              optionList.label.ts(sourceKey),
+              optionList.label.ts(widget.sourceKey),
               style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
             ),
           ),

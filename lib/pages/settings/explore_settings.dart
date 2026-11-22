@@ -26,14 +26,6 @@ class _ExploreSettingsState extends State<ExploreSettings> {
           max: 1.5,
         ).toSliver(),
         _PopupWindowSetting(
-          title: "Explore Pages".tl,
-          builder: setExplorePagesWidget,
-        ).toSliver(),
-        _PopupWindowSetting(
-          title: "Category Pages".tl,
-          builder: setCategoryPagesWidget,
-        ).toSliver(),
-        _PopupWindowSetting(
           title: "Network Favorite Pages".tl,
           builder: setFavoritesPagesWidget,
         ).toSliver(),
@@ -89,9 +81,11 @@ class _ExploreSettingsState extends State<ExploreSettings> {
           optionTranslation: {
             '0': "Home Page".tl,
             '1': "Favorites Page".tl,
-            '2': "Explore Page".tl,
-            '3': "Categories Page".tl,
+            // Keep legacy Explore selected until the user changes the default.
+            (appdata.settings['initialPage'] == '2' ? '2' : '3'):
+                "Categories Page".tl,
           },
+          onChanged: () => setState(() {}),
         ).toSliver(),
         SelectSetting(
           title: "Display mode of comic list".tl,
@@ -196,38 +190,6 @@ class _ManageBlockingWordViewState extends State<_ManageBlockingWordView> {
       },
     );
   }
-}
-
-Widget setExplorePagesWidget() {
-  var pages = <String, String>{};
-  for (var c in ComicSource.all().where(
-    (source) => isSourceEnabled(source.key),
-  )) {
-    for (var page in c.explorePages) {
-      pages[page.title] = page.title.ts(c.key);
-    }
-  }
-  return _MultiPagesFilter(
-    title: "Explore Pages".tl,
-    settingsIndex: "explore_pages",
-    pages: pages,
-  );
-}
-
-Widget setCategoryPagesWidget() {
-  var pages = <String, String>{};
-  for (var c in ComicSource.all().where(
-    (source) => isSourceEnabled(source.key),
-  )) {
-    if (c.categoryData != null) {
-      pages[c.categoryData!.key] = c.categoryData!.title;
-    }
-  }
-  return _MultiPagesFilter(
-    title: "Category Pages".tl,
-    settingsIndex: "categories",
-    pages: pages,
-  );
 }
 
 Widget setFavoritesPagesWidget() {

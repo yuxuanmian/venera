@@ -1017,7 +1017,9 @@ class ComicSourceParser {
                     (e['comics'] as List).map((e) {
                       return Comic.fromJson(e, _sourceKey!);
                     }).toList(),
-                    PageJumpTarget.parse(_sourceKey!, e['viewMore']),
+                    e['viewMore'] == null
+                        ? null
+                        : PageJumpTarget.parse(_sourceKey!, e['viewMore']),
                   );
                 }),
               ),
@@ -1046,7 +1048,9 @@ class ComicSourceParser {
                     (data['comics'] as List).map((e) {
                       return Comic.fromJson(e, _sourceKey!);
                     }).toList(),
-                    data['viewMore'],
+                    data['viewMore'] == null
+                        ? null
+                        : PageJumpTarget.parse(_sourceKey!, data['viewMore']),
                   ),
                 );
               }
@@ -1098,7 +1102,8 @@ class ComicSourceParser {
         continue;
       }
       List? categories = c["categories"];
-      if (categories == null || categories[0] is Map) {
+      if (categories?.isEmpty == true) continue;
+      if (categories == null || categories.first is Map) {
         // new format
         final String name = c["name"];
         final String type = c["type"];

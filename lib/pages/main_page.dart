@@ -10,7 +10,6 @@ import 'package:venera/utils/translations.dart';
 
 import '../components/components.dart';
 import '../foundation/app.dart';
-import 'explore_page.dart';
 import 'favorites/favorites_page.dart';
 import 'home_page.dart';
 
@@ -43,14 +42,17 @@ class _MainPageState extends State<MainPage> {
     _observer = NaviObserver();
     _navigatorKey = GlobalKey();
     App.mainNavigatorKey = _navigatorKey;
-    index = int.tryParse(appdata.settings['initialPage'].toString()) ?? 0;
+    index = switch (appdata.settings['initialPage'].toString()) {
+      '1' => 1,
+      '2' || '3' => 2,
+      _ => 0,
+    };
     super.initState();
   }
 
   final _pages = [
     const HomePage(),
     const FavoritesPage(key: PageStorageKey('favorites')),
-    const ExplorePage(key: PageStorageKey('explore')),
     const CategoriesPage(key: PageStorageKey('categories')),
   ];
 
@@ -72,11 +74,6 @@ class _MainPageState extends State<MainPage> {
           label: 'Favorites'.tl,
           icon: Icons.local_activity_outlined,
           activeIcon: Icons.local_activity,
-        ),
-        PaneItemEntry(
-          label: 'Explore'.tl,
-          icon: Icons.explore_outlined,
-          activeIcon: Icons.explore,
         ),
         PaneItemEntry(
           label: 'Categories'.tl,
