@@ -1,5 +1,40 @@
 part of 'reader.dart';
 
+class _AlbumSelection {
+  _AlbumSelection({
+    required this.view,
+    required this.chapter,
+    required this.galleryPage,
+    required this.viewportSize,
+    required this.readChoices,
+    required this.releaseScroll,
+    required this.choices,
+  });
+
+  final State<StatefulWidget> view;
+  final int chapter;
+  final int? galleryPage;
+  final Size viewportSize;
+  final List<AlbumImageChoice> Function(RenderBox) readChoices;
+  final VoidCallback? releaseScroll;
+  final result = Completer<int?>();
+  List<AlbumImageChoice> choices;
+  int? selectedIndex;
+
+  bool matches(_ReaderState reader, Size size) =>
+      identical(view, reader._imageViewController) &&
+      view.mounted &&
+      reader.chapter == chapter &&
+      (galleryPage == null || reader.page == galleryPage) &&
+      viewportSize == size;
+
+  void cancel() {
+    if (!result.isCompleted) result.complete(null);
+  }
+}
+
+enum _AlbumSaveAction { retry, saveFile }
+
 class _ReaderScaffold extends StatefulWidget {
   const _ReaderScaffold({required this.child});
 
@@ -11,6 +46,9 @@ class _ReaderScaffold extends StatefulWidget {
 
 class _ReaderScaffoldState extends State<_ReaderScaffold> {
   bool _isOpen = false;
+  bool _albumSaving = false;
+  bool _albumChoiceRefreshScheduled = false;
+  _AlbumSelection? _albumSelection;
 
   static const kTopBarHeight = 56.0;
 
@@ -99,6 +137,7 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
 
   @override
   void dispose() {
+    _albumSelection?.cancel();
     sliderFocus.dispose();
     super.dispose();
   }
@@ -126,7 +165,12 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
 
   @override
   Widget build(BuildContext context) {
-    final isOnChapterCommentsPage = context.reader.isOnChapterCommentsPage;
+    final reader = context.reader;
+    final isOnChapterCommentsPage = reader.isOnChapterCommentsPage;
+    final selection = _albumSelection;
+    final showChoices =
+        selection?.matches(reader, MediaQuery.sizeOf(context)) ?? false;
+    if (selection != null && !showChoices) _scheduleAlbumChoiceRefresh();
     // The reader page must always paint an opaque background. Relying on the
     // route's Material behind the reader leaves transparent areas while the
     // page is loading or during interactive route transitions (e.g. the held
@@ -138,7 +182,7 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
         children: [
           Positioned.fill(
             child: AbsorbPointer(
-              absorbing: context.reader.isPageAnimating,
+              absorbing: reader.isPageAnimating,
               child: widget.child,
             ),
           ),
@@ -169,6 +213,32 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
             right: 0,
             child: buildBottom(),
           ),
+          if (selection != null)
+            Positioned.fill(
+              child: PopScope(
+                canPop: false,
+                onPopInvokedWithResult: (didPop, _) {
+                  if (!didPop) selection.cancel();
+                },
+                child: AlbumImagePicker(
+                  choices: showChoices ? selection.choices : const [],
+                  selectedIndex: selection.selectedIndex,
+                  onCancel: selection.cancel,
+                  onSelect: (index) {
+                    if (selection.result.isCompleted ||
+                        !selection.matches(
+                          reader,
+                          MediaQuery.sizeOf(context),
+                        )) {
+                      selection.cancel();
+                      return;
+                    }
+                    setState(() => selection.selectedIndex = index);
+                    selection.result.complete(index);
+                  },
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -484,10 +554,15 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
           ),
         ),
       Tooltip(
-        message: "Save Image".tl,
+        message: App.isMobile ? 'Save to Album'.tl : 'Save Image'.tl,
         child: IconButton(
-          icon: const Icon(Icons.download),
-          onPressed: saveCurrentImage,
+          icon: _albumSaving && _albumSelection == null
+              ? const SizedBox.square(
+                  dimension: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.download),
+          onPressed: !App.isMobile || _canSaveToAlbum ? saveCurrentImage : null,
         ),
       ),
       Tooltip(
@@ -664,6 +739,10 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
   }
 
   void saveCurrentImage() async {
+    if (App.isMobile) {
+      await _saveCurrentImageToAlbum();
+      return;
+    }
     var result = await selectImageToData();
     if (result == null) {
       return;
@@ -675,6 +754,298 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
     var filename =
         "${context.reader.widget.name}_EP${context.reader.chapter}_P${imageIndex + 1}${fileType.ext}";
     saveFile(data: data, filename: filename);
+  }
+
+  bool get _canSaveToAlbum {
+    final reader = context.reader;
+    return !_albumSaving &&
+        !reader.isLoading &&
+        !reader.isPageAnimating &&
+        !reader.isOnChapterCommentsPage &&
+        (reader.images?.isNotEmpty ?? false);
+  }
+
+  Future<int?> _selectAlbumImage(_ReaderState reader) async {
+    final controller = reader._imageViewController;
+    final State<StatefulWidget> view;
+    final List<AlbumImageChoice> Function(RenderBox) readChoices;
+    int? galleryPage;
+    VoidCallback? releaseScroll;
+    if (controller is _ContinuousModeState && controller.mounted) {
+      view = controller;
+      readChoices = controller._albumChoices;
+      releaseScroll = controller._holdAlbumScroll();
+    } else if (controller is _GalleryModeState &&
+        controller.mounted &&
+        controller.controller.hasClients &&
+        !controller.controller.position.isScrollingNotifier.value) {
+      final range = controller.getCurrentPageImageRange();
+      if (range == null) return null;
+      final (start, end) = range;
+      if (end - start == 1) return start;
+      view = controller;
+      galleryPage = reader.page;
+      readChoices = (viewport) =>
+          controller._albumChoices(viewport, start, end);
+    } else {
+      return null;
+    }
+
+    try {
+      final viewport = context.findRenderObject() as RenderBox;
+      final choices = readChoices(viewport);
+      if (choices.isEmpty) {
+        context.showMessage(message: 'Image unavailable'.tl);
+        return null;
+      }
+      if (choices.length == 1 && choices.single.ready) {
+        return choices.single.index;
+      }
+      final selection = _AlbumSelection(
+        view: view,
+        chapter: reader.chapter,
+        galleryPage: galleryPage,
+        viewportSize: MediaQuery.sizeOf(context),
+        readChoices: readChoices,
+        releaseScroll: releaseScroll,
+        choices: choices,
+      );
+      if (_isOpen) openOrClose();
+      reader._albumSelectionActive = true;
+      setState(() => _albumSelection = selection);
+      _scheduleAlbumChoiceRefresh();
+      return await selection.result.future;
+    } finally {
+      if (_albumSelection == null) releaseScroll?.call();
+    }
+  }
+
+  void _scheduleAlbumChoiceRefresh() {
+    final selection = _albumSelection;
+    if (!mounted ||
+        selection == null ||
+        selection.result.isCompleted ||
+        _albumChoiceRefreshScheduled) {
+      return;
+    }
+    _albumChoiceRefreshScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _albumChoiceRefreshScheduled = false;
+      if (!mounted ||
+          _albumSelection != selection ||
+          selection.result.isCompleted) {
+        return;
+      }
+      if (!selection.matches(context.reader, MediaQuery.sizeOf(context))) {
+        selection.cancel();
+        return;
+      }
+      final viewport = context.findRenderObject() as RenderBox;
+      setState(() {
+        selection.choices = selection.readChoices(viewport);
+      });
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  Future<void> _saveCurrentImageToAlbum() async {
+    if (!_canSaveToAlbum) return;
+    final reader = context.reader;
+    final images = reader.images!;
+    final cid = reader.cid;
+    final eid = reader.eid;
+    final sourceKey = reader.type.sourceKey;
+    final chapter = reader.chapter;
+    final title = String.fromCharCodes(reader.widget.name.runes.take(52));
+    setState(() => _albumSaving = true);
+    try {
+      final index = await _selectAlbumImage(reader);
+      final imageKey = index == null ? null : images.elementAtOrNull(index);
+      if (!mounted || index == null || imageKey == null) return;
+      final number = index + 1;
+      final filename = sanitizeFileName(
+        '${title}_EP${chapter}_P$number'.replaceAll(
+          RegExp(r'[\x00-\x1f]'),
+          ' ',
+        ),
+      );
+      Uint8List? bytes;
+      while (mounted && bytes == null) {
+        try {
+          bytes = await _readAlbumSource(imageKey, sourceKey, cid, eid);
+        } catch (_) {
+          if (!mounted ||
+              await _showAlbumSaveOptions(
+                    'Could not read the selected image.'.tl,
+                    canSaveFile: false,
+                  ) !=
+                  _AlbumSaveAction.retry) {
+            return;
+          }
+        }
+      }
+      if (!mounted || bytes == null) return;
+      final originalType = detectFileType(bytes);
+      var failure = await _writeAlbumImage(
+        filename,
+        number,
+        originalType,
+        bytes,
+      );
+      while (mounted && failure != null) {
+        final action = await _showAlbumSaveOptions(
+          failure.message,
+          canRetry: failure.canRetry,
+        );
+        if (!mounted || action == null) return;
+        if (action == _AlbumSaveAction.retry) {
+          failure = await _writeAlbumImage(
+            filename,
+            number,
+            originalType,
+            bytes,
+          );
+          continue;
+        }
+        try {
+          final saved = await saveFile(
+            filename: '$filename${originalType.ext}',
+            data: bytes,
+          );
+          if (saved) {
+            if (mounted) {
+              context.showMessage(
+                message: 'Image @number saved to a file'.tlParams({
+                  'number': number,
+                }),
+              );
+            }
+            return;
+          }
+        } catch (_) {
+          if (mounted) {
+            context.showMessage(message: 'Could not save the file.'.tl);
+          }
+        }
+      }
+    } finally {
+      reader._albumSelectionActive = false;
+      _albumSelection?.releaseScroll?.call();
+      if (mounted) {
+        setState(() {
+          _albumSelection = null;
+          _albumSaving = false;
+        });
+      }
+    }
+  }
+
+  Future<Uint8List> _readAlbumSource(
+    String imageKey,
+    String? sourceKey,
+    String cid,
+    String eid,
+  ) async {
+    if (imageKey.startsWith('file://')) {
+      return File(imageKey.substring(7)).readAsBytes();
+    }
+    final cacheKey = ImageDownloader.comicImageCacheKey(
+      imageKey,
+      sourceKey,
+      cid,
+      eid,
+    );
+    final cached = await CacheManager().findCache(cacheKey);
+    if (cached != null) return cached.readAsBytes();
+    await for (final event in ImageDownloader.loadComicImage(
+      imageKey,
+      sourceKey,
+      cid,
+      eid,
+    )) {
+      if (event.imageBytes != null) return event.imageBytes!;
+    }
+    throw StateError('Reader image bytes unavailable');
+  }
+
+  Future<({String message, bool canRetry})?> _writeAlbumImage(
+    String filename,
+    int number,
+    FileType originalType,
+    Uint8List bytes,
+  ) async {
+    final ({FileType type, Uint8List bytes})? image;
+    try {
+      image = await prepareImageForAlbum(originalType, bytes);
+    } catch (_) {
+      return (
+        message: 'Could not convert the selected image to PNG.'.tl,
+        canRetry: true,
+      );
+    }
+    if (image == null) {
+      return (
+        message: 'Save animated WebP as a file to preserve the animation.'.tl,
+        canRetry: false,
+      );
+    }
+    if (!mounted) return null;
+    try {
+      await saveImageToAlbum(
+        filename: '$filename${image.type.ext}',
+        type: image.type,
+        bytes: image.bytes,
+      );
+    } catch (error) {
+      if (error is PlatformException &&
+          error.code == 'album_permission_denied') {
+        return (
+          message: 'Photo library permission was denied.'.tl,
+          canRetry: false,
+        );
+      }
+      return (
+        message: 'Could not save the image to the album.'.tl,
+        canRetry: true,
+      );
+    }
+    if (mounted) {
+      final message = originalType.mime == 'image/webp'
+          ? 'Image @number saved to the album as PNG'
+          : 'Image @number saved to the album';
+      context.showMessage(message: message.tlParams({'number': number}));
+    }
+    return null;
+  }
+
+  Future<_AlbumSaveAction?> _showAlbumSaveOptions(
+    String message, {
+    bool canRetry = true,
+    bool canSaveFile = true,
+  }) {
+    return showDialog<_AlbumSaveAction>(
+      context: context,
+      builder: (context) => AlertDialog(
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Cancel'.tl),
+          ),
+          if (canRetry)
+            TextButton(
+              onPressed: () => Navigator.pop(context, _AlbumSaveAction.retry),
+              child: Text('Retry'.tl),
+            ),
+          if (canSaveFile)
+            FilledButton(
+              onPressed: () =>
+                  Navigator.pop(context, _AlbumSaveAction.saveFile),
+              child: Text('Save as File'.tl),
+            ),
+        ],
+      ),
+    );
   }
 
   void share() async {

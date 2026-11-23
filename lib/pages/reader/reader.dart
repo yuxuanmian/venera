@@ -32,11 +32,13 @@ import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/network/images.dart';
+import 'package:venera/pages/reader/album_image_picker.dart';
 import 'package:venera/pages/settings/settings_page.dart';
 import 'package:venera/utils/clipboard_image.dart';
 import 'package:venera/utils/data_sync.dart';
 import 'package:venera/utils/ext.dart';
 import 'package:venera/utils/file_type.dart';
+import 'package:venera/utils/image_album.dart';
 import 'package:venera/utils/io.dart';
 import 'package:venera/utils/tags_translation.dart';
 import 'package:venera/utils/translations.dart';
@@ -325,6 +327,7 @@ class _ReaderState extends State<Reader>
   }
 
   void onKeyEvent(KeyEvent event) {
+    if (_albumSelectionActive) return;
     if (event.logicalKey == LogicalKeyboardKey.f12 && event is KeyUpEvent) {
       fullscreen();
     }
@@ -608,6 +611,7 @@ abstract mixin class _VolumeListener {
 abstract mixin class _ReaderLocation {
   int _page = 1;
   int? _pendingPage;
+  bool _albumSelectionActive = false;
 
   /// Flag to indicate that the page should jump to the last page after images are loaded.
   bool _jumpToLastPageOnLoad = false;
@@ -673,7 +677,7 @@ abstract mixin class _ReaderLocation {
   int _animationToken = 0;
 
   bool toPage(int page) {
-    if (_validatePage(page)) {
+    if (!_albumSelectionActive && _validatePage(page)) {
       if (page == this.page && page != 1 && page != totalPages) {
         return false;
       }
@@ -726,7 +730,7 @@ abstract mixin class _ReaderLocation {
   }
 
   bool toChapter(int c, {bool toLastPage = false}) {
-    if (_validateChapter(c) && !isLoading) {
+    if (!_albumSelectionActive && _validateChapter(c) && !isLoading) {
       // Invalidate any in-flight page animation so a superseded animation
       // future cannot keep the reader frozen after the chapter change.
       _animationToken++;
@@ -754,6 +758,7 @@ abstract mixin class _ReaderLocation {
         'autoPageTurningInterval',
       );
       autoPageTurningTimer = Timer.periodic(Duration(seconds: interval), (_) {
+        if (_albumSelectionActive) return;
         if (page == maxPage) {
           autoPageTurningTimer!.cancel();
         }

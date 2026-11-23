@@ -1,4 +1,5 @@
 import Flutter
+import Photos
 import UIKit
 import UniformTypeIdentifiers
 import Foundation // 添加此行
@@ -39,6 +40,8 @@ import Foundation // 添加此行
           UIApplication.shared.isIdleTimerDisabled = screenOn
         }
         result(nil)
+      } else if call.method == "saveImageToAlbum" {
+        self.saveImageToAlbum(call.arguments, result: result)
       } else if call.method == "getDirectoryPath" {
         self.flutterResult = result
         self.getDirectoryPath()
@@ -55,6 +58,39 @@ import Foundation // 添加此行
     }
 
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  private func saveImageToAlbum(_ arguments: Any?, result: @escaping FlutterResult) {
+    guard let args = arguments as? [String: String],
+          let path = args["path"], let filename = args["filename"],
+          let mimeType = args["mimeType"], mimeType.hasPrefix("image/") else {
+      result(FlutterError(code: "album_write_failed", message: "Invalid image export", details: nil))
+      return
+    }
+
+    PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+      guard status == .authorized || status == .limited else {
+        DispatchQueue.main.async {
+          result(FlutterError(code: "album_permission_denied", message: "Photo write permission denied", details: nil))
+        }
+        return
+      }
+      PHPhotoLibrary.shared().performChanges {
+        let asset = PHAssetCreationRequest.forAsset()
+        let options = PHAssetResourceCreationOptions()
+        options.originalFilename = filename
+        options.uniformTypeIdentifier = UTType(mimeType: mimeType)?.identifier
+        asset.addResource(with: .photo, fileURL: URL(fileURLWithPath: path), options: options)
+      } completionHandler: { success, _ in
+        DispatchQueue.main.async {
+          if success {
+            result(nil)
+          } else {
+            result(FlutterError(code: "album_write_failed", message: "Could not import the image", details: nil))
+          }
+        }
+      }
+    }
   }
 
   func getDirectoryPath() {

@@ -47,6 +47,8 @@
 	<true/>
 	<key>NSPhotoLibraryUsageDescription</key>
   <string>Choose images</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Save comic images to your photo library.</string>
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>

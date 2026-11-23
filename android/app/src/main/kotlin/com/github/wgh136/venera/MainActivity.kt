@@ -111,6 +111,17 @@ class MainActivity : FlutterFragmentActivity() {
         ).setMethodCallHandler { call, res ->
             when (call.method) {
                 "getProxy" -> res.success(getProxy())
+                "saveImageToAlbum" -> {
+                    val path = call.argument<String>("path")
+                    val filename = call.argument<String>("filename")
+                    val mimeType = call.argument<String>("mimeType")
+                    if (path == null || filename.isNullOrBlank() || File(filename).name != filename ||
+                        mimeType == null || !mimeType.startsWith("image/")) {
+                        res.error("album_write_failed", "Invalid image export", null)
+                    } else {
+                        saveImageToAlbum(File(path), filename, mimeType, res)
+                    }
+                }
                 "restartApp" -> {
                     if (!lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) || isFinishing) {
                         res.error("restart_unavailable", "The main activity is not in the foreground", null)
@@ -284,6 +295,35 @@ class MainActivity : FlutterFragmentActivity() {
                     }
                 }
             }
+        }
+    }
+
+    private fun saveImageToAlbum(
+        source: File,
+        filename: String,
+        mimeType: String,
+        result: MethodChannel.Result
+    ) {
+        val write = {
+            AlbumWriter.save(applicationContext, source, filename, mimeType) { success ->
+                runOnUiThread {
+                    if (success) result.success(null)
+                    else result.error("album_write_failed", "Could not publish the image", null)
+                }
+            }
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            startContractForResult(
+                ActivityResultContracts.RequestPermission(), Manifest.permission.WRITE_EXTERNAL_STORAGE
+            ) { granted ->
+                if (granted) write()
+                else result.error("album_permission_denied", "Photo write permission denied", null)
+            }
+        } else {
+            write()
         }
     }
 

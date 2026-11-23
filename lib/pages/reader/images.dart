@@ -478,76 +478,55 @@ class _GalleryModeState extends State<_GalleryMode>
   }
 
   Widget buildPageImages(List<String> images, int startIndex) {
-    Axis axis = (reader.mode == ReaderMode.galleryTopToBottom)
+    final axis = reader.mode == ReaderMode.galleryTopToBottom
         ? Axis.vertical
         : Axis.horizontal;
-
-    bool reverse = reader.mode == ReaderMode.galleryRightToLeft;
-    if (reverse) {
-      images = images.reversed.toList();
-    }
-
-    List<Widget> imageWidgets;
-
-    if (images.length == 2) {
-      imageWidgets = [
+    final reverse = reader.mode == ReaderMode.galleryRightToLeft;
+    final scaffold = context.readerScaffold;
+    final pair = images.length == 2;
+    final imageWidgets = <Widget>[];
+    for (var slot = 0; slot < images.length; slot++) {
+      final offset = reverse ? images.length - slot - 1 : slot;
+      final index = startIndex + offset;
+      final alignment = !pair
+          ? Alignment.center
+          : axis == Axis.vertical
+          ? (slot == 0 ? Alignment.bottomCenter : Alignment.topCenter)
+          : (slot == 0 ? Alignment.centerRight : Alignment.centerLeft);
+      imageWidgets.add(
         Expanded(
           child: ComicImage(
-            width: double.infinity,
-            height: double.infinity,
+            width: pair ? double.infinity : null,
+            height: pair ? double.infinity : null,
             image: _createImageProviderFromKey(
-              images[0],
+              images[offset],
               context,
-              startIndex + 1,
+              startIndex + slot + 1,
             ),
             fit: BoxFit.contain,
-            alignment: axis == Axis.vertical
-                ? Alignment.bottomCenter
-                : Alignment.centerRight,
+            alignment: alignment,
             onInit: (state) => imageStates.add(state),
             onDispose: (state) => imageStates.remove(state),
+            albumImageIndex: App.isMobile ? index : null,
+            onAlbumGeometryChanged: App.isMobile
+                ? scaffold._scheduleAlbumChoiceRefresh
+                : null,
           ),
         ),
-        Expanded(
-          child: ComicImage(
-            width: double.infinity,
-            height: double.infinity,
-            image: _createImageProviderFromKey(
-              images[1],
-              context,
-              startIndex + 2,
-            ),
-            fit: BoxFit.contain,
-            alignment: axis == Axis.vertical
-                ? Alignment.topCenter
-                : Alignment.centerLeft,
-            onInit: (state) => imageStates.add(state),
-            onDispose: (state) => imageStates.remove(state),
-          ),
-        ),
-      ];
-    } else {
-      imageWidgets = images.map((imageKey) {
-        startIndex++;
-        ImageProvider imageProvider = _createImageProviderFromKey(
-          imageKey,
-          context,
-          startIndex,
-        );
-        return Expanded(
-          child: ComicImage(
-            image: imageProvider,
-            fit: BoxFit.contain,
-            onInit: (state) => imageStates.add(state),
-            onDispose: (state) => imageStates.remove(state),
-          ),
-        );
-      }).toList();
+      );
     }
 
     return axis == Axis.vertical
         ? Column(children: imageWidgets)
         : Row(children: imageWidgets);
+  }
+
+  List<AlbumImageChoice> _albumChoices(RenderBox viewport, int start, int end) {
+    return _collectAlbumChoices(
+      imageStates,
+      viewport,
+      (i) => i >= start && i < end,
+    );
   }
 
   @override
@@ -790,6 +769,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
   var itemScrollController = ItemScrollController();
   var itemPositionsListener = ItemPositionsListener.create();
   var photoViewController = PhotoViewController();
+  late final _albumListKey = GlobalKey();
   ScrollController? _scrollController;
 
   ScrollController get scrollController => _scrollController!;
@@ -840,6 +820,9 @@ class _ContinuousModeState extends State<_ContinuousMode>
   }
 
   void onPositionChanged() {
+    if (reader._albumSelectionActive) {
+      context.readerScaffold._scheduleAlbumChoiceRefresh();
+    }
     if (itemPositionsListener.itemPositions.value.isEmpty) {
       return;
     }
@@ -850,6 +833,41 @@ class _ContinuousModeState extends State<_ContinuousMode>
       context.readerScaffold.update();
     }
     cacheImages(page);
+  }
+
+  VoidCallback? _holdAlbumScroll() {
+    final scroll = _scrollController;
+    if (scroll == null || !scroll.hasClients) return null;
+    final position = scroll.position;
+    var released = false;
+    final hold = position.hold(() => released = true);
+    return () {
+      if (!released && mounted && scroll.positions.contains(position)) {
+        hold.cancel();
+      }
+    };
+  }
+
+  List<AlbumImageChoice> _albumChoices(RenderBox viewport) {
+    final list = _albumListKey.currentContext?.findRenderObject();
+    if (list is! RenderBox || !list.attached || !list.hasSize) return const [];
+    final contentClip = visibleAlbumImageRect(
+      list,
+      viewport,
+      Offset.zero & list.size,
+    );
+    if (contentClip == null) return const [];
+    final indices = {
+      for (final item in itemPositionsListener.itemPositions.value)
+        if (item.itemLeadingEdge < 1 && item.itemTrailingEdge > 0)
+          item.index - 1,
+    };
+    return _collectAlbumChoices(
+      imageStates,
+      viewport,
+      indices.contains,
+      contentClip: contentClip,
+    );
   }
 
   double? _futurePosition;
@@ -946,6 +964,9 @@ class _ContinuousModeState extends State<_ContinuousMode>
   }
 
   bool onScaleUpdate([double? scale]) {
+    if (reader._albumSelectionActive) {
+      context.readerScaffold._scheduleAlbumChoiceRefresh();
+    }
     if (prepareToNextChapter || prepareToPrevChapter) {
       setState(() {
         prepareToPrevChapter = false;
@@ -964,7 +985,9 @@ class _ContinuousModeState extends State<_ContinuousMode>
 
   @override
   Widget build(BuildContext context) {
+    final scaffold = context.readerScaffold;
     Widget widget = ScrollablePositionedList.builder(
+      key: App.isMobile ? _albumListKey : null,
       initialScrollIndex: reader.page,
       itemScrollController: itemScrollController,
       itemPositionsListener: itemPositionsListener,
@@ -1010,6 +1033,10 @@ class _ContinuousModeState extends State<_ContinuousMode>
             fit: BoxFit.contain,
             onInit: (state) => imageStates.add(state),
             onDispose: (state) => imageStates.remove(state),
+            albumImageIndex: App.isMobile ? index - 1 : null,
+            onAlbumGeometryChanged: App.isMobile
+                ? scaffold._scheduleAlbumChoiceRefresh
+                : null,
           ),
         );
       },
@@ -1343,6 +1370,22 @@ class _ContinuousModeState extends State<_ContinuousMode>
     }
     return imageKey;
   }
+}
+
+List<AlbumImageChoice> _collectAlbumChoices(
+  Iterable<State<ComicImage>> states,
+  RenderBox viewport,
+  bool Function(int) includesIndex, {
+  Rect? contentClip,
+}) {
+  final choices = <AlbumImageChoice>[];
+  for (final state in states.cast<_ComicImageState>()) {
+    final index = state.widget.albumImageIndex;
+    if (index == null || !includesIndex(index)) continue;
+    final choice = state.getAlbumChoice(viewport, contentClip: contentClip);
+    if (choice != null) choices.add(choice);
+  }
+  return choices..sort((a, b) => a.index.compareTo(b.index));
 }
 
 ImageProvider _createImageProviderFromKey(

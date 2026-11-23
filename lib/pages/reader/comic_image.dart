@@ -26,6 +26,8 @@ class ComicImage extends StatefulWidget {
     int? cacheHeight,
     this.onInit,
     this.onDispose,
+    this.albumImageIndex,
+    this.onAlbumGeometryChanged,
   }) : image = ResizeImage.resizeIfNeeded(cacheWidth, cacheHeight, image),
        assert(cacheWidth == null || cacheWidth > 0),
        assert(cacheHeight == null || cacheHeight > 0);
@@ -65,6 +67,8 @@ class ComicImage extends StatefulWidget {
   final void Function(State<ComicImage> state)? onInit;
 
   final void Function(State<ComicImage> state)? onDispose;
+  final int? albumImageIndex;
+  final VoidCallback? onAlbumGeometryChanged;
 
   static void clear() => _ComicImageState.clear();
 
@@ -73,6 +77,7 @@ class ComicImage extends StatefulWidget {
 }
 
 class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
+  late final _albumImageKey = GlobalKey();
   ImageStream? _imageStream;
   ImageInfo? _imageInfo;
   ImageChunkEvent? _loadingProgress;
@@ -161,6 +166,41 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
     return renderBox.paintBounds.contains(localPoint);
   }
 
+  AlbumImageChoice? getAlbumChoice(RenderBox viewport, {Rect? contentClip}) {
+    final index = widget.albumImageIndex;
+    if (!mounted || index == null) return null;
+    final renderImage = _albumImageKey.currentContext?.findRenderObject();
+    final box = renderImage ?? context.findRenderObject();
+    if (box is! RenderBox || !box.hasSize || !box.attached) return null;
+
+    final image = renderImage is RenderImage ? renderImage.image : null;
+    var localRect = Offset.zero & box.size;
+    if (image != null) {
+      final scale = (renderImage as RenderImage).scale;
+      final destination = applyBoxFit(
+        BoxFit.contain,
+        Size(image.width / scale, image.height / scale),
+        box.size,
+      ).destination;
+      localRect = widget.alignment
+          .resolve(Directionality.of(context))
+          .inscribe(destination, localRect);
+    }
+    final rect = visibleAlbumImageRect(
+      box,
+      viewport,
+      localRect,
+      contentClip: contentClip,
+    );
+    if (rect == null) return null;
+    return (
+      index: index,
+      rect: rect,
+      ready: image != null,
+      failed: _lastException != null,
+    );
+  }
+
   void _updateInvertColors() {
     _invertColors =
         MediaQuery.maybeInvertColorsOf(context) ??
@@ -195,6 +235,7 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
           setState(() {
             _lastException = error;
           });
+          widget.onAlbumGeometryChanged?.call();
         },
       );
     }
@@ -202,6 +243,7 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
   }
 
   void _handleImageFrame(ImageInfo imageInfo, bool synchronousCall) {
+    final wasReady = _imageInfo != null && _lastException == null;
     setState(() {
       _replaceImage(info: imageInfo);
       _loadingProgress = null;
@@ -209,6 +251,7 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
       _frameNumber = _frameNumber == null ? 0 : _frameNumber! + 1;
       _wasSynchronouslyLoaded = _wasSynchronouslyLoaded | synchronousCall;
     });
+    if (!wasReady) widget.onAlbumGeometryChanged?.call();
   }
 
   void _handleImageChunk(ImageChunkEvent event) {
@@ -277,6 +320,7 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
     if (_isListeningToStream) {
       _imageStream!.addListener(_getListener());
     }
+    widget.onAlbumGeometryChanged?.call();
   }
 
   void _listenToStream() {
@@ -398,6 +442,7 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
         if (_imageInfo != null) {
           // build image
           Widget result = RawImage(
+            key: widget.albumImageIndex == null ? null : _albumImageKey,
             // Do not clone the image, because RawImage is a stateless wrapper.
             // The image will be disposed by this state object when it is not needed
             // anymore, such as when it is unmounted or when the image stream pushes
