@@ -1,5 +1,71 @@
 part of 'components.dart';
 
+class SkeletonBlock extends StatelessWidget {
+  const SkeletonBlock({
+    super.key,
+    this.width,
+    required this.height,
+    this.radius = 6,
+    this.emphasized = false,
+  });
+
+  final double? width;
+  final double height;
+  final double radius;
+  final bool emphasized;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colorScheme;
+    return SizedBox(
+      width: width,
+      height: height,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: emphasized
+              ? Color.lerp(
+                  colors.surfaceContainerHigh,
+                  colors.primaryContainer,
+                  .12,
+                )
+              : colors.surfaceContainer,
+          borderRadius: BorderRadius.circular(radius),
+        ),
+      ),
+    );
+  }
+}
+
+/// A soft sweep across the placeholder shapes, with no overlay on ready content.
+class SkeletonSweep extends StatelessWidget {
+  const SkeletonSweep({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (MediaQuery.disableAnimationsOf(context)) return child;
+    final tint = context.colorScheme.onSurface.withValues(alpha: .07);
+    return TweenAnimationBuilder<double>(
+      duration: const Duration(milliseconds: 1250),
+      tween: Tween(begin: -1.6, end: 1.6),
+      builder: (context, position, child) {
+        if (position == 1.6) return child!;
+        return ShaderMask(
+          blendMode: BlendMode.srcATop,
+          shaderCallback: (bounds) => LinearGradient(
+            begin: Alignment(position - .45, -.35),
+            end: Alignment(position + .45, .35),
+            colors: [Colors.transparent, tint, Colors.transparent],
+          ).createShader(bounds),
+          child: child,
+        );
+      },
+      child: child,
+    );
+  }
+}
+
 class NetworkError extends StatelessWidget {
   const NetworkError({
     super.key,

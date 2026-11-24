@@ -9,6 +9,7 @@ import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/network/download.dart';
+import 'package:venera/pages/reader/entry_route.dart';
 import 'package:venera/pages/reader/reader.dart';
 import 'package:venera/utils/io.dart';
 
@@ -132,7 +133,8 @@ class LocalComic with HistoryMixin implements Comic {
         }
       }
     }
-    App.rootContext.to(
+    pushReader(
+      App.rootContext,
       () => Reader(
         type: comicType,
         cid: id,

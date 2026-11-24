@@ -44,8 +44,16 @@ class _ReaderScaffold extends StatefulWidget {
   State<_ReaderScaffold> createState() => _ReaderScaffoldState();
 }
 
-class _ReaderScaffoldState extends State<_ReaderScaffold> {
+class _ReaderScaffoldState extends State<_ReaderScaffold>
+    with SingleTickerProviderStateMixin {
   bool _isOpen = false;
+  late final _toolbarAnimation = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 180),
+  );
+  late final _toolbarProgress = _toolbarAnimation.drive(
+    CurveTween(curve: Curves.easeOutCubic),
+  );
   bool _albumSaving = false;
   bool _albumChoiceRefreshScheduled = false;
   _AlbumSelection? _albumSelection;
@@ -138,6 +146,7 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
   @override
   void dispose() {
     _albumSelection?.cancel();
+    _toolbarAnimation.dispose();
     sliderFocus.dispose();
     super.dispose();
   }
@@ -155,12 +164,35 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
     setState(() {
       _isOpen = !_isOpen;
     });
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _toolbarAnimation.value = _isOpen ? 1 : 0;
+    } else if (_isOpen) {
+      _toolbarAnimation.forward();
+    } else {
+      _toolbarAnimation.reverse();
+    }
   }
 
   bool? rotation;
 
   void update() {
     setState(() {});
+  }
+
+  Widget _animateToolbar(Widget child, double offset) {
+    return IgnorePointer(
+      ignoring: !_isOpen,
+      child: ExcludeSemantics(
+        excluding: !_isOpen,
+        child: SlideTransition(
+          position: Tween(
+            begin: Offset(0, offset),
+            end: Offset.zero,
+          ).animate(_toolbarProgress),
+          child: FadeTransition(opacity: _toolbarProgress, child: child),
+        ),
+      ),
+    );
   }
 
   @override
@@ -190,28 +222,25 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
               !isOnChapterCommentsPage)
             buildPageInfoText(),
           if (!isOnChapterCommentsPage) buildStatusInfo(),
+          Positioned.fill(child: _ReaderLoadingVeil(opening: reader._opening)),
           AnimatedPositioned(
             duration: const Duration(milliseconds: 180),
             right: 16,
             bottom: showFloatingButtonValue == 0 ? -58 : 36,
             child: buildEpChangeButton(),
           ),
-          AnimatedPositioned(
-            duration: const Duration(milliseconds: 180),
-            top: _isOpen ? 0 : -(kTopBarHeight + context.padding.top),
+          Positioned(
+            top: 0,
             left: 0,
             right: 0,
             height: kTopBarHeight + context.padding.top,
-            child: buildTop(),
+            child: _animateToolbar(buildTop(), -.32),
           ),
-          AnimatedPositioned(
-            duration: const Duration(milliseconds: 180),
-            bottom: _isOpen
-                ? 0
-                : -(kBottomBarHeight + MediaQuery.of(context).padding.bottom),
+          Positioned(
+            bottom: 0,
             left: 0,
             right: 0,
-            child: buildBottom(),
+            child: _animateToolbar(buildBottom(), .23),
           ),
           if (selection != null)
             Positioned.fill(
@@ -730,12 +759,34 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
   }
 
   void openChapterDrawer() {
-    _openSideBar(
-      context.reader.widget.chapters!.isGrouped
-          ? _GroupedChaptersView(context.reader)
-          : _ChaptersView(context.reader),
-      width: 400,
-    );
+    final reader = context.reader;
+    final chapters = reader.widget.chapters!;
+    final content = chapters.isGrouped
+        ? _GroupedChaptersView(reader)
+        : _ChaptersView(reader);
+    if (App.isMobile &&
+        context.width < changePoint &&
+        MediaQuery.orientationOf(context) == Orientation.portrait) {
+      _showReaderPanel(
+        () => showModalBottomSheet<void>(
+          context: context,
+          isScrollControlled: true,
+          useSafeArea: true,
+          enableDrag: false,
+          showDragHandle: false,
+          clipBehavior: Clip.antiAlias,
+          shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          sheetAnimationStyle: MediaQuery.disableAnimationsOf(context)
+              ? AnimationStyle.noAnimation
+              : null,
+          builder: (context) => _ReaderChapterSheet(child: content),
+        ),
+      );
+    } else {
+      _openSideBar(content);
+    }
   }
 
   void saveCurrentImage() async {
@@ -1101,15 +1152,16 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
   }
 
   void _openSideBar(Widget widget, {double width = 400}) {
+    _showReaderPanel(
+      () => showSideBar(context, widget, width: width, dismissible: true),
+    );
+  }
+
+  void _showReaderPanel(Future<void> Function() show) {
     _gestureDetectorState?.ignoreNextTap();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      showSideBar(
-        context,
-        widget,
-        width: width,
-        dismissible: true,
-      ).whenComplete(() {
+      show().whenComplete(() {
         _gestureDetectorState?.clearIgnoreNextTap();
       });
     });

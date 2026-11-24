@@ -5,7 +5,6 @@ import 'package:flutter/foundation.dart' show kDebugMode, visibleForTesting;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:photo_view/photo_view.dart';
-import 'package:shimmer_animation/shimmer_animation.dart';
 import 'package:sliver_tools/sliver_tools.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 import 'package:venera/components/components.dart';
@@ -37,6 +36,7 @@ import 'package:venera/foundation/tracking/judgment_repository.dart';
 import 'package:venera/foundation/tracking/judgment_service.dart';
 import 'package:venera/foundation/tracking/judgment_state.dart';
 import 'package:venera/network/download.dart';
+import 'package:venera/pages/reader/entry_route.dart';
 import 'package:venera/pages/reader/reader.dart';
 import 'package:venera/utils/file_type.dart';
 import 'package:venera/utils/io.dart';
@@ -387,15 +387,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   }
 
   @override
-  Widget buildLoading() {
-    return _ComicPageLoadingPlaceHolder(
-      cover: widget.cover,
-      title: widget.title,
-      sourceKey: widget.sourceKey,
-      cid: widget.id,
-      heroID: widget.heroID,
-    );
-  }
+  Widget buildLoading() => _buildDetails(context, null);
 
   @override
   Widget buildError() {
@@ -471,6 +463,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   @override
   void dispose() {
     scrollController.removeListener(onScroll);
+    scrollController.dispose();
     _followUpdateCache.removeListener(_onFollowUpdateCacheChanged);
     unawaited(_judgmentSubscription?.cancel());
     _judgmentSubscription = null;
@@ -520,9 +513,13 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   List<String> get _knownAuthorNames => _collectKnownAuthorNames(comic);
 
   @override
-  Widget buildContent(BuildContext context, ComicDetails data) {
+  Widget buildContent(BuildContext context, ComicDetails data) =>
+      _buildDetails(context, data);
+
+  Widget _buildDetails(BuildContext context, ComicDetails? details) {
+    final loading = details == null;
     return Scaffold(
-      floatingActionButton: showFAB
+      floatingActionButton: !loading && showFAB
           ? FloatingActionButton(
               onPressed: () {
                 scrollController.animateTo(
@@ -537,14 +534,16 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       body: SmoothCustomScrollView(
         controller: scrollController,
         slivers: [
-          ...buildTitle(),
-          buildActions(),
-          buildDescription(),
-          buildInfo(),
-          buildChapters(),
-          buildComments(),
-          buildThumbnails(),
-          buildRecommend(),
+          ...buildTitle(details),
+          buildActions(loading: loading),
+          buildDescription(loading: loading),
+          buildInfo(loading: loading),
+          if (!loading) ...[
+            buildChapters(),
+            buildComments(),
+            buildThumbnails(),
+            buildRecommend(),
+          ],
           SliverPadding(
             padding: EdgeInsets.only(
               bottom: context.padding.bottom + 80,
@@ -565,7 +564,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       var history = HistoryManager().find(widget.id, ComicType.local);
       if (isFirst) {
         Future.microtask(() {
-          App.rootContext.to(() {
+          pushReader(App.rootContext, () {
             return Reader(
               type: ComicType.local,
               cid: widget.id,
@@ -731,19 +730,21 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     }
   }
 
-  Iterable<Widget> buildTitle() sync* {
-    final detailCover = comic.cover.trim();
-    final snapshot = _coverSnapshot;
+  Iterable<Widget> buildTitle(ComicDetails? details) sync* {
+    final detailCover = details?.cover.trim() ?? '';
+    final coverUrl = selectComicCoverUrl(widget.cover, detailCover);
+    final title = details?.title ?? widget.title;
+    final snapshot = details == null ? null : _coverSnapshot;
     final generation = _coverGeneration;
     yield SliverAppbar(
       title: AnimatedOpacity(
         opacity: showAppbarTitle ? 1.0 : 0.0,
         duration: const Duration(milliseconds: 200),
-        child: Text(comic.title),
+        child: Text(title ?? ''),
       ),
       actions: [
         IconButton(
-          onPressed: showMoreActions,
+          onPressed: details == null ? null : showMoreActions,
           icon: const Icon(Icons.more_horiz),
         ),
       ],
@@ -757,8 +758,8 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
         children: [
           const SizedBox(width: 16),
           GestureDetector(
-            onTap: () => _viewCover(context),
-            onLongPress: () => _saveCover(context),
+            onTap: details == null ? null : () => _viewCover(context),
+            onLongPress: details == null ? null : () => _saveCover(context),
             child: Hero(
               tag: "cover${widget.heroID}",
               child: Container(
@@ -776,59 +777,73 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
                 height: 144,
                 width: 144 * 0.72,
                 clipBehavior: Clip.antiAlias,
-                child: AnimatedImage(
-                  image: CachedImageProvider(
-                    _comicCoverUrl,
-                    sourceKey: comic.sourceKey,
-                    cid: comic.id,
-                  ),
-                  width: double.infinity,
-                  height: double.infinity,
-                  onFirstFrame: snapshot == null
-                      ? null
-                      : (_) => _onDetailCoverDisplayed(
-                          detailCover: detailCover,
-                          snapshot: snapshot,
-                          generation: generation,
+                child: coverUrl.isEmpty
+                    ? const SkeletonBlock(height: 144, radius: 8)
+                    : AnimatedImage(
+                        image: CachedImageProvider(
+                          coverUrl,
+                          sourceKey: details?.sourceKey ?? widget.sourceKey,
+                          cid: details?.id ?? widget.id,
                         ),
-                ),
+                        width: double.infinity,
+                        height: double.infinity,
+                        sweepOnReplacement: true,
+                        onFirstFrame: snapshot == null
+                            ? null
+                            : (_) => _onDetailCoverDisplayed(
+                                detailCover: detailCover,
+                                snapshot: snapshot,
+                                generation: generation,
+                              ),
+                      ),
               ),
             ),
           ),
           const SizedBox(width: 16),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                ComicTitleSelectableText(text: comic.title, style: ts.s18),
-                if (comic.subTitle != null)
-                  ComicTitleSelectableText(
-                    text: comic.subTitle!,
-                    style: ts.s14,
-                  ).paddingVertical(4),
-                Row(
-                  key: const ValueKey('comic-source-copy-row'),
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    Flexible(
-                      fit: FlexFit.loose,
-                      child: Text(
-                        (ComicSource.find(comic.sourceKey)?.name) ?? '',
-                        key: const ValueKey('comic-source-name'),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: ts.s12,
+            child: AnimatedSize(
+              duration: _detailMotionDuration,
+              alignment: Alignment.topLeft,
+              curve: Curves.easeOutCubic,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (title == null)
+                    const SkeletonBlock(width: 168, height: 19)
+                  else
+                    ComicTitleSelectableText(text: title, style: ts.s18),
+                  if (details?.subTitle case final subtitle?)
+                    ComicTitleSelectableText(
+                      text: subtitle,
+                      style: ts.s14,
+                    ).paddingVertical(4),
+                  Row(
+                    key: const ValueKey('comic-source-copy-row'),
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Flexible(
+                        fit: FlexFit.loose,
+                        child: Text(
+                          (ComicSource.find(widget.sourceKey)?.name) ?? '',
+                          key: const ValueKey('comic-source-name'),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: ts.s12,
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 2),
-                    ComicTitleCopyButton(
-                      title: comic.title,
-                      subtitle: comic.subTitle,
-                      knownAuthors: _knownAuthorNames,
-                    ),
-                  ],
-                ),
-              ],
+                      const SizedBox(width: 2),
+                      if (details == null)
+                        const SizedBox(height: 48)
+                      else
+                        ComicTitleCopyButton(
+                          title: details.title,
+                          subtitle: details.subTitle,
+                          knownAuthors: _knownAuthorNames,
+                        ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
         ],
@@ -836,31 +851,112 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     );
   }
 
-  Widget buildActions() {
+  Duration get _detailMotionDuration => MediaQuery.disableAnimationsOf(context)
+      ? Duration.zero
+      : const Duration(milliseconds: 180);
+
+  Widget _detailSection(Widget child, {required bool loading}) {
+    return SliverLazyToBoxAdapter(
+      child: AnimatedSize(
+        alignment: Alignment.topCenter,
+        curve: Curves.easeOutCubic,
+        duration: _detailMotionDuration,
+        child: TweenAnimationBuilder<double>(
+          key: ValueKey(loading),
+          duration: _detailMotionDuration,
+          tween: Tween(begin: loading ? 1.0 : .2, end: 1.0),
+          builder: (context, opacity, child) =>
+              Opacity(opacity: opacity, child: child),
+          child: child,
+        ),
+      ),
+    );
+  }
+
+  Widget buildActions({required bool loading}) {
     bool isMobile = context.width < changePoint;
+    if (loading) {
+      return _detailSection(
+        Column(
+          children: [
+            SkeletonSweep(
+              child: Column(
+                children: [
+                  SizedBox(
+                    height: 48,
+                    child: ListView(
+                      scrollDirection: Axis.horizontal,
+                      physics: const NeverScrollableScrollPhysics(),
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      children: [
+                        for (final width in [82.0, 74.0, 86.0, 70.0])
+                          Center(
+                            child: SkeletonBlock(
+                              width: width,
+                              height: 36,
+                              radius: 20,
+                            ),
+                          ).paddingHorizontal(4),
+                      ],
+                    ),
+                  ),
+                  if (isMobile)
+                    const Row(
+                      children: [
+                        Expanded(child: SkeletonBlock(height: 40, radius: 24)),
+                        SizedBox(width: 16),
+                        Expanded(
+                          child: SkeletonBlock(
+                            height: 40,
+                            radius: 24,
+                            emphasized: true,
+                          ),
+                        ),
+                      ],
+                    ).paddingHorizontal(16).paddingVertical(12),
+                  if (history != null)
+                    const Align(
+                      alignment: Alignment.centerLeft,
+                      child: SkeletonBlock(width: 162, height: 36, radius: 20),
+                    ).paddingHorizontal(16).paddingVertical(8),
+                ],
+              ),
+            ),
+            const Divider(),
+          ],
+        ).paddingTop(16),
+        loading: true,
+      );
+    }
     bool hasHistory = history != null && (history!.ep > 1 || history!.page > 1);
     final indicator = _hotWindowIndicator;
     final showIndicator = _showFollowUpIndicator && indicator != null;
-    return SliverLazyToBoxAdapter(
-      child: Column(
+    return _detailSection(
+      Column(
         children: [
           ListView(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.symmetric(horizontal: 8),
             children: [
               if (hasHistory && !isMobile)
-                _ActionButton(
-                  icon: const Icon(Icons.menu_book),
-                  text: 'Continue'.tl,
-                  onPressed: continueRead,
-                  iconColor: context.useTextColor(Colors.yellow),
+                ReaderEntryTarget(
+                  onOpen: continueRead,
+                  builder: (onPressed) => _ActionButton(
+                    icon: const Icon(Icons.menu_book),
+                    text: 'Continue'.tl,
+                    onPressed: onPressed,
+                    iconColor: context.useTextColor(Colors.yellow),
+                  ),
                 ),
               if (!isMobile || hasHistory)
-                _ActionButton(
-                  icon: const Icon(Icons.play_circle_outline),
-                  text: 'Start'.tl,
-                  onPressed: read,
-                  iconColor: context.useTextColor(Colors.orange),
+                ReaderEntryTarget(
+                  onOpen: (position) => read(null, null, null, position),
+                  builder: (onPressed) => _ActionButton(
+                    icon: const Icon(Icons.play_circle_outline),
+                    text: 'Start'.tl,
+                    onPressed: onPressed,
+                    iconColor: context.useTextColor(Colors.orange),
+                  ),
                 ),
               if (!isMobile && !isDownloaded)
                 _ActionButton(
@@ -931,12 +1027,15 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
                 ),
                 const SizedBox(width: 16),
                 Expanded(
-                  child: hasHistory
-                      ? FilledButton(
-                          onPressed: continueRead,
-                          child: Text("Continue".tl),
-                        )
-                      : FilledButton(onPressed: read, child: Text("Read".tl)),
+                  child: ReaderEntryTarget(
+                    onOpen: hasHistory
+                        ? continueRead
+                        : (position) => read(null, null, null, position),
+                    builder: (onPressed) => FilledButton(
+                      onPressed: onPressed,
+                      child: Text((hasHistory ? 'Continue' : 'Read').tl),
+                    ),
+                  ),
                 ),
               ],
             ).paddingHorizontal(16).paddingVertical(8),
@@ -996,15 +1095,46 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
           const Divider(),
         ],
       ).paddingTop(16),
+      loading: false,
     );
   }
 
-  Widget buildDescription() {
-    if (comic.description == null || comic.description!.trim().isEmpty) {
-      return const SliverPadding(padding: EdgeInsets.zero);
+  Widget buildDescription({required bool loading}) {
+    if (loading) {
+      return _detailSection(
+        Column(
+          children: [
+            ListTile(title: Text('Description'.tl)),
+            const SkeletonSweep(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SkeletonBlock(width: double.infinity, height: 12),
+                  SizedBox(height: 8),
+                  FractionallySizedBox(
+                    widthFactor: .88,
+                    child: SkeletonBlock(height: 12),
+                  ),
+                  SizedBox(height: 8),
+                  FractionallySizedBox(
+                    widthFactor: .67,
+                    child: SkeletonBlock(height: 12),
+                  ),
+                ],
+              ),
+            ).paddingHorizontal(16),
+            const SizedBox(height: 16),
+            const Divider(),
+          ],
+        ),
+        loading: true,
+      );
     }
-    return SliverLazyToBoxAdapter(
-      child: Column(
+    if (comic.description == null || comic.description!.trim().isEmpty) {
+      return _detailSection(const SizedBox.shrink(), loading: false);
+    }
+    return _detailSection(
+      Column(
         children: [
           ListTile(title: Text("Description".tl)),
           Padding(
@@ -1015,16 +1145,56 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
           const Divider(),
         ],
       ),
+      loading: false,
     );
   }
 
-  Widget buildInfo() {
+  Widget buildInfo({required bool loading}) {
+    if (loading) {
+      return _detailSection(
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            ListTile(title: Text('Information'.tl)),
+            SkeletonSweep(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (final widths in const [
+                    [54.0, 66.0, 83.0],
+                    [54.0, 97.0],
+                    [54.0, 58.0, 70.0, 84.0, 64.0, 92.0, 56.0, 76.0],
+                    [54.0, 68.0, 92.0, 61.0],
+                  ])
+                    Wrap(
+                      spacing: 4,
+                      runSpacing: 4,
+                      children: [
+                        for (final (index, width) in widths.indexed)
+                          SkeletonBlock(
+                            width: width,
+                            height: 30,
+                            radius: 12,
+                            emphasized: index == 0,
+                          ),
+                      ],
+                    ).paddingBottom(8),
+                ],
+              ),
+            ).paddingHorizontal(16),
+            const SizedBox(height: 12),
+            const Divider(),
+          ],
+        ),
+        loading: true,
+      );
+    }
     if (comic.tags.isEmpty &&
         comic.uploader == null &&
         comic.uploadTime == null &&
         comic.uploadTime == null &&
         comic.maxPage == null) {
-      return const SliverPadding(padding: EdgeInsets.zero);
+      return _detailSection(const SizedBox.shrink(), loading: false);
     }
 
     int i = 0;
@@ -1109,8 +1279,8 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     bool enableTranslation =
         App.locale.languageCode == 'zh' && comicSource.enableTagsTranslate;
 
-    return SliverLazyToBoxAdapter(
-      child: Column(
+    return _detailSection(
+      Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           ListTile(title: Text("Information".tl)),
@@ -1179,6 +1349,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
           const Divider(),
         ],
       ),
+      loading: false,
     );
   }
 
@@ -1428,127 +1599,6 @@ class _SelectDownloadChapterState extends State<_SelectDownloadChapter> {
           ),
           SizedBox(height: MediaQuery.of(context).padding.bottom),
         ],
-      ),
-    );
-  }
-}
-
-class _ComicPageLoadingPlaceHolder extends StatelessWidget {
-  const _ComicPageLoadingPlaceHolder({
-    this.cover,
-    this.title,
-    required this.sourceKey,
-    required this.cid,
-    this.heroID,
-  });
-
-  final String? cover;
-
-  final String? title;
-
-  final String sourceKey;
-
-  final String cid;
-
-  final int? heroID;
-
-  @override
-  Widget build(BuildContext context) {
-    Widget buildContainer(
-      double? width,
-      double? height, {
-      Color? color,
-      double? radius,
-    }) {
-      return Container(
-        height: height,
-        width: width,
-        decoration: BoxDecoration(
-          color: color ?? context.colorScheme.surfaceContainerLow,
-          borderRadius: BorderRadius.circular(radius ?? 4),
-        ),
-      );
-    }
-
-    return Shimmer(
-      color: context.isDarkMode ? Colors.grey.shade700 : Colors.white,
-      child: Column(
-        children: [
-          Appbar(title: Text(""), backgroundColor: context.colorScheme.surface),
-          const SizedBox(height: 8),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const SizedBox(width: 16),
-              buildImage(context),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (title != null)
-                      Text(title ?? "", style: ts.s18)
-                    else
-                      buildContainer(200, 25),
-                    const SizedBox(height: 8),
-                    buildContainer(80, 20),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          if (context.width < changePoint)
-            Row(
-              children: [
-                Expanded(child: buildContainer(null, 36, radius: 18)),
-                const SizedBox(width: 16),
-                Expanded(child: buildContainer(null, 36, radius: 18)),
-              ],
-            ).paddingHorizontal(16),
-          const Divider(),
-          const SizedBox(height: 8),
-          Center(
-            child: CircularProgressIndicator(
-              strokeWidth: 2.4,
-            ).fixHeight(24).fixWidth(24),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget buildImage(BuildContext context) {
-    Widget child;
-    if (cover != null) {
-      child = AnimatedImage(
-        image: CachedImageProvider(cover!, sourceKey: sourceKey, cid: cid),
-        width: double.infinity,
-        height: double.infinity,
-        fit: BoxFit.cover,
-      );
-    } else {
-      child = const SizedBox();
-    }
-
-    return Hero(
-      tag: "cover$heroID",
-      child: Container(
-        decoration: BoxDecoration(
-          color: context.colorScheme.primaryContainer,
-          borderRadius: BorderRadius.circular(8),
-          boxShadow: [
-            BoxShadow(
-              color: context.colorScheme.outlineVariant,
-              blurRadius: 1,
-              offset: const Offset(0, 1),
-            ),
-          ],
-        ),
-        height: 144,
-        width: 144 * 0.72,
-        clipBehavior: Clip.antiAlias,
-        child: child,
       ),
     );
   }

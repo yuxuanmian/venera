@@ -22,6 +22,7 @@ class _DetailFixture {
     required this.loadFolders,
     this.chapters = const {'ep': 'Chapter'},
     this.readChapterIds,
+    this.detailsReady,
   });
 
   final String sourceKey;
@@ -31,6 +32,7 @@ class _DetailFixture {
   final Future<Res<Map<String, String>>> Function(String comicId) loadFolders;
   final Map<String, Object> chapters;
   final List<String>? readChapterIds;
+  final Future<void>? detailsReady;
 
   ComicSource buildSource() {
     final coverPath =
@@ -54,21 +56,24 @@ class _DetailFixture {
       const [],
       null,
       null,
-      (id) async => Res(
-        ComicDetails.fromJson({
-          'title': 'Comic $id',
-          'subtitle': 'Author',
-          'cover': coverPath,
-          'description': 'Details loaded',
-          'tags': <String, List<String>>{},
-          'chapters': chapters,
-          if (readChapterIds != null) 'readChapterIds': readChapterIds,
-          'sourceKey': sourceKey,
-          'comicId': id,
-          'isFavorite': false,
-          'isLiked': false,
-        }),
-      ),
+      (id) async {
+        if (detailsReady != null) await detailsReady;
+        return Res(
+          ComicDetails.fromJson({
+            'title': 'Comic $id',
+            'subtitle': 'Author',
+            'cover': coverPath,
+            'description': 'Details loaded',
+            'tags': <String, List<String>>{},
+            'chapters': chapters,
+            if (readChapterIds != null) 'readChapterIds': readChapterIds,
+            'sourceKey': sourceKey,
+            'comicId': id,
+            'isFavorite': false,
+            'isLiked': false,
+          }),
+        );
+      },
       null,
       null,
       null,
@@ -160,6 +165,77 @@ void main() {
     );
   });
 
+  testWidgets(
+    'detail skeleton follows the theme and keeps the title and cover positions',
+    (tester) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(360, 860);
+      addTearDown(tester.view.reset);
+      final data = Completer<void>();
+      const blockColor = Color(0xff304651);
+      final fixture = _DetailFixture(
+        sourceKey: 'detail-skeleton-source',
+        comicId: 'skeleton',
+        detailsReady: data.future,
+        loadFolders: (_) async => const Res(<String, String>{}),
+      );
+      ComicSourceManager().add(fixture.buildSource());
+      addTearDown(() => ComicSourceManager().remove(fixture.sourceKey));
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData(
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: Colors.teal,
+              brightness: Brightness.dark,
+            ).copyWith(surfaceContainer: blockColor),
+          ),
+          home: ComicPage(
+            id: fixture.comicId,
+            sourceKey: fixture.sourceKey,
+            title: 'Comic skeleton',
+            heroID: 17,
+          ),
+        ),
+      );
+      final title = find.byWidgetPredicate(
+        (widget) =>
+            widget is ComicTitleSelectableText &&
+            widget.text == 'Comic skeleton',
+      );
+      final cover = find.byWidgetPredicate(
+        (widget) => widget is Hero && widget.tag == 'cover17',
+      );
+      final titlePosition = tester.getTopLeft(title);
+      final coverPosition = tester.getTopLeft(cover);
+      final coverWidth = tester.getSize(cover).width;
+      final blocks = find.byType(SkeletonBlock);
+      expect(blocks.evaluate().length, greaterThan(12));
+      final paintedBlocks = find.descendant(
+        of: blocks,
+        matching: find.byType(DecoratedBox),
+      );
+      expect(
+        tester
+            .widgetList<DecoratedBox>(paintedBlocks)
+            .any(
+              (box) => (box.decoration as BoxDecoration).color == blockColor,
+            ),
+        isTrue,
+      );
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+
+      data.complete();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 220));
+      expect(tester.getTopLeft(title), titlePosition);
+      expect(tester.getTopLeft(cover), coverPosition);
+      expect(tester.getSize(cover).width, coverWidth);
+      expect(tester.getSize(cover).height, 144);
+      expect(find.text('Details loaded'), findsOneWidget);
+      expect(blocks, findsNothing);
+    },
+  );
+
   for (final sourceSupportsReadStatus in [false, true]) {
     testWidgets(
       'flat chapters preserve local marks with remote status ${sourceSupportsReadStatus ? 'present' : 'absent'}',
@@ -195,10 +271,7 @@ void main() {
         _expectChapterRead(tester, '01', true);
         _expectChapterRead(tester, 'Source chapter', sourceSupportsReadStatus);
         _expectChapterRead(tester, 'Unread chapter', false);
-        expect(
-          find.text('${'Last Reading'.tl}: 01 P7'),
-          findsOneWidget,
-        );
+        expect(find.text('${'Last Reading'.tl}: 01 P7'), findsOneWidget);
         final history = HistoryManager().find(model.id, model.comicType)!;
         expect(history.readEpisode, {'1'});
         expect(history.ep, 1);

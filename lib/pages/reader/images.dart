@@ -32,12 +32,22 @@ class _ReaderImagesState extends State<_ReaderImages> {
     ImageDownloader.cancelAllLoadingImages();
   }
 
-  /// Handle jumping to last page when _jumpToLastPageOnLoad is true
-  void _handleJumpToLastPage() {
-    if (reader._jumpToLastPageOnLoad) {
-      reader._page = reader.maxPage;
-      reader._jumpToLastPageOnLoad = false;
+  void _applyImages(List<String> images) {
+    reader.isLoading = false;
+    inProgress = false;
+    if (images.isEmpty) {
+      error = 'No images found'.tl;
+      return;
     }
+    reader.images = images;
+    reader._page = reader._jumpToLastPageOnLoad
+        ? reader.maxPage
+        : reader.page.clamp(1, reader.maxPage);
+    reader._jumpToLastPageOnLoad = false;
+    reader._openingImageChapter = reader.chapter;
+    Future.microtask(() {
+      reader.updateHistory();
+    });
   }
 
   void load() async {
@@ -67,15 +77,7 @@ class _ReaderImagesState extends State<_ReaderImages> {
           );
         }
         if (!mounted) return;
-        setState(() {
-          reader.images = images;
-          reader.isLoading = false;
-          inProgress = false;
-          _handleJumpToLastPage();
-          Future.microtask(() {
-            reader.updateHistory();
-          });
-        });
+        setState(() => _applyImages(images));
       } catch (e) {
         watch.stop();
         if (kDebugMode) {
@@ -121,15 +123,7 @@ class _ReaderImagesState extends State<_ReaderImages> {
             inProgress = false;
           });
         } else {
-          setState(() {
-            reader.images = res.data;
-            reader.isLoading = false;
-            inProgress = false;
-            _handleJumpToLastPage();
-            Future.microtask(() {
-              reader.updateHistory();
-            });
-          });
+          setState(() => _applyImages(res.data));
         }
       } catch (e) {
         watch.stop();
@@ -151,6 +145,7 @@ class _ReaderImagesState extends State<_ReaderImages> {
       }
     }
     if (mounted) {
+      if (error != null) reader._opening.reveal(animate: false);
       context.readerScaffold.update();
     }
   }
@@ -159,13 +154,7 @@ class _ReaderImagesState extends State<_ReaderImages> {
   Widget build(BuildContext context) {
     if (reader.isLoading) {
       load();
-      // Paint an opaque background while loading; otherwise the reader page is
-      // a bare spinner that shows the page below through during the interactive
-      // back gesture (or any route transition).
-      return ColoredBox(
-        color: context.colorScheme.surface,
-        child: const Center(child: CircularProgressIndicator()),
-      );
+      return const SizedBox.expand();
     } else if (error != null) {
       return GestureDetector(
         onTap: () {
@@ -175,6 +164,7 @@ class _ReaderImagesState extends State<_ReaderImages> {
           child: NetworkError(
             message: error!,
             retry: () {
+              reader._opening.begin();
               setState(() {
                 reader.isLoading = true;
                 error = null;
@@ -184,6 +174,7 @@ class _ReaderImagesState extends State<_ReaderImages> {
         ),
       );
     } else {
+      reader._watchOpeningImage();
       if (reader.mode.isGallery) {
         var showComments =
             appdata.settings.getReaderSetting(
@@ -282,26 +273,11 @@ class _GalleryModeState extends State<_GalleryMode>
 
   /// Get the range of images for the given page. [page] is 1-based.
   (int start, int end) getPageImagesRange(int page) {
-    var imagesPerPage = reader.imagesPerPage;
-    if (reader.showSingleImageOnFirstPage()) {
-      if (page == 1) {
-        return (0, 1);
-      } else {
-        int startIndex = (page - 2) * imagesPerPage + 1;
-        int endIndex = math.min(
-          startIndex + imagesPerPage,
-          reader.images!.length,
-        );
-        return (startIndex, endIndex);
-      }
-    } else {
-      int startIndex = (page - 1) * imagesPerPage;
-      int endIndex = math.min(
-        startIndex + imagesPerPage,
-        reader.images!.length,
-      );
-      return (startIndex, endIndex);
-    }
+    final start = reader._firstImageIndex(page);
+    final count = page == 1 && reader.showSingleImageOnFirstPage()
+        ? 1
+        : reader.imagesPerPage;
+    return (start, math.min(start + count, reader.images!.length));
   }
 
   /// Get the image indices for current page. Returns null if no images.
@@ -402,8 +378,7 @@ class _GalleryModeState extends State<_GalleryMode>
                 controller: photoViewControllers[index],
                 imageProvider: _createImageProviderFromKey(
                   pageImages[0],
-                  context,
-                  startIndex + 1,
+                  reader,
                 ),
                 fit: BoxFit.contain,
                 errorBuilder: (_, error, s, retry) {
@@ -498,11 +473,7 @@ class _GalleryModeState extends State<_GalleryMode>
           child: ComicImage(
             width: pair ? double.infinity : null,
             height: pair ? double.infinity : null,
-            image: _createImageProviderFromKey(
-              images[offset],
-              context,
-              startIndex + slot + 1,
-            ),
+            image: _createImageProviderFromKey(images[offset], reader),
             fit: BoxFit.contain,
             alignment: alignment,
             onInit: (state) => imageStates.add(state),
@@ -1388,13 +1359,11 @@ List<AlbumImageChoice> _collectAlbumChoices(
   return choices..sort((a, b) => a.index.compareTo(b.index));
 }
 
-ImageProvider _createImageProviderFromKey(
+ReaderImageProvider _createImageProviderFromKey(
   String imageKey,
-  BuildContext context,
-  int page, {
+  _ReaderState reader, {
   ImageDownloadPriority priority = ImageDownloadPriority.foreground,
 }) {
-  var reader = context.reader;
   return ReaderImageProvider(
     imageKey,
     reader.type.comicSource?.key,
@@ -1412,12 +1381,7 @@ ImageProvider _createImageProvider(
 }) {
   var reader = context.reader;
   var imageKey = reader.images![page - 1];
-  return _createImageProviderFromKey(
-    imageKey,
-    context,
-    page,
-    priority: priority,
-  );
+  return _createImageProviderFromKey(imageKey, reader, priority: priority);
 }
 
 /// [_precacheImage] is used to precache the image for the given page.

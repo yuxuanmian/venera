@@ -133,6 +133,44 @@ void main() {
   });
 
   testWidgets(
+    'home search accepts input after a single tap and drops focus on submit',
+    (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          navigatorKey: App.rootNavigatorKey,
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: SearchEntryHero(
+                child: TextButton(
+                  onPressed: () => context.to(
+                    () => SearchPage(
+                      fromHome: true,
+                      onSearchHistoryAdded: recordedHistory.add,
+                    ),
+                  ),
+                  child: const Text('Home search entry'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Home search entry'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(tester.testTextInput.isVisible, isTrue);
+      tester.testTextInput.enterText('immediate query');
+      await tester.pumpAndSettle();
+      expect(visibleSearchText(tester), 'immediate query');
+      await tester.testTextInput.receiveAction(TextInputAction.search);
+      await tester.pumpAndSettle();
+      await returnToSearchPage(tester);
+      expect(visibleSearchText(tester), 'immediate query');
+      expect(tester.testTextInput.isVisible, isFalse);
+    },
+  );
+
+  testWidgets(
     'AppSearchBar keeps programmatic, typed, and clear text aligned',
     (tester) async {
       var searches = 0;

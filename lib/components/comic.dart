@@ -1061,6 +1061,9 @@ class ComicList extends StatefulWidget {
     this.firstPagePinnedComics = const [],
     this.onFirstPageShown,
     this.enablePageStorage = false,
+    this.showLoadingSkeleton = false,
+    this.showLoadMoreSkeleton = false,
+    this.emptyMessage,
   });
 
   final Future<Res<List<Comic>>> Function(int page)? loadPage;
@@ -1095,6 +1098,9 @@ class ComicList extends StatefulWidget {
   final VoidCallback? onFirstPageShown;
 
   final bool enablePageStorage;
+  final bool showLoadingSkeleton;
+  final bool showLoadMoreSkeleton;
+  final String? emptyMessage;
 
   @override
   State<ComicList> createState() => ComicListState();
@@ -1110,6 +1116,7 @@ class ComicListState extends State<ComicList> {
   String? _error;
 
   final Map<int, bool> _loading = {};
+  int _requestGeneration = 0;
 
   String? _nextUrl;
   final Map<int, String?> _requestTokens = {};
@@ -1199,6 +1206,7 @@ class ComicListState extends State<ComicList> {
   }
 
   void refresh() {
+    _requestGeneration++;
     _data.clear();
     _page = 1;
     _maxPage = null;
@@ -1452,7 +1460,11 @@ class ComicListState extends State<ComicList> {
           ),
         ),
         FilledButton(
-          onPressed: _page < (_maxPage ?? (_page + 1))
+          onPressed:
+              _page < (_maxPage ?? (_page + 1)) &&
+                  (!widget.showLoadingSkeleton ||
+                      _maxPage != null ||
+                      _data.containsKey(_page))
               ? () {
                   _setPage(_page + 1);
                 }
@@ -1471,17 +1483,19 @@ class ComicListState extends State<ComicList> {
     if (widget.loadPage == null && widget.loadNext == null) {
       _error = "loadPage and loadNext can't be null at the same time";
       Future.microtask(() {
-        setState(() {});
+        if (mounted) setState(() {});
       });
+      return;
     }
     if (_data[page] != null || _loading[page] == true) {
       return;
     }
     _loading[page] = true;
+    final generation = _requestGeneration;
     try {
       if (widget.loadPage != null) {
         var res = await widget.loadPage!(page);
-        if (!mounted) return;
+        if (!mounted || generation != _requestGeneration) return;
         if (res.success) {
           if (res.data.isEmpty) {
             setState(() {
@@ -1497,35 +1511,36 @@ class ComicListState extends State<ComicList> {
             });
           }
         } else {
-          setState(() {
-            _error = res.errorMessage ?? "Unknown error".tl;
-          });
+          _showPageError(page, res.errorMessage ?? "Unknown error".tl);
         }
       } else {
-        try {
-          while (_data[page] == null) {
-            await _fetchNext(page);
-          }
-          if (mounted) {
-            setState(() {});
-          }
-        } catch (e) {
-          if (mounted) {
-            setState(() {
-              _error = e.toString();
-            });
-          }
-        }
+        await _fetchNext(page, generation);
+        if (mounted && generation == _requestGeneration) setState(() {});
+      }
+    } catch (e) {
+      if (mounted && generation == _requestGeneration) {
+        _showPageError(page, e.toString());
       }
     } finally {
-      _loading[page] = false;
-      if (mounted) storeState();
+      if (generation == _requestGeneration) {
+        _loading[page] = false;
+        if (mounted) storeState();
+      }
     }
   }
 
-  Future<void> _fetchNext(int target) async {
+  void _showPageError(int page, String message) {
+    if (appdata.settings['comicListDisplayMode'] == 'paging' && page != _page) {
+      return;
+    }
+    setState(() => _error = message);
+  }
+
+  Future<void> _fetchNext(int target, int generation) async {
     final requestToken = _nextUrl;
     var res = await widget.loadNext!(requestToken);
+    if (!mounted || generation != _requestGeneration) return;
+    if (res.error) throw res.errorMessage ?? 'Unknown error'.tl;
     _requestTokens[target] = requestToken;
     if (_data[target] == null) {
       _data[target] = res.data;
@@ -1578,6 +1593,9 @@ class ComicListState extends State<ComicList> {
 
   Widget buildPagingMode() {
     if (_error != null) {
+      if (widget.showLoadingSkeleton) {
+        return _buildWaitingPage(paging: true, error: _error);
+      }
       return Column(
         children: [
           if (widget.errorLeading != null) widget.errorLeading!,
@@ -1598,6 +1616,9 @@ class ComicListState extends State<ComicList> {
     }
     if (_data[_page] == null) {
       _loadPage(_page);
+      if (widget.showLoadingSkeleton) {
+        return _buildWaitingPage(paging: true);
+      }
       return Column(
         children: [
           if (widget.errorLeading != null) widget.errorLeading!,
@@ -1606,12 +1627,15 @@ class ComicListState extends State<ComicList> {
       );
     }
     return SmoothCustomScrollView(
-      key: enablePageStorage ? PageStorageKey('scroll$_page') : null,
+      key: _scrollKey(paging: true),
       controller: widget.controller,
       slivers: [
         if (widget.leadingSliver != null) widget.leadingSliver!,
         if (_maxPage != 1) _buildSliverPageSelector(),
-        _buildPagedComicGrid([MapEntry(_page, _data[_page]!)]),
+        if (_isEmptyPage(_page))
+          _buildEmptySliver()
+        else
+          _buildPagedComicGrid([MapEntry(_page, _data[_page]!)]),
         if (_data[_page]!.length > 6 && _maxPage != 1)
           _buildSliverPageSelector(),
         if (widget.trailingSliver != null) widget.trailingSliver!,
@@ -1621,6 +1645,9 @@ class ComicListState extends State<ComicList> {
 
   Widget buildContinuousMode() {
     if (_error != null && _data.isEmpty) {
+      if (widget.showLoadingSkeleton) {
+        return _buildWaitingPage(error: _error);
+      }
       return Column(
         children: [
           if (widget.errorLeading != null) widget.errorLeading!,
@@ -1641,6 +1668,7 @@ class ComicListState extends State<ComicList> {
     }
     if (_data[1] == null) {
       _loadPage(1);
+      if (widget.showLoadingSkeleton) return _buildWaitingPage();
       return Column(
         children: [
           if (widget.errorLeading != null) widget.errorLeading!,
@@ -1653,15 +1681,10 @@ class ComicListState extends State<ComicList> {
       controller: widget.controller,
       slivers: [
         if (widget.leadingSliver != null) widget.leadingSliver!,
-        _buildPagedComicGrid(
-          _data.entries,
-          onLastItemBuild: () {
-            if (_error == null &&
-                (_maxPage == null || _data.length < _maxPage!)) {
-              _loadPage(_data.length + 1);
-            }
-          },
-        ),
+        if (_isEmptyPage(1) && _maxPage == 1)
+          _buildEmptySliver()
+        else
+          _buildPagedComicGrid(_data.entries, onLastItemBuild: _loadMoreComics),
         if (_error != null)
           SliverToBoxAdapter(
             child: Column(
@@ -1688,9 +1711,145 @@ class ComicListState extends State<ComicList> {
             ).paddingHorizontal(16).paddingVertical(8),
           )
         else if (_maxPage == null || _data.length < _maxPage!)
-          const SliverListLoadingIndicator(),
+          if (widget.showLoadMoreSkeleton)
+            _buildSkeleton(loadMore: true)
+          else
+            const SliverListLoadingIndicator(),
         if (widget.trailingSliver != null) widget.trailingSliver!,
       ],
+    );
+  }
+
+  void _loadMoreComics() {
+    if (_error == null && (_maxPage == null || _data.length < _maxPage!)) {
+      _loadPage(_data.length + 1);
+    }
+  }
+
+  bool _isEmptyPage(int page) =>
+      widget.emptyMessage != null &&
+      _data[page]!.isEmpty &&
+      (page != 1 || widget.firstPagePinnedComics.isEmpty);
+
+  Widget _buildEmptySliver() => SliverFillRemaining(
+    hasScrollBody: false,
+    child: Center(child: Text(widget.emptyMessage!)),
+  );
+
+  Widget _buildWaitingPage({bool paging = false, String? error}) {
+    return SmoothCustomScrollView(
+      key: _scrollKey(paging: paging),
+      controller: widget.controller,
+      slivers: [
+        if (widget.leadingSliver != null) widget.leadingSliver!,
+        if (paging && (_maxPage != null || _page > 1 || _data.isNotEmpty))
+          _buildSliverPageSelector(),
+        if (error != null)
+          SliverFillRemaining(
+            hasScrollBody: false,
+            child: NetworkError(
+              withAppbar: false,
+              message: error,
+              retry: () => setState(() => _error = null),
+            ),
+          )
+        else
+          _buildSkeleton(),
+      ],
+    );
+  }
+
+  Key? _scrollKey({required bool paging}) {
+    if (enablePageStorage) return PageStorageKey('scroll$_page');
+    return paging && widget.showLoadingSkeleton ? ValueKey(_page) : null;
+  }
+
+  Widget _buildSkeleton({bool loadMore = false}) {
+    return SliverLayoutBuilder(
+      builder: (context, constraints) {
+        final delegate = SliverGridDelegateWithComics();
+        final layout =
+            delegate.getLayout(constraints) as SliverGridRegularTileLayout;
+        final rowCount = loadMore || layout.mainAxisStride == 0
+            ? 1
+            : (constraints.remainingPaintExtent / layout.mainAxisStride)
+                  .ceil()
+                  .clamp(1, 8);
+        return SliverGrid(
+          gridDelegate: delegate,
+          delegate: SliverChildBuilderDelegate((context, index) {
+            // The footer can be the first visible tile when every loaded
+            // item was filtered out or the cursor returned an empty page.
+            if (loadMore && index == 0) _loadMoreComics();
+            return _ComicTileSkeleton(brief: delegate.useBriefMode);
+          }, childCount: rowCount * layout.crossAxisCount),
+        );
+      },
+    );
+  }
+}
+
+class _ComicTileSkeleton extends StatelessWidget {
+  const _ComicTileSkeleton({required this.brief});
+
+  final bool brief;
+
+  @override
+  Widget build(BuildContext context) {
+    if (brief) {
+      return const SkeletonSweep(
+        child: Padding(
+          padding: EdgeInsets.symmetric(horizontal: 6),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              SkeletonBlock(height: double.infinity, radius: 8),
+              PositionedDirectional(
+                start: 8,
+                end: 28,
+                bottom: 10,
+                child: SkeletonBlock(height: 13, emphasized: true),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    return LayoutBuilder(
+      builder: (context, constraints) => SkeletonSweep(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 24, 8),
+          child: Row(
+            children: [
+              SkeletonBlock(
+                width: (constraints.maxHeight - 16) * .68,
+                height: double.infinity,
+                radius: 8,
+              ),
+              const SizedBox(width: 16),
+              const Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SkeletonBlock(width: double.infinity, height: 14),
+                    SizedBox(height: 9),
+                    FractionallySizedBox(
+                      widthFactor: .72,
+                      child: SkeletonBlock(height: 12),
+                    ),
+                    SizedBox(height: 12),
+                    FractionallySizedBox(
+                      widthFactor: .46,
+                      child: SkeletonBlock(height: 11),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

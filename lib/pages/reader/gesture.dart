@@ -408,6 +408,8 @@ class _ReaderGestureDetectorState
     required Duration eventTime,
     required bool isQuickTap,
   }) {
+    final imageView = reader._imageViewController;
+    if (!mounted || reader.isLoading || imageView == null) return;
     // The routing decision consults the scroll guard before anything else, so a
     // tap that arrives around a user drag is consumed once for the whole
     // surface: an edge tap cannot turn a page (or change a chapter) behind the
@@ -416,7 +418,7 @@ class _ReaderGestureDetectorState
     // or nudge a coasting list.
     final action = routeReaderSingleTap(
       ReaderTapDecisionInput(
-        guardArmed: reader._imageViewController!.handleOnTap(location),
+        guardArmed: imageView.handleOnTap(location),
         toolbarOpen: context.readerScaffold.isOpen,
         // Don't open toolbar on chapter comments page
         onChapterCommentsPage: reader.isOnChapterCommentsPage,
