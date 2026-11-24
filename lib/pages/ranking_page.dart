@@ -50,7 +50,9 @@ class _RankingPageState extends State<RankingPage> {
       body: ComicList(
         key: Key(option),
         showRankingMedals: true,
-        errorLeading: SizedBox(height: topPadding),
+        showLoadingSkeleton: true,
+        showLoadMoreSkeleton: true,
+        emptyMessage: 'No ranking entries'.tl,
         leadingSliver: buildOptions().sliverPadding(
           EdgeInsets.only(top: topPadding),
         ),

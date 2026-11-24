@@ -21,7 +21,13 @@ import 'comic_details_page/comic_page.dart';
 import 'comic_source_page.dart';
 
 class SearchPage extends StatefulWidget {
-  const SearchPage({super.key, this.onSearchHistoryAdded});
+  const SearchPage({
+    super.key,
+    this.fromHome = false,
+    this.onSearchHistoryAdded,
+  });
+
+  final bool fromHome;
 
   @visibleForTesting
   final ValueChanged<String>? onSearchHistoryAdded;
@@ -57,6 +63,7 @@ class _SearchPageState extends State<SearchPage> {
 
   void search([String? text]) {
     final submittedText = text ?? controller.text;
+    if (widget.fromHome) focusNode.unfocus();
     if (aggregatedSearch) {
       context
           .to(
@@ -256,6 +263,7 @@ class _SearchPageState extends State<SearchPage> {
         findSuggestions();
       },
       focusNode: focusNode,
+      fromHome: widget.fromHome,
     );
     if (suggestions.isNotEmpty) {
       yield buildSuggestions(context);

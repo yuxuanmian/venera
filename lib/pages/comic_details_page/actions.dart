@@ -150,32 +150,32 @@ abstract mixin class _ComicPageActions {
   /// [page] the page number, start from 1
   ///
   /// [group] the chapter group number, start from 1
-  void read([int? ep, int? page, int? group]) {
-    App.rootContext
-        .to(
-          () => Reader(
-            type: comic.comicType,
-            cid: comic.id,
-            name: comic.title,
-            chapters: comic.chapters,
-            initialChapter: ep,
-            initialPage: page,
-            initialChapterGroup: group,
-            history: history ?? History.fromModel(model: comic, ep: 0, page: 0),
-            author: comic.findAuthor() ?? '',
-            tags: comic.plainTags,
-          ),
-        )
-        .then((_) {
-          onReadEnd();
-        });
+  void read([int? ep, int? page, int? group, Offset? tapPosition]) {
+    pushReader(
+      App.rootContext,
+      () => Reader(
+        type: comic.comicType,
+        cid: comic.id,
+        name: comic.title,
+        chapters: comic.chapters,
+        initialChapter: ep,
+        initialPage: page,
+        initialChapterGroup: group,
+        history: history ?? History.fromModel(model: comic, ep: 0, page: 0),
+        author: comic.findAuthor() ?? '',
+        tags: comic.plainTags,
+      ),
+      tapPosition: tapPosition,
+    ).then((_) {
+      onReadEnd();
+    });
   }
 
-  void continueRead() {
+  void continueRead([Offset? tapPosition]) {
     var ep = history?.ep ?? 1;
     var page = history?.page ?? 1;
     var group = history?.group ?? 1;
-    read(ep, page, group);
+    read(ep, page, group, tapPosition);
   }
 
   void onReadEnd();

@@ -750,6 +750,46 @@ mixin _PasteExtractMixin<T extends StatefulWidget> on State<T> {
   }
 }
 
+class SearchEntryHero extends StatelessWidget {
+  const SearchEntryHero({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (MediaQuery.disableAnimationsOf(context)) return child;
+    final colors = context.colorScheme;
+    return Hero(
+      tag: 'home-search-entry',
+      transitionOnUserGestures: true,
+      curve: const Interval(0, .78, curve: Curves.easeOutCubic),
+      flightShuttleBuilder: (context, animation, direction, from, to) {
+        return AnimatedBuilder(
+          animation: animation,
+          builder: (context, child) {
+            final progress = animation.value.clamp(0.0, 1.0);
+            return DecoratedBox(
+              decoration: BoxDecoration(
+                color: Color.lerp(
+                  colors.surfaceContainerHigh,
+                  colors.surfaceContainer,
+                  progress,
+                ),
+                borderRadius: BorderRadius.circular(
+                  ui.lerpDouble(32, 14, progress)!,
+                ),
+              ),
+              child: child,
+            );
+          },
+          child: const SizedBox.expand(),
+        );
+      },
+      child: child,
+    );
+  }
+}
+
 class SliverSearchBar extends StatefulWidget {
   const SliverSearchBar({
     super.key,
@@ -757,6 +797,7 @@ class SliverSearchBar extends StatefulWidget {
     this.onChanged,
     this.action,
     this.focusNode,
+    this.fromHome = false,
   });
 
   final SearchBarController controller;
@@ -766,6 +807,7 @@ class SliverSearchBar extends StatefulWidget {
   final Widget? action;
 
   final FocusNode? focusNode;
+  final bool fromHome;
 
   @override
   State<SliverSearchBar> createState() => _SliverSearchBarState();
@@ -830,6 +872,7 @@ class _SliverSearchBarState extends State<SliverSearchBar>
         },
         action: widget.action,
         focusNode: widget.focusNode,
+        fromHome: widget.fromHome,
         inputFormatters: pasteInputFormatters,
       ),
     );
@@ -848,6 +891,7 @@ class _SliverSearchBarDelegate extends SliverPersistentHeaderDelegate {
   final Widget? action;
 
   final FocusNode? focusNode;
+  final bool fromHome;
 
   final List<TextInputFormatter> inputFormatters;
 
@@ -858,6 +902,7 @@ class _SliverSearchBarDelegate extends SliverPersistentHeaderDelegate {
     this.onChanged,
     this.action,
     this.focusNode,
+    required this.fromHome,
     this.inputFormatters = const [],
   });
 
@@ -869,6 +914,42 @@ class _SliverSearchBarDelegate extends SliverPersistentHeaderDelegate {
     double shrinkOffset,
     bool overlapsContent,
   ) {
+    Widget input = TextField(
+      autofocus: fromHome,
+      focusNode: focusNode,
+      controller: editingController,
+      inputFormatters: inputFormatters,
+      decoration: InputDecoration(
+        hintText: "Search".tl,
+        border: InputBorder.none,
+        contentPadding: fromHome
+            ? const EdgeInsets.symmetric(horizontal: 12, vertical: 8)
+            : null,
+      ),
+      onSubmitted: (text) => controller.onSearch?.call(text),
+      onChanged: onChanged,
+    );
+    if (fromHome) {
+      // Only the surface flies. The editable stays mounted on the destination
+      // route and can receive focus while the shared element is in flight.
+      input = SizedBox(
+        height: 42,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            SearchEntryHero(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: context.colorScheme.surfaceContainer,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+              ),
+            ),
+            input,
+          ],
+        ),
+      );
+    }
     final header = Container(
       height: _kAppBarHeight + topPadding,
       width: double.infinity,
@@ -888,19 +969,7 @@ class _SliverSearchBarDelegate extends SliverPersistentHeaderDelegate {
           Expanded(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: TextField(
-                focusNode: focusNode,
-                controller: editingController,
-                inputFormatters: inputFormatters,
-                decoration: InputDecoration(
-                  hintText: "Search".tl,
-                  border: InputBorder.none,
-                ),
-                onSubmitted: (text) {
-                  controller.onSearch?.call(text);
-                },
-                onChanged: onChanged,
-              ),
+              child: input,
             ),
           ),
           ListenableBuilder(
@@ -940,6 +1009,8 @@ class _SliverSearchBarDelegate extends SliverPersistentHeaderDelegate {
         editingController != oldDelegate.editingController ||
         controller != oldDelegate.controller ||
         topPadding != oldDelegate.topPadding ||
+        fromHome != oldDelegate.fromHome ||
+        focusNode != oldDelegate.focusNode ||
         inputFormatters != oldDelegate.inputFormatters;
   }
 }

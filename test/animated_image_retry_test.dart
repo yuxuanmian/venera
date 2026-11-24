@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:ui' as ui;
 
@@ -51,6 +52,66 @@ class _CountingImageProvider extends ImageProvider<_CountingImageProvider> {
     return super.evict(cache: cache, configuration: configuration);
   }
 }
+
+class _DeferredFrame extends ImageProvider<_DeferredFrame> {
+  final frame = Completer<ImageInfo>();
+
+  void show(String label, Color color, {int width = 16, int height = 16}) {
+    final recorder = ui.PictureRecorder();
+    ui.Canvas(recorder).drawPaint(ui.Paint()..color = color);
+    final picture = recorder.endRecording();
+    final image = picture.toImageSync(width, height);
+    picture.dispose();
+    frame.complete(ImageInfo(image: image, debugLabel: label));
+  }
+
+  @override
+  Future<_DeferredFrame> obtainKey(ImageConfiguration configuration) =>
+      SynchronousFuture(this);
+
+  @override
+  ImageStreamCompleter loadImage(
+    _DeferredFrame key,
+    ImageDecoderCallback decode,
+  ) => OneFrameImageStreamCompleter(frame.future);
+}
+
+Finder _shownFrame(String label) => find.byWidgetPredicate(
+  (widget) => widget is RawImage && widget.debugImageLabel == label,
+);
+
+final _coverSweep = find.descendant(
+  of: find.byType(AnimatedImage),
+  matching: find.byWidgetPredicate(
+    (widget) =>
+        widget is DecoratedBox &&
+        widget.decoration is BoxDecoration &&
+        (widget.decoration as BoxDecoration).gradient is LinearGradient,
+  ),
+);
+
+Future<void> _showReplacement(
+  WidgetTester tester,
+  _DeferredFrame provider,
+  List<String?> shown, {
+  bool reduceMotion = false,
+}) => tester.pumpWidget(
+  MaterialApp(
+    builder: (context, child) => MediaQuery(
+      data: MediaQuery.of(context).copyWith(disableAnimations: reduceMotion),
+      child: child!,
+    ),
+    home: Center(
+      child: AnimatedImage(
+        image: provider,
+        width: 100,
+        height: 150,
+        sweepOnReplacement: true,
+        onFirstFrame: (frame) => shown.add(frame.debugLabel),
+      ),
+    ),
+  ),
+);
 
 class _RebuildHost extends StatefulWidget {
   const _RebuildHost({required this.image});
@@ -107,5 +168,83 @@ void main() {
     expect(provider.loadCalls, 1);
     expect(find.byIcon(Icons.error), findsOneWidget);
     expect(find.byType(RawImage), findsNothing);
+  });
+
+  testWidgets(
+    'replacement sweeps while pending and fades in only a decoded frame',
+    (tester) async {
+      final shown = <String?>[];
+      final old = _DeferredFrame();
+      final fresh = _DeferredFrame();
+      final failing = _DeferredFrame();
+      await _showReplacement(tester, old, shown);
+      old.show('old', Colors.blue);
+      await tester.pumpAndSettle();
+      expect(_shownFrame('old'), findsOneWidget);
+      expect(_coverSweep, findsNothing);
+      final coverRect = tester.getRect(_shownFrame('old'));
+
+      await _showReplacement(tester, fresh, shown);
+      expect(_shownFrame('old'), findsOneWidget);
+      expect(_coverSweep, findsOneWidget);
+      final initialSweep = tester.widget<DecoratedBox>(_coverSweep).decoration;
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(
+        tester.widget<DecoratedBox>(_coverSweep).decoration,
+        isNot(initialSweep),
+      );
+      await tester.pump(const Duration(milliseconds: 850));
+      expect(_coverSweep, findsOneWidget);
+      expect(_shownFrame('old'), findsOneWidget);
+      expect(shown, ['old']);
+
+      fresh.show('fresh', Colors.orange, width: 22, height: 36);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 180));
+      expect(_shownFrame('old'), findsOneWidget);
+      expect(_shownFrame('fresh'), findsOneWidget);
+      expect(shown, ['old']);
+      final freshFrame = _shownFrame('fresh');
+      final renderImage = tester.renderObject(freshFrame);
+      expect(tester.getRect(freshFrame), coverRect);
+
+      await tester.pumpAndSettle();
+      expect(_shownFrame('old'), findsNothing);
+      expect(_shownFrame('fresh'), findsOneWidget);
+      expect(_coverSweep, findsNothing);
+      expect(shown, ['old', 'fresh']);
+      expect(tester.getRect(freshFrame), coverRect);
+      expect(tester.renderObject(freshFrame), same(renderImage));
+
+      await _showReplacement(tester, failing, shown);
+      expect(_coverSweep, findsOneWidget);
+      failing.frame.completeError(StateError('replacement unavailable'));
+      await tester.pumpAndSettle();
+      expect(_shownFrame('fresh'), findsOneWidget);
+      expect(_coverSweep, findsNothing);
+      expect(find.byIcon(Icons.error), findsNothing);
+      expect(shown, ['old', 'fresh']);
+    },
+  );
+
+  testWidgets('reduced motion keeps the old cover until an instant swap', (
+    tester,
+  ) async {
+    final shown = <String?>[];
+    final old = _DeferredFrame();
+    final fresh = _DeferredFrame();
+    await _showReplacement(tester, old, shown, reduceMotion: true);
+    old.show('old', Colors.blue);
+    await tester.pumpAndSettle();
+
+    await _showReplacement(tester, fresh, shown, reduceMotion: true);
+    expect(_shownFrame('old'), findsOneWidget);
+    expect(_coverSweep, findsNothing);
+    fresh.show('fresh', Colors.orange);
+    await tester.pump();
+    await tester.pump();
+    expect(_shownFrame('old'), findsNothing);
+    expect(_shownFrame('fresh'), findsOneWidget);
+    expect(shown, ['old', 'fresh']);
   });
 }

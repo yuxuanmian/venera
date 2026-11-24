@@ -33,6 +33,7 @@ import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/network/images.dart';
 import 'package:venera/pages/reader/album_image_picker.dart';
+import 'package:venera/pages/reader/entry_route.dart';
 import 'package:venera/pages/settings/settings_page.dart';
 import 'package:venera/utils/clipboard_image.dart';
 import 'package:venera/utils/data_sync.dart';
@@ -111,7 +112,18 @@ class Reader extends StatefulWidget {
 }
 
 class _ReaderState extends State<Reader>
-    with _ReaderLocation, _ReaderWindow, _VolumeListener, _ImagePerPageHandler {
+    with
+        TickerProviderStateMixin,
+        _ReaderLocation,
+        _ReaderWindow,
+        _VolumeListener,
+        _ImagePerPageHandler {
+  late final _inheritedOpening = context
+      .getInheritedWidgetOfExactType<_ReaderOpeningScope>()
+      ?.opening;
+  late final _opening = _inheritedOpening ?? _ReaderOpening(this);
+  int? _openingImageChapter;
+
   @override
   void update() {
     setState(() {});
@@ -256,6 +268,10 @@ class _ReaderState extends State<Reader>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    if (_inheritedOpening == null) {
+      _opening.reduceMotion = MediaQuery.disableAnimationsOf(context);
+      _opening.waitForEntry(ModalRoute.of(context));
+    }
     if (!_isInitialized) {
       initImagesPerPage(widget.initialPage ?? 1);
       _isInitialized = true;
@@ -300,6 +316,7 @@ class _ReaderState extends State<Reader>
     });
     PaintingBinding.instance.imageCache.maximumSizeBytes = 100 << 20;
     disposeReaderWindow();
+    if (_inheritedOpening == null) _opening.dispose();
     super.dispose();
   }
 
@@ -339,7 +356,34 @@ class _ReaderState extends State<Reader>
 
   @override
   void onPageChanged() {
+    _watchOpeningImage();
     updateHistory();
+  }
+
+  @override
+  bool toChapter(int c, {bool toLastPage = false}) {
+    final changed = super.toChapter(c, toLastPage: toLastPage);
+    if (changed) _opening.begin();
+    return changed;
+  }
+
+  int _firstImageIndex(int page) {
+    if (showSingleImageOnFirstPage()) {
+      return page == 1 ? 0 : (page - 2) * imagesPerPage + 1;
+    }
+    return (page - 1) * imagesPerPage;
+  }
+
+  void _watchOpeningImage() {
+    if (_openingImageChapter != chapter || isLoading || !_opening.waiting) {
+      return;
+    }
+    if (page > maxPage) {
+      _opening.reveal(animate: true);
+      return;
+    }
+    final image = images![_firstImageIndex(page)];
+    _opening.watch(_createImageProviderFromKey(image, this));
   }
 
   /// Prevent multiple history updates in a short time.

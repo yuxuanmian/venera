@@ -88,6 +88,58 @@ void main() {
     cache.clearAllCache();
   });
 
+  testWidgets(
+    'a late favorite source response cannot hide the current source retry',
+    (tester) async {
+      const a = 'test-source-loading-a';
+      const b = 'test-source-loading-b';
+      final requestA = Completer<Res<List<Comic>>>();
+      final requestB = Completer<Res<List<Comic>>>();
+      var callsB = 0;
+      FavoriteData source(
+        String key,
+        Future<Res<List<Comic>>> Function(int, [String?]) load,
+      ) => FavoriteData(
+        key: key,
+        title: key,
+        multiFolder: false,
+        loadComic: load,
+        loadNext: null,
+      );
+      final first = source(a, (page, [folder]) => requestA.future);
+      final second = source(b, (page, [folder]) {
+        callsB++;
+        if (callsB == 1) return requestB.future;
+        return Future.value(Res([_comic(b, 'current-favorite')], subData: 1));
+      });
+      Future<void> show(FavoriteData data) => tester.pumpWidget(
+        MaterialApp(
+          navigatorKey: App.rootNavigatorKey,
+          home: Scaffold(body: NetworkFavoritePage(data: data)),
+        ),
+      );
+      await show(first);
+      expect(find.byType(SkeletonBlock), findsWidgets);
+      await show(second);
+      expect(find.text(b), findsOneWidget);
+      expect(find.byType(SkeletonBlock), findsWidgets);
+
+      requestB.complete(const Res.error('current-source-failure'));
+      await _pumpFrames(tester);
+      expect(find.text('current-source-failure'), findsOneWidget);
+      requestA.complete(Res([_comic(a, 'old-favorite')], subData: 1));
+      await _pumpFrames(tester);
+      expect(find.text('current-source-failure'), findsOneWidget);
+      expect(find.text('old-favorite'), findsNothing);
+
+      await tester.tap(find.text('Retry'.tl));
+      await _pumpFrames(tester);
+      expect(find.text('current-favorite'), findsOneWidget);
+      expect(find.byType(SkeletonBlock), findsNothing);
+      expect(callsB, 2);
+    },
+  );
+
   tearDownAll(() async {
     appdata.settings['comicListDisplayMode'] = oldListMode;
     appdata.settings['comicDisplayMode'] = oldComicMode;

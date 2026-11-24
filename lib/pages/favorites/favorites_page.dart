@@ -265,15 +265,23 @@ class _RemoteFolderListState extends State<_RemoteFolderList> {
   Future<void> _refresh() async {
     if (_loading) return;
     setState(() => _loading = true);
-    final result = await NetworkFavoriteCacheManager().refreshFolders(
-      widget.data,
-    );
-    if (!mounted) return;
-    setState(() {
-      _loading = false;
-      _error = result.errorMessage;
-      if (result.success) _folders = result.data;
-    });
+    try {
+      final result = await NetworkFavoriteCacheManager().refreshFolders(
+        widget.data,
+      );
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = result.errorMessage;
+        if (result.success) _folders = result.data;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = error.toString();
+      });
+    }
   }
 
   Future<void> _createFolder() async {
@@ -320,11 +328,7 @@ class _RemoteFolderListState extends State<_RemoteFolderList> {
         ],
       ),
       body: _folders.isEmpty
-          ? Center(
-              child: _loading
-                  ? const CircularProgressIndicator()
-                  : Text(_error ?? 'No folders available'.tl),
-            )
+          ? _buildEmptyFolders()
           : ListView.builder(
               itemCount: _folders.length,
               itemBuilder: (context, index) {
@@ -359,6 +363,31 @@ class _RemoteFolderListState extends State<_RemoteFolderList> {
               },
             ),
     );
+  }
+
+  Widget _buildEmptyFolders() {
+    if (_loading) {
+      return ListView(
+        physics: const NeverScrollableScrollPhysics(),
+        children: [
+          for (final width in const [106.0, 150.0, 82.0, 122.0, 96.0])
+            SkeletonSweep(
+              child: ListTile(
+                leading: const SkeletonBlock(width: 24, height: 21),
+                title: Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: SkeletonBlock(width: width, height: 13),
+                ),
+                trailing: const SkeletonBlock(width: 18, height: 18),
+              ),
+            ),
+        ],
+      );
+    }
+    if (_error case final error?) {
+      return NetworkError(withAppbar: false, message: error, retry: _refresh);
+    }
+    return Center(child: Text('No folders available'.tl));
   }
 }
 
@@ -839,6 +868,8 @@ class _CachedFavoriteFolderPageState extends State<_CachedFavoriteFolderPage> {
     final comicList = ComicList(
       key: _comicListKey,
       enablePageStorage: true,
+      showLoadingSkeleton: true,
+      emptyMessage: 'No favorites in this list'.tl,
       leadingSliver: SliverMainAxisGroup(
         slivers: [
           SliverAppbar(title: Text(title), actions: actions),

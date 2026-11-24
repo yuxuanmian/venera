@@ -65,7 +65,7 @@ class NaviPane extends StatefulWidget {
 typedef NaviItemTapListener = void Function(int);
 
 class NaviPaneState extends State<NaviPane>
-    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   bool _canPop = true;
 
   late int _currentPage = widget.initialPage;
@@ -81,6 +81,24 @@ class NaviPaneState extends State<NaviPane>
   void Function()? mainViewUpdateHandler;
 
   late AnimationController controller;
+  late final AnimationController _tabTransition;
+  late double _indicatorStart = currentPage.toDouble();
+  int? _previousPage;
+  double _outgoingOpacity = 1;
+  static const _incomingTabCurve = Interval(.22, 1, curve: Curves.easeOut);
+  static const _outgoingTabEnd = .42;
+  static const _outgoingTabCurve = Interval(
+    0,
+    _outgoingTabEnd,
+    curve: Curves.easeInOut,
+  );
+  final _heroController = MaterialApp.createMaterialHeroController();
+
+  double get _indicatorPosition => ui.lerpDouble(
+    _indicatorStart,
+    currentPage.toDouble(),
+    Curves.easeOutCubic.transform(_tabTransition.value),
+  )!;
 
   final _naviItemTapListeners = <NaviItemTapListener>[];
 
@@ -118,8 +136,16 @@ class NaviPaneState extends State<NaviPane>
       return;
     }
     setState(() {
+      _indicatorStart = _indicatorPosition;
+      _outgoingOpacity = _incomingTabCurve.transform(_tabTransition.value);
+      _previousPage = currentPage;
       currentPage = index;
     });
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _tabTransition.value = 1;
+    } else {
+      _tabTransition.forward(from: 0);
+    }
     mainViewUpdateHandler?.call();
   }
 
@@ -131,6 +157,11 @@ class NaviPaneState extends State<NaviPane>
       upperBound: 3,
       vsync: this,
     );
+    _tabTransition = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 240),
+      value: 1,
+    );
     widget.observer.addListener(onNavigatorStateChange);
     WidgetsBinding.instance.addObserver(this);
     super.initState();
@@ -140,6 +171,7 @@ class NaviPaneState extends State<NaviPane>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     controller.dispose();
+    _tabTransition.dispose();
     widget.observer.removeListener(onNavigatorStateChange);
     super.dispose();
   }
@@ -277,7 +309,7 @@ class NaviPaneState extends State<NaviPane>
 
   Widget buildMainView() {
     return HeroControllerScope(
-      controller: MaterialApp.createMaterialHeroController(),
+      controller: _heroController,
       child: PopScope(
         canPop: _canPop,
         onPopInvokedWithResult: (didPop, result) {
@@ -311,10 +343,6 @@ class NaviPaneState extends State<NaviPane>
     );
   }
 
-  Widget buildMainViewContent() {
-    return widget.pageBuilder(currentPage);
-  }
-
   Widget buildTop() {
     return Material(
       child: Container(
@@ -323,11 +351,27 @@ class NaviPaneState extends State<NaviPane>
         width: double.infinity,
         child: Row(
           children: [
-            Text(
-              widget.paneItems[currentPage].label,
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            Expanded(
+              child: AnimatedSwitcher(
+                duration: MediaQuery.disableAnimationsOf(context)
+                    ? Duration.zero
+                    : _tabTransition.duration!,
+                layoutBuilder: (current, previous) => Stack(
+                  alignment: Alignment.centerLeft,
+                  children: [...previous, if (current != null) current],
+                ),
+                child: Text(
+                  widget.paneItems[currentPage].label,
+                  key: ValueKey(currentPage),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
             ),
-            const Spacer(),
             for (var action in widget.paneActions)
               Tooltip(
                 message: action.label,
@@ -356,19 +400,67 @@ class NaviPaneState extends State<NaviPane>
             ),
           ),
         ),
-        child: Row(
-          children: List<Widget>.generate(widget.paneItems.length, (index) {
-            return Expanded(
-              child: _SingleBottomNaviWidget(
-                enabled: currentPage == index,
-                entry: widget.paneItems[index],
-                onTap: () {
-                  updatePage(index);
-                },
-                key: ValueKey(index),
-              ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final itemCount = widget.paneItems.length;
+            if (itemCount == 0) return const SizedBox.shrink();
+            final itemWidth = constraints.maxWidth / itemCount;
+            final rtl = Directionality.of(context) == TextDirection.rtl;
+            return Stack(
+              alignment: Alignment.center,
+              children: [
+                AnimatedBuilder(
+                  animation: _tabTransition,
+                  builder: (context, child) {
+                    final position = rtl
+                        ? itemCount - 1 - _indicatorPosition
+                        : _indicatorPosition;
+                    final stretch =
+                        math.sin(_tabTransition.value * math.pi) * 12;
+                    final width = math.min(64.0 + stretch, itemWidth);
+                    return Positioned(
+                      left: (position + 0.5) * itemWidth - width / 2,
+                      width: width,
+                      height: 28,
+                      child: child!,
+                    );
+                  },
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: context.colorScheme.secondaryContainer,
+                      borderRadius: BorderRadius.circular(32),
+                    ),
+                  ),
+                ),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (final (index, entry) in widget.paneItems.indexed)
+                      Expanded(
+                        child: Semantics(
+                          selected: currentPage == index,
+                          button: true,
+                          child: Tooltip(
+                            message: entry.label,
+                            child: InkWell(
+                              highlightColor: Colors.transparent,
+                              hoverColor: Colors.transparent,
+                              splashFactory: NoSplash.splashFactory,
+                              onTap: () => updatePage(index),
+                              child: Icon(
+                                currentPage == index
+                                    ? entry.activeIcon
+                                    : entry.icon,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ],
             );
-          }),
+          },
         ),
       ),
     );
@@ -498,110 +590,6 @@ class _PaneActionWidget extends StatelessWidget {
   }
 }
 
-class _SingleBottomNaviWidget extends StatefulWidget {
-  const _SingleBottomNaviWidget({
-    required this.enabled,
-    required this.entry,
-    required this.onTap,
-    super.key,
-  });
-
-  final bool enabled;
-
-  final PaneItemEntry entry;
-
-  final VoidCallback onTap;
-
-  @override
-  State<_SingleBottomNaviWidget> createState() =>
-      _SingleBottomNaviWidgetState();
-}
-
-class _SingleBottomNaviWidgetState extends State<_SingleBottomNaviWidget>
-    with SingleTickerProviderStateMixin {
-  late AnimationController controller;
-
-  bool isHovering = false;
-
-  @override
-  void dispose() {
-    controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  void didUpdateWidget(covariant _SingleBottomNaviWidget oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.enabled != widget.enabled) {
-      if (widget.enabled) {
-        controller.forward(from: 0);
-      } else {
-        controller.reverse(from: 1);
-      }
-    }
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    controller = AnimationController(
-      value: widget.enabled ? 1 : 0,
-      vsync: this,
-      duration: _fastAnimationDuration,
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: CurvedAnimation(parent: controller, curve: Curves.ease),
-      builder: (context, child) {
-        return MouseRegion(
-          cursor: SystemMouseCursors.click,
-          onEnter: (details) => setState(() => isHovering = true),
-          onExit: (details) => setState(() => isHovering = false),
-          child: GestureDetector(
-            behavior: HitTestBehavior.translucent,
-            onTap: widget.onTap,
-            child: buildContent(),
-          ),
-        );
-      },
-    );
-  }
-
-  Widget buildContent() {
-    final value = controller.value;
-    final colorScheme = Theme.of(context).colorScheme;
-    final icon = Icon(
-      widget.enabled ? widget.entry.activeIcon : widget.entry.icon,
-    );
-    return Center(
-      child: Container(
-        width: 64,
-        height: 28,
-        decoration: BoxDecoration(
-          borderRadius: const BorderRadius.all(Radius.circular(32)),
-          color: isHovering ? colorScheme.surfaceContainer : Colors.transparent,
-        ),
-        child: Center(
-          child: Container(
-            width: 32 + value * 32,
-            height: 28,
-            decoration: BoxDecoration(
-              borderRadius: const BorderRadius.all(Radius.circular(32)),
-              color: value != 0
-                  ? colorScheme.secondaryContainer
-                  : Colors.transparent,
-            ),
-            child: Center(child: icon),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class NaviObserver extends NavigatorObserver implements Listenable {
   var routes = Queue<Route>();
 
@@ -716,6 +704,7 @@ class _NaviMainView extends StatefulWidget {
 
 class _NaviMainViewState extends State<_NaviMainView> {
   NaviPaneState get state => widget.state;
+  final _visited = <int>{};
 
   @override
   void initState() {
@@ -723,6 +712,12 @@ class _NaviMainViewState extends State<_NaviMainView> {
       setState(() {});
     };
     super.initState();
+  }
+
+  @override
+  void dispose() {
+    state.mainViewUpdateHandler = null;
+    super.dispose();
   }
 
   @override
@@ -746,30 +741,75 @@ class _NaviMainViewState extends State<_NaviMainView> {
         removeBottom: true,
       );
     }
-    // Keep the direct child of AnimatedSwitcher the same type while a detail
-    // route is pushed or popped. Changing between a bare page and a
-    // MediaQuery wrapper would replace the page subtree and lose state such as
-    // an inline favorites search controller.
-    final pageContent = MediaQuery(
-      data: pageMediaQuery,
-      child: state.buildMainViewContent(),
-    );
+    _visited.add(state.currentPage);
     return Column(
       children: [
         if (shouldShowAppBar) state.buildTop().paddingTop(context.padding.top),
         Expanded(
-          child: MediaQuery.removePadding(
-            context: context,
-            removeTop: shouldShowAppBar,
-            child: AnimatedSwitcher(
-              duration: _fastAnimationDuration,
-              child: pageContent,
+          child: MediaQuery(
+            data: pageMediaQuery,
+            child: AnimatedBuilder(
+              animation: state._tabTransition,
+              builder: (context, child) {
+                final progress = state._tabTransition.value;
+                final previous = state._previousPage;
+                final direction =
+                    previous == null || state.currentPage > previous
+                    ? 1.0
+                    : -1.0;
+                final rtl = Directionality.of(context) == TextDirection.rtl;
+                final offset = direction * (rtl ? -8 : 8);
+                return Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    for (final page in _visited)
+                      _buildTab(page, progress, offset),
+                  ],
+                );
+              },
             ),
           ),
         ),
         if (shouldShowAppBar)
           state.buildBottom().paddingBottom(context.padding.bottom),
       ],
+    );
+  }
+
+  Widget _buildTab(int page, double progress, double offset) {
+    final active = page == state.currentPage;
+    final outgoing =
+        page == state._previousPage && progress < NaviPaneState._outgoingTabEnd;
+    final fadeIn = NaviPaneState._incomingTabCurve.transform(progress);
+    final fadeOut = 1 - NaviPaneState._outgoingTabCurve.transform(progress);
+    return Offstage(
+      key: ValueKey(page),
+      offstage: !active && !outgoing,
+      child: TickerMode(
+        enabled: active,
+        child: ExcludeFocus(
+          excluding: !active,
+          child: ExcludeSemantics(
+            excluding: !active,
+            child: IgnorePointer(
+              ignoring: !active,
+              child: HeroMode(
+                enabled: active,
+                child: Transform.translate(
+                  offset: Offset(
+                    active ? offset * (1 - fadeIn) : -offset * (1 - fadeOut),
+                    0,
+                  ),
+                  child: Opacity(
+                    opacity: active ? fadeIn : fadeOut * state._outgoingOpacity,
+                    child: state.widget.pageBuilder(page),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

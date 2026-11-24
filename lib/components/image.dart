@@ -19,6 +19,7 @@ class AnimatedImage extends StatefulWidget {
     this.centerSlice,
     this.matchTextDirection = false,
     this.gaplessPlayback = false,
+    this.sweepOnReplacement = false,
     this.filterQuality = FilterQuality.medium,
     this.isAntiAlias = false,
     this.part,
@@ -42,6 +43,9 @@ class AnimatedImage extends StatefulWidget {
   final double? height;
 
   final bool gaplessPlayback;
+
+  /// Sweep over the visible frame while its replacement loads and fades in.
+  final bool sweepOnReplacement;
 
   final bool matchTextDirection;
 
@@ -76,9 +80,12 @@ class AnimatedImage extends StatefulWidget {
 }
 
 class _AnimatedImageState extends State<AnimatedImage>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   ImageStream? _imageStream;
   ImageInfo? _imageInfo;
+  ImageInfo? _outgoingImage;
+  int _sweepRevision = 0;
+  AnimationController? _replacementSweep;
   ImageChunkEvent? _loadingProgress;
   bool _isListeningToStream = false;
   late bool _invertColors;
@@ -89,6 +96,13 @@ class _AnimatedImageState extends State<AnimatedImage>
   ImageStreamCompleterHandle? _completerHandle;
 
   static final Map<int, Size> _cache = {};
+  static const _replacementFadeDuration = Duration(milliseconds: 220);
+
+  AnimationController get _sweepController =>
+      _replacementSweep ??= AnimationController(
+        vsync: this,
+        duration: const Duration(milliseconds: 800),
+      );
 
   static clear() => _cache.clear();
 
@@ -106,6 +120,8 @@ class _AnimatedImageState extends State<AnimatedImage>
     _stopListeningToStream();
     _completerHandle?.dispose();
     _scrollAwareContext.dispose();
+    _replacementSweep?.dispose();
+    _releaseOutgoingImage();
     _replaceImage(info: null);
     super.dispose();
   }
@@ -113,6 +129,9 @@ class _AnimatedImageState extends State<AnimatedImage>
   @override
   void didChangeDependencies() {
     _updateInvertColors();
+    if (_replacementSweep != null && MediaQuery.disableAnimationsOf(context)) {
+      _replacementSweep!.stop();
+    }
     _resolveImage();
 
     if (TickerMode.of(context)) {
@@ -129,6 +148,11 @@ class _AnimatedImageState extends State<AnimatedImage>
     super.didUpdateWidget(oldWidget);
     if (widget.image != oldWidget.image) {
       _resolveImage();
+    } else if (oldWidget.onFirstFrame == null &&
+        _frameNumber != null &&
+        _outgoingImage == null) {
+      // An already-visible cover can gain its detail callback after loading.
+      widget.onFirstFrame?.call(_imageInfo!);
     }
   }
 
@@ -181,6 +205,7 @@ class _AnimatedImageState extends State<AnimatedImage>
           widget.onError?.call(error, stackTrace);
           setState(() {
             _lastException = error;
+            _replacementSweep?.stop();
           });
         },
       );
@@ -190,14 +215,35 @@ class _AnimatedImageState extends State<AnimatedImage>
 
   void _handleImageFrame(ImageInfo imageInfo, bool synchronousCall) {
     final isFirst = _frameNumber == null;
+    final previous = _imageInfo;
+    final sweep =
+        widget.sweepOnReplacement &&
+        isFirst &&
+        previous != null &&
+        !imageInfo.isCloneOf(previous) &&
+        !MediaQuery.disableAnimationsOf(context);
     setState(() {
+      if (isFirst) {
+        _releaseOutgoingImage();
+        if (sweep) {
+          _outgoingImage = previous.clone();
+          _sweepRevision++;
+          _sweepController.animateTo(
+            1,
+            duration: _replacementFadeDuration,
+            curve: Curves.easeOut,
+          );
+        } else {
+          _replacementSweep?.stop();
+        }
+      }
       _replaceImage(info: imageInfo);
       _loadingProgress = null;
       _lastException = null;
       _frameNumber = _frameNumber == null ? 0 : _frameNumber! + 1;
       _wasSynchronouslyLoaded = _wasSynchronouslyLoaded | synchronousCall;
     });
-    if (isFirst) {
+    if (isFirst && !sweep) {
       widget.onFirstFrame?.call(imageInfo);
     }
   }
@@ -217,6 +263,26 @@ class _AnimatedImageState extends State<AnimatedImage>
     _imageInfo = info;
   }
 
+  void _releaseOutgoingImage() {
+    final outgoing = _outgoingImage;
+    _outgoingImage = null;
+    if (outgoing != null) {
+      SchedulerBinding.instance.addPostFrameCallback((_) => outgoing.dispose());
+    }
+  }
+
+  void _finishSweep(int revision) {
+    if (!mounted || _outgoingImage == null || revision != _sweepRevision) {
+      return;
+    }
+    setState(_releaseOutgoingImage);
+    // The next provider may still be pending. Only report its own first frame.
+    if (_frameNumber != null) {
+      _replacementSweep?.stop();
+      widget.onFirstFrame?.call(_imageInfo!);
+    }
+  }
+
   // Updates _imageStream to newStream, and moves the stream listener
   // registration from the old stream to the new stream (if a listener was
   // registered).
@@ -229,8 +295,17 @@ class _AnimatedImageState extends State<AnimatedImage>
       _imageStream!.removeListener(_getListener());
     }
 
-    if (!widget.gaplessPlayback) {
+    if (widget.sweepOnReplacement &&
+        _imageInfo != null &&
+        !MediaQuery.disableAnimationsOf(context)) {
+      _sweepController.repeat();
+    } else {
+      _replacementSweep?.stop();
+    }
+
+    if (!widget.gaplessPlayback && !widget.sweepOnReplacement) {
       setState(() {
+        _releaseOutgoingImage();
         _replaceImage(info: null);
       });
     }
@@ -282,41 +357,101 @@ class _AnimatedImageState extends State<AnimatedImage>
     _isListeningToStream = false;
   }
 
+  Widget _buildFrame(ImageInfo frame) {
+    if (widget.part != null) {
+      return CustomPaint(
+        isComplex: true,
+        painter: ImagePainter(
+          image: frame.image,
+          part: widget.part!,
+          fit: widget.fit ?? BoxFit.cover,
+        ),
+        child: SizedBox(width: widget.width, height: widget.height),
+      );
+    }
+    return RawImage(
+      image: frame.image,
+      width: widget.width,
+      height: widget.height,
+      debugImageLabel: frame.debugLabel,
+      scale: frame.scale,
+      color: widget.color,
+      opacity: widget.opacity,
+      colorBlendMode: widget.colorBlendMode,
+      fit: BoxFit.cover,
+      alignment: widget.alignment,
+      repeat: widget.repeat,
+      centerSlice: widget.centerSlice,
+      matchTextDirection: widget.matchTextDirection,
+      invertColors: _invertColors,
+      isAntiAlias: widget.isAntiAlias,
+      filterQuality: widget.filterQuality,
+    );
+  }
+
+  Widget _buildReplacement(ImageInfo frame) {
+    final current = _buildFrame(frame);
+    final outgoing = _outgoingImage;
+    final sweep = _replacementSweep;
+    final revision = _sweepRevision;
+    return Stack(
+      fit: StackFit.passthrough,
+      children: [
+        if (outgoing != null) _buildFrame(outgoing),
+        // Keep the incoming frame mounted when the old frame is removed.
+        TweenAnimationBuilder<double>(
+          key: ValueKey(revision),
+          tween: Tween(begin: outgoing == null ? 1 : 0, end: 1),
+          duration: MediaQuery.disableAnimationsOf(context)
+              ? Duration.zero
+              : _replacementFadeDuration,
+          curve: Curves.easeOut,
+          onEnd: () => SchedulerBinding.instance.addPostFrameCallback(
+            (_) => _finishSweep(revision),
+          ),
+          child: current,
+          builder: (context, progress, child) =>
+              Opacity(opacity: progress, child: child),
+        ),
+        if (sweep != null && sweep.isAnimating)
+          Positioned.fill(child: _buildSweep(sweep)),
+      ],
+    );
+  }
+
+  Widget _buildSweep(Animation<double> sweep) {
+    final color = Color.lerp(
+      context.colorScheme.primaryContainer,
+      Colors.white,
+      .65,
+    )!.withValues(alpha: .13);
+    return IgnorePointer(
+      child: AnimatedBuilder(
+        animation: sweep,
+        builder: (context, child) {
+          final x = ui.lerpDouble(-1.6, 1.6, sweep.value)!;
+          return DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment(x - .34, -.55),
+                end: Alignment(x + .34, .55),
+                colors: [Colors.transparent, color, Colors.transparent],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     Widget result;
 
-    if (_imageInfo != null) {
-      if (widget.part != null) {
-        result = CustomPaint(
-          isComplex: true,
-          painter: ImagePainter(
-            image: _imageInfo!.image,
-            part: widget.part!,
-            fit: widget.fit ?? BoxFit.cover,
-          ),
-          child: SizedBox(width: widget.width, height: widget.height),
-        );
-      } else {
-        result = RawImage(
-          image: _imageInfo?.image,
-          width: widget.width,
-          height: widget.height,
-          debugImageLabel: _imageInfo?.debugLabel,
-          scale: _imageInfo?.scale ?? 1.0,
-          color: widget.color,
-          opacity: widget.opacity,
-          colorBlendMode: widget.colorBlendMode,
-          fit: BoxFit.cover,
-          alignment: widget.alignment,
-          repeat: widget.repeat,
-          centerSlice: widget.centerSlice,
-          matchTextDirection: widget.matchTextDirection,
-          invertColors: _invertColors,
-          isAntiAlias: widget.isAntiAlias,
-          filterQuality: widget.filterQuality,
-        );
-      }
+    if (_imageInfo case final frame?) {
+      result = widget.sweepOnReplacement
+          ? _buildReplacement(frame)
+          : _buildFrame(frame);
     } else if (_lastException != null) {
       result = const Center(child: Icon(Icons.error));
 

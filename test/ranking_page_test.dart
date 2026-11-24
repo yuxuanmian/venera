@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -141,11 +142,145 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+
+  testWidgets('ranking keeps its tabs visible during first and paged loads', (
+    tester,
+  ) async {
+    _configureList(mode: 'detailed', paging: true);
+    await tester.binding.setSurfaceSize(const Size(320, 760));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    final first = Completer<Res<List<Comic>>>();
+    final second = Completer<Res<List<Comic>>>();
+    var recentRequests = 0;
+    final recent = Completer<Res<List<Comic>>>();
+    _registerSource(
+      RankingData({'popular': 'Popular', 'recent': 'Recent'}, (option, page) {
+        if (option == 'recent') {
+          recentRequests++;
+          return recentRequests == 1
+              ? recent.future
+              : Future.value(const Res(<Comic>[], subData: 1));
+        }
+        return page == 1 ? first.future : second.future;
+      }, null),
+    );
+    await _openRanking(tester);
+    expect(find.byType(SkeletonBlock), findsWidgets);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.text('Popular'), findsOneWidget);
+    expect(find.text('Recent'), findsOneWidget);
+    expect(find.byType(RankingMedal), findsNothing);
+
+    first.complete(
+      Res(
+        List.generate(10, (index) => _comic('Popular entry $index')),
+        subData: 2,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Popular entry 0'), findsOneWidget);
+    expect(find.byType(SkeletonBlock), findsNothing);
+
+    ScrollPosition currentPosition() => tester
+        .widget<CustomScrollView>(find.byType(CustomScrollView))
+        .controller!
+        .position;
+    currentPosition().jumpTo(currentPosition().maxScrollExtent);
+    await tester.pumpAndSettle();
+    expect(currentPosition().pixels, greaterThan(0));
+    await tester.tap(find.text('Next'.tl).hitTestable());
+    await tester.pumpAndSettle();
+    expect(currentPosition().pixels, 0);
+    expect(find.byType(SkeletonBlock), findsWidgets);
+    expect(find.text('Page 2 / 2'), findsOneWidget);
+    expect(find.text('Recent'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+
+    await tester.tap(find.text('Recent'));
+    await tester.pumpAndSettle();
+    second.complete(Res([_comic('Late popular entry')], subData: 2));
+    await tester.pumpAndSettle();
+    expect(find.text('Late popular entry'), findsNothing);
+    expect(find.byType(SkeletonBlock), findsWidgets);
+
+    recent.complete(const Res.error('Could not load this ranking'));
+    await tester.pumpAndSettle();
+    expect(find.byType(SkeletonBlock), findsNothing);
+    expect(find.text('Recent'), findsOneWidget);
+    expect(find.text('Could not load this ranking'), findsOneWidget);
+
+    await tester.tap(find.text('Retry'.tl));
+    await tester.pumpAndSettle();
+    expect(recentRequests, 2);
+    expect(find.text('No ranking entries'.tl), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+  });
+
+  testWidgets('continuous ranking shows a grid row while loading more', (
+    tester,
+  ) async {
+    _configureList(mode: 'brief', paging: false);
+    final nextPage = Completer<Res<List<Comic>>>();
+    final requests = <String?>[];
+    _registerSource(
+      RankingData({'popular': 'Popular'}, null, (_, next) {
+        requests.add(next);
+        return next == null
+            ? Future.value(Res([_comic('First entry')], subData: 'next'))
+            : nextPage.future;
+      }),
+    );
+    await _openRanking(tester, theme: ThemeData.dark());
+    expect(requests, [null, 'next']);
+    expect(find.text('First entry'), findsWidgets);
+    expect(find.byType(SkeletonBlock), findsWidgets);
+    expect(find.byType(SliverListLoadingIndicator), findsNothing);
+    final coverBlock = find.byType(SkeletonBlock).first;
+    final color = Theme.of(tester.element(coverBlock)).colorScheme;
+    final coverFill = find.descendant(
+      of: coverBlock,
+      matching: find.byType(DecoratedBox),
+    );
+    expect(
+      (tester.widget<DecoratedBox>(coverFill).decoration as BoxDecoration)
+          .color,
+      color.surfaceContainer,
+    );
+
+    nextPage.complete(Res([_comic('Second entry')]));
+    await tester.pumpAndSettle();
+    expect(find.text('Second entry'), findsWidgets);
+    expect(find.byType(SkeletonBlock), findsNothing);
+    expect(_ranks(tester), [1]);
+  });
+
+  testWidgets('ranking loads the next cursor after an empty batch', (
+    tester,
+  ) async {
+    _configureList(mode: 'brief', paging: false);
+    final requests = <String?>[];
+    _registerSource(
+      RankingData({'popular': 'Popular'}, null, (_, next) async {
+        requests.add(next);
+        return next == null
+            ? const Res(<Comic>[], subData: 'next')
+            : Res([_comic('Next entry')]);
+      }),
+    );
+    await _openRanking(tester);
+    expect(requests, [null, 'next']);
+    expect(find.text('Next entry'), findsWidgets);
+    expect(find.byType(SkeletonBlock), findsNothing);
+  });
 }
 
-Future<void> _openRanking(WidgetTester tester) async {
+Future<void> _openRanking(WidgetTester tester, {ThemeData? theme}) async {
   await tester.pumpWidget(
-    const MaterialApp(home: RankingPage(sourceKey: _sourceKey)),
+    MaterialApp(
+      theme: theme,
+      home: const RankingPage(sourceKey: _sourceKey),
+    ),
   );
   await tester.pumpAndSettle();
 }
