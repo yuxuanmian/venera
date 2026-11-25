@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:dio/io.dart';
 import 'package:venera/network/app_dio.dart';
+import 'package:venera/network/network_diagnostics.dart';
 import 'package:venera/network/proxy.dart';
 import 'package:venera/utils/ext.dart';
 
@@ -19,7 +20,7 @@ class FileDownloader {
 
   late int _fileSize;
 
-  final _dio = Dio();
+  final _dio = Dio()..interceptors.add(NetworkFailureInterceptor());
 
   RandomAccessFile? _file;
 

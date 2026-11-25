@@ -25,7 +25,9 @@ class FavoritesPage extends StatefulWidget {
   State<FavoritesPage> createState() => _FavoritesPageState();
 }
 
-class _FavoritesPageState extends State<FavoritesPage> {
+class _FavoritesPageState extends State<FavoritesPage>
+    with SingleTickerProviderStateMixin {
+  late final PageCrossFadeController<String> _sourceTransition;
   String? _selectedSource;
 
   List<FavoriteData> get _sources {
@@ -39,13 +41,14 @@ class _FavoritesPageState extends State<FavoritesPage> {
 
   @override
   void initState() {
+    super.initState();
+    _sourceTransition = PageCrossFadeController<String>(vsync: this);
     final stored = appdata.implicitData['favoriteFolder'];
     if (stored is Map && stored['sourceKey'] is String) {
       _selectedSource = stored['sourceKey'] as String;
     }
     appdata.settings.addListener(_onSettingsChanged);
     ComicSourceManager().addListener(_onSettingsChanged);
-    super.initState();
   }
 
   void _onSettingsChanged() {
@@ -56,11 +59,24 @@ class _FavoritesPageState extends State<FavoritesPage> {
   void dispose() {
     appdata.settings.removeListener(_onSettingsChanged);
     ComicSourceManager().removeListener(_onSettingsChanged);
+    _sourceTransition.dispose();
     super.dispose();
   }
 
   void _select(String sourceKey) {
-    setState(() => _selectedSource = sourceKey);
+    if (_selectedSource != sourceKey) {
+      final sources = _sources;
+      if (!sources.any((source) => source.key == sourceKey)) return;
+      final previous = sources.any((source) => source.key == _selectedSource)
+          ? _selectedSource
+          : null;
+      setState(() => _selectedSource = sourceKey);
+      _sourceTransition.show(
+        previous,
+        sourceKey,
+        animate: !MediaQuery.disableAnimationsOf(context),
+      );
+    }
     appdata.implicitData['favoriteFolder'] = {'sourceKey': sourceKey};
     appdata.writeImplicitData();
   }
@@ -75,9 +91,42 @@ class _FavoritesPageState extends State<FavoritesPage> {
     final selected = _selectedSource == null
         ? null
         : getFavoriteDataOrNull(_selectedSource!);
-    final content = selected == null
+    final animate =
+        selected != null &&
+        selected.key == _sourceTransition.incoming &&
+        !MediaQuery.disableAnimationsOf(context);
+    final outgoing = animate
+        ? sources
+              .where((source) => source.key == _sourceTransition.outgoing)
+              .firstOrNull
+        : null;
+    final incomingPage = selected == null
         ? const _NoFavoriteSource()
         : NetworkFavoritePage(data: selected);
+    final outgoingPage = outgoing == null
+        ? null
+        : NetworkFavoritePage(data: outgoing);
+    final content = AnimatedBuilder(
+      animation: _sourceTransition,
+      builder: (context, child) => Stack(
+        fit: StackFit.expand,
+        children: [
+          if (outgoingPage != null && _sourceTransition.outgoingOpacity > 0)
+            PageCrossFade(
+              key: ValueKey(outgoing?.key),
+              active: false,
+              opacity: _sourceTransition.outgoingOpacity,
+              child: outgoingPage,
+            ),
+          PageCrossFade(
+            key: ValueKey(selected?.key),
+            active: true,
+            opacity: animate ? _sourceTransition.incomingOpacity : 1,
+            child: incomingPage,
+          ),
+        ],
+      ),
+    );
     if (context.width < changePoint) {
       return Column(
         children: [

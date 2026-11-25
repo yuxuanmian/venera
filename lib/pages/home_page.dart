@@ -57,25 +57,7 @@ class _SearchBar extends StatelessWidget {
         width: double.infinity,
         margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
         child: SearchEntryHero(
-          child: Material(
-            color: context.colorScheme.surfaceContainerHigh,
-            borderRadius: BorderRadius.circular(32),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(32),
-              onTap: () {
-                context.to(() => const SearchPage(fromHome: true));
-              },
-              child: Row(
-                children: [
-                  const SizedBox(width: 16),
-                  const Icon(Icons.search),
-                  const SizedBox(width: 8),
-                  Text('Search'.tl, style: ts.s16),
-                  const Spacer(),
-                ],
-              ),
-            ),
-          ),
+          onTap: () => context.to(() => const SearchPage(fromHome: true)),
         ),
       ),
     );

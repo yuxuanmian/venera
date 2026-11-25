@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/network/app_dio.dart';
+import 'package:venera/network/network_diagnostics.dart';
 import 'package:venera/utils/semantic_version.dart';
 
 import 'models.dart';
@@ -111,13 +112,24 @@ class IoCatalogTransport implements CatalogGitTransport {
       throw const CatalogHttpException('cancelled', '请求已取消');
     }
     final client = HttpClient();
+    final method = body == null ? 'GET' : 'POST';
+    int? status;
+    void recordFailure(String failure) {
+      if (cancellation?.isCancelled == true) return;
+      NetworkDiagnostics.record(
+        method: method,
+        uri: uri,
+        data: body,
+        status: status,
+        failure: failure,
+      );
+    }
+
     final removeCancellation = cancellation?.onCancel(
       () => client.close(force: true),
     );
     try {
-      final request = await client
-          .openUrl(body == null ? 'GET' : 'POST', uri)
-          .timeout(timeout);
+      final request = await client.openUrl(method, uri).timeout(timeout);
       request.followRedirects = false;
       request.headers.set('Cache-Control', 'no-cache');
       if (git) _gitProtocolHeaders.forEach(request.headers.set);
@@ -130,6 +142,7 @@ class IoCatalogTransport implements CatalogGitTransport {
         request.add(body);
       }
       final response = await request.close().timeout(timeout);
+      status = response.statusCode;
       if (response.isRedirect) {
         throw const CatalogHttpException(
           'untrusted_redirect',
@@ -139,23 +152,31 @@ class IoCatalogTransport implements CatalogGitTransport {
       final bytes = await _readLimited(response, maxBytes).timeout(timeout);
       final headers = <String, List<String>>{};
       response.headers.forEach((name, values) => headers[name] = values);
+      if (status >= 400) recordFailure('http');
       return CatalogBytesResponse(
         response.statusCode,
         bytes,
         contentType: response.headers.contentType?.mimeType,
         headers: headers,
       );
+    } on CatalogHttpException catch (error) {
+      recordFailure(error.code);
+      rethrow;
     } on TimeoutException catch (error) {
+      recordFailure('timeout');
       throw CatalogHttpException('timeout', 'Catalog 请求超时', error);
     } on SocketException catch (error) {
+      recordFailure('connection_failed');
       throw CatalogHttpException('connection_failed', 'Catalog 连接失败', error);
     } on HandshakeException catch (error) {
+      recordFailure('tls_handshake');
       throw CatalogHttpException(
         'connection_failed',
         'Catalog TLS 连接失败',
         error,
       );
     } on HttpException catch (error) {
+      recordFailure('http_transport');
       throw CatalogHttpException(
         'connection_failed',
         'Catalog HTTP 连接失败',
@@ -249,6 +270,11 @@ class AppDioCatalogTransport implements CatalogGitTransport {
           response.statusCode != null &&
               response.statusCode! >= 300 &&
               response.statusCode! < 400) {
+        NetworkDiagnostics.recordRequest(
+          response.requestOptions,
+          status: response.statusCode,
+          failure: 'untrusted_redirect',
+        );
         throw const CatalogHttpException(
           'untrusted_redirect',
           'Catalog 请求不允许重定向',
@@ -269,6 +295,12 @@ class AppDioCatalogTransport implements CatalogGitTransport {
       // Dio/rhttp request as well so a timed-out Catalog transfer cannot keep
       // receiving bytes in the background.
       cancelToken.cancel('Catalog request timed out');
+      NetworkDiagnostics.record(
+        method: body == null ? 'GET' : 'POST',
+        uri: uri,
+        data: body,
+        failure: 'timeout',
+      );
       throw CatalogHttpException('timeout', 'Catalog 请求超时', error);
     } on DioException catch (error) {
       if (CancelToken.isCancel(error)) {

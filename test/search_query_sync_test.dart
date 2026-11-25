@@ -123,6 +123,44 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  Future<void> pumpHomeSearch(WidgetTester tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        navigatorKey: App.rootNavigatorKey,
+        home: NaviPane(
+          paneItems: [
+            PaneItemEntry(
+              label: 'Home',
+              icon: Icons.home_outlined,
+              activeIcon: Icons.home,
+            ),
+          ],
+          paneActions: const [],
+          observer: NaviObserver(),
+          navigatorKey: GlobalKey(),
+          pageBuilder: (_) => Builder(
+            builder: (context) => Scaffold(
+              body: Container(
+                height: 46,
+                width: double.infinity,
+                margin: const EdgeInsets.all(8),
+                child: SearchEntryHero(
+                  onTap: () => context.to(
+                    () => SearchPage(
+                      fromHome: true,
+                      onSearchHistoryAdded: recordedHistory.add,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
   test('unmounted controller keeps its current text', () {
     final controller = SearchBarController(currentText: 'first');
 
@@ -132,30 +170,71 @@ void main() {
     expect(controller.text, 'second');
   });
 
+  testWidgets('home search capsule flattens and fades in both directions', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(360, 780);
+    addTearDown(tester.view.reset);
+    await pumpHomeSearch(tester);
+
+    final entry = find.byType(SearchEntryHero);
+    final homeRect = tester.getRect(entry);
+    final color = Theme.of(
+      tester.element(entry),
+    ).colorScheme.surfaceContainerHigh;
+    final flight = find.byWidgetPredicate(
+      (widget) =>
+          widget is Material &&
+          widget.animationDuration == Duration.zero &&
+          widget.color == color &&
+          widget.borderRadius is BorderRadius,
+    );
+    double radius() =>
+        (tester.widget<Material>(flight).borderRadius! as BorderRadius)
+            .topLeft
+            .x;
+    double opacity() => tester
+        .widget<Opacity>(
+          find.ancestor(of: flight, matching: find.byType(Opacity)).first,
+        )
+        .opacity;
+
+    await tester.tap(entry);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(tester.getSize(flight).width, inExclusiveRange(homeRect.width, 360));
+    expect(radius(), closeTo(16, 1));
+    expect(opacity(), closeTo(.5, .04));
+    await tester.pumpAndSettle();
+
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(field.decoration!.contentPadding, isNull);
+    expect(tester.getSize(entry).width, 360);
+    expect(
+      find.descendant(of: entry, matching: find.byType(Material)),
+      findsNothing,
+    );
+    expect(flight, findsNothing);
+
+    await tester.pageBack();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(radius(), closeTo(16, 1));
+    expect(opacity(), closeTo(.5, .04));
+    await tester.pump(const Duration(milliseconds: 75));
+    expect(radius(), greaterThan(24));
+    expect(opacity(), greaterThan(.75));
+    await tester.pumpAndSettle();
+    expect(tester.getRect(entry), homeRect);
+    expect(flight, findsNothing);
+  });
+
   testWidgets(
     'home search accepts input after a single tap and drops focus on submit',
     (tester) async {
-      await tester.pumpWidget(
-        MaterialApp(
-          navigatorKey: App.rootNavigatorKey,
-          home: Builder(
-            builder: (context) => Scaffold(
-              body: SearchEntryHero(
-                child: TextButton(
-                  onPressed: () => context.to(
-                    () => SearchPage(
-                      fromHome: true,
-                      onSearchHistoryAdded: recordedHistory.add,
-                    ),
-                  ),
-                  child: const Text('Home search entry'),
-                ),
-              ),
-            ),
-          ),
-        ),
-      );
-      await tester.tap(find.text('Home search entry'));
+      await pumpHomeSearch(tester);
+      await tester.tap(find.byType(SearchEntryHero));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
       expect(tester.testTextInput.isVisible, isTrue);

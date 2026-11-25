@@ -751,43 +751,70 @@ mixin _PasteExtractMixin<T extends StatefulWidget> on State<T> {
 }
 
 class SearchEntryHero extends StatelessWidget {
-  const SearchEntryHero({super.key, required this.child});
+  const SearchEntryHero({super.key, required VoidCallback onTap})
+    : _onTap = onTap;
+  const SearchEntryHero.destination({super.key}) : _onTap = null;
 
-  final Widget child;
+  final VoidCallback? _onTap;
+  static const _radius = 32.0;
 
   @override
   Widget build(BuildContext context) {
+    final child = _onTap == null
+        ? const SizedBox.expand()
+        : Material(
+            color: context.colorScheme.surfaceContainerHigh,
+            borderRadius: BorderRadius.circular(_radius),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(_radius),
+              onTap: _onTap,
+              child: const _SearchEntryLabel(),
+            ),
+          );
     if (MediaQuery.disableAnimationsOf(context)) return child;
-    final colors = context.colorScheme;
     return Hero(
       tag: 'home-search-entry',
       transitionOnUserGestures: true,
-      curve: const Interval(0, .78, curve: Curves.easeOutCubic),
+      curve: Curves.easeInOut,
+      createRectTween: (begin, end) => RectTween(begin: begin, end: end),
       flightShuttleBuilder: (context, animation, direction, from, to) {
+        final home = direction == HeroFlightDirection.push ? from : to;
+        final color = home.colorScheme.surfaceContainerHigh;
         return AnimatedBuilder(
           animation: animation,
           builder: (context, child) {
-            final progress = animation.value.clamp(0.0, 1.0);
-            return DecoratedBox(
-              decoration: BoxDecoration(
-                color: Color.lerp(
-                  colors.surfaceContainerHigh,
-                  colors.surfaceContainer,
-                  progress,
-                ),
-                borderRadius: BorderRadius.circular(
-                  ui.lerpDouble(32, 14, progress)!,
-                ),
+            final visibility = 1 - animation.value;
+            return Opacity(
+              opacity: visibility,
+              child: Material(
+                animationDuration: Duration.zero,
+                color: color,
+                borderRadius: BorderRadius.circular(_radius * visibility),
+                child: child,
               ),
-              child: child,
             );
           },
-          child: const SizedBox.expand(),
+          child: const ExcludeSemantics(child: _SearchEntryLabel()),
         );
       },
       child: child,
     );
   }
+}
+
+class _SearchEntryLabel extends StatelessWidget {
+  const _SearchEntryLabel();
+
+  @override
+  Widget build(BuildContext context) => Row(
+    children: [
+      const SizedBox(width: 16),
+      const Icon(Icons.search),
+      const SizedBox(width: 8),
+      Text('Search'.tl, style: ts.s16),
+      const Spacer(),
+    ],
+  );
 }
 
 class SliverSearchBar extends StatefulWidget {
@@ -808,6 +835,7 @@ class SliverSearchBar extends StatefulWidget {
 
   final FocusNode? focusNode;
   final bool fromHome;
+  static const height = 52.0;
 
   @override
   State<SliverSearchBar> createState() => _SliverSearchBarState();
@@ -906,52 +934,14 @@ class _SliverSearchBarDelegate extends SliverPersistentHeaderDelegate {
     this.inputFormatters = const [],
   });
 
-  static const _kAppBarHeight = 52.0;
-
   @override
   Widget build(
     BuildContext context,
     double shrinkOffset,
     bool overlapsContent,
   ) {
-    Widget input = TextField(
-      autofocus: fromHome,
-      focusNode: focusNode,
-      controller: editingController,
-      inputFormatters: inputFormatters,
-      decoration: InputDecoration(
-        hintText: "Search".tl,
-        border: InputBorder.none,
-        contentPadding: fromHome
-            ? const EdgeInsets.symmetric(horizontal: 12, vertical: 8)
-            : null,
-      ),
-      onSubmitted: (text) => controller.onSearch?.call(text),
-      onChanged: onChanged,
-    );
-    if (fromHome) {
-      // Only the surface flies. The editable stays mounted on the destination
-      // route and can receive focus while the shared element is in flight.
-      input = SizedBox(
-        height: 42,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            SearchEntryHero(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: context.colorScheme.surfaceContainer,
-                  borderRadius: BorderRadius.circular(14),
-                ),
-              ),
-            ),
-            input,
-          ],
-        ),
-      );
-    }
     final header = Container(
-      height: _kAppBarHeight + topPadding,
+      height: SliverSearchBar.height + topPadding,
       width: double.infinity,
       padding: EdgeInsets.only(top: topPadding),
       decoration: BoxDecoration(
@@ -969,7 +959,18 @@ class _SliverSearchBarDelegate extends SliverPersistentHeaderDelegate {
           Expanded(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: input,
+              child: TextField(
+                autofocus: fromHome,
+                focusNode: focusNode,
+                controller: editingController,
+                inputFormatters: inputFormatters,
+                decoration: InputDecoration(
+                  hintText: 'Search'.tl,
+                  border: InputBorder.none,
+                ),
+                onSubmitted: (text) => controller.onSearch?.call(text),
+                onChanged: onChanged,
+              ),
             ),
           ),
           ListenableBuilder(
@@ -998,10 +999,10 @@ class _SliverSearchBarDelegate extends SliverPersistentHeaderDelegate {
   }
 
   @override
-  double get maxExtent => _kAppBarHeight + topPadding;
+  double get maxExtent => SliverSearchBar.height + topPadding;
 
   @override
-  double get minExtent => _kAppBarHeight + topPadding;
+  double get minExtent => SliverSearchBar.height + topPadding;
 
   @override
   bool shouldRebuild(covariant SliverPersistentHeaderDelegate oldDelegate) {

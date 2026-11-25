@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
@@ -12,6 +11,7 @@ import 'package:venera/network/rhttp_client_manager.dart';
 import '../foundation/app.dart';
 import 'cloudflare.dart';
 import 'cookie_jar.dart';
+import 'network_diagnostics.dart';
 
 export 'package:dio/dio.dart';
 
@@ -53,10 +53,6 @@ class MyLogInterceptor implements Interceptor {
       handler.next(err);
       return;
     }
-    Log.error(
-      "Network",
-      "${err.requestOptions.method} ${err.requestOptions.path}\n$err\n${err.response?.data.toString()}",
-    );
     switch (err.type) {
       case DioExceptionType.badResponse:
         var statusCode = err.response?.statusCode;
@@ -126,46 +122,12 @@ class MyLogInterceptor implements Interceptor {
         "Scan${_scanPrefix(response.requestOptions)} ${response.requestOptions.method} status=${response.statusCode ?? 'unknown'}"
             "${elapsed == null ? '' : ' ${elapsed}ms'}",
       );
-      handler.next(response);
-      return;
     }
-    if (response.requestOptions.extra["veneraImage"] == true) {
-      // See [onRequest]: image requests skip the verbose response log.
-      handler.next(response);
-      return;
-    }
-    var headers = response.headers.map.map(
-      (key, value) => MapEntry(
-        key.toLowerCase(),
-        value.length == 1 ? value.first : value.toString(),
-      ),
-    );
-    headers.remove("cookie");
-    String content;
-    if (response.data is List<int>) {
-      try {
-        content = utf8.decode(response.data, allowMalformed: false);
-      } catch (e) {
-        content = "<Bytes>\nlength:${response.data.length}";
-      }
-    } else {
-      content = response.data.toString();
-    }
-    Log.addLog(
-      (response.statusCode != null && response.statusCode! < 400)
-          ? LogLevel.info
-          : LogLevel.error,
-      "Network",
-      "Response ${response.realUri.toString()} ${response.statusCode}\n"
-          "headers:\n$headers\n$content",
-    );
     handler.next(response);
   }
 
   @override
   void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
-    const String headerMask = "********";
-    const String dataMask = "****** DATA_PROTECTED ******";
     options.connectTimeout = const Duration(seconds: 15);
     options.receiveTimeout = const Duration(seconds: 15);
     options.sendTimeout = const Duration(seconds: 15);
@@ -175,23 +137,7 @@ class MyLogInterceptor implements Interceptor {
         "Network",
         "Scan${_scanPrefix(options)} ${options.method} started",
       );
-      handler.next(options);
-      return;
     }
-    if (options.extra["veneraImage"] == true) {
-      // Comic images are the highest-frequency requests. Logging their
-      // headers/data here floods the log file and adds string construction
-      // and file writes per image; ImageDownloader logs one concise timing
-      // line per image instead. Errors are still logged in [onError].
-      handler.next(options);
-      return;
-    }
-    Log.info(
-      "Network",
-      "${options.method} ${options.uri}\n"
-          "headers:\n${options.extra.containsKey("maskHeadersInLog") ? options.headers.map((key, value) => MapEntry(key, options.extra["maskHeadersInLog"].contains(key) ? headerMask : value)) : options.headers}\n"
-          "data:\n${options.extra["maskDataInLog"] == true ? dataMask : options.data}",
-    );
     handler.next(options);
   }
 }
@@ -200,6 +146,9 @@ class AppDio with DioMixin {
   AppDio([BaseOptions? options]) {
     this.options = options ?? BaseOptions();
     httpClientAdapter = RHttpAdapter();
+    interceptors.add(
+      NetworkFailureInterceptor(logSuccessfulResponses: App.isInitialized),
+    );
     if (App.isInitialized) {
       interceptors.add(CookieManagerSql(SingleInstanceCookieJar.instance!));
       interceptors.add(NetworkCacheManager());

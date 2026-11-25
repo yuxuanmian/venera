@@ -138,6 +138,8 @@ Bootstrap 只展示本地翻译文案，不展示远端 message 或异常诊断�
 
 `lib/network/app_dio.dart` 用 Dio API 包装 rhttp，并根据设置应用代理、DNS override、SNI 和证书校验策略。初始化完成后，请求链还会加入 Cookie、网络缓存、Cloudflare 与日志拦截器。
 
+网络诊断在普通请求返回 HTTP 4xx/5xx 或抛出传输异常时记录方法、脱敏 URL 和有大小限制的请求体摘要。漫画源的 Dart IO 路径、下载、WebDAV 和 Catalog 启动路径共用该格式。普通漫画源请求的成功响应也保留同格式的请求摘要，便于关联 HTTP 成功后由源上报的业务错误。该诊断省略请求头、响应正文和原始异常文本，扫描请求沿用独立的状态与耗时日志。
+
 图片加载、文件下载和漫画下载分别位于 `images.dart`、`file_downloader.dart` 和 `download.dart`。修改取消、重试或并发逻辑时，需要检查资源释放、部分文件恢复、进度通知和应用退出后的状态恢复。
 
 ## 持久化与同步

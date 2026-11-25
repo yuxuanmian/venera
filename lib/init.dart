@@ -16,6 +16,7 @@ import 'package:venera/foundation/js_engine.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/follow_updates_service.dart';
 import 'package:venera/network/cookie_jar.dart';
+import 'package:venera/network/network_diagnostics.dart';
 import 'package:venera/pages/settings/settings_page.dart';
 import 'package:venera/utils/app_links.dart';
 import 'package:venera/utils/data_sync.dart';
@@ -96,7 +97,17 @@ Future<void> initRuntimeServices() async {
     }
   }
   FlutterError.onError = (details) {
-    Log.error("Unhandled Exception", "${details.exception}\n${details.stack}");
+    final exception = details.exception;
+    if (exception is NetworkImageLoadException) {
+      NetworkDiagnostics.record(
+        method: 'GET',
+        uri: exception.uri,
+        status: exception.statusCode,
+        failure: 'network_image',
+      );
+    } else {
+      Log.error("Unhandled Exception", "$exception\n${details.stack}");
+    }
   };
   if (App.isWindows) {
     // Report to the monitor thread that the app is running

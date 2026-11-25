@@ -41,6 +41,7 @@ part 'loading.dart';
 part 'menu.dart';
 part 'message.dart';
 part 'navigation_bar.dart';
+part 'page_cross_fade.dart';
 part 'pop_up_widget.dart';
 part 'scroll.dart';
 part 'select.dart';

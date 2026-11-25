@@ -248,11 +248,25 @@ class _SearchPageState extends State<SearchPage> {
 
   @override
   Widget build(BuildContext context) {
-    if (searchSources.isEmpty) {
-      return buildEmpty();
-    }
-    return Scaffold(
-      body: SmoothCustomScrollView(slivers: buildSlivers().toList()),
+    final page = searchSources.isEmpty
+        ? buildEmpty()
+        : Scaffold(
+            body: SmoothCustomScrollView(slivers: buildSlivers().toList()),
+          );
+    if (!widget.fromHome) return page;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        page,
+        // The flight lands across the header, independently of the input field.
+        Positioned(
+          top: MediaQuery.paddingOf(context).top,
+          left: 0,
+          right: 0,
+          height: SliverSearchBar.height,
+          child: const IgnorePointer(child: SearchEntryHero.destination()),
+        ),
+      ],
     );
   }
 
