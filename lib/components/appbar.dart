@@ -679,6 +679,7 @@ class _PasteDetectFormatter extends TextInputFormatter {
     TextEditingValue oldValue,
     TextEditingValue newValue,
   ) {
+    if (parseJmComicId(newValue.text) != null) return newValue;
     var inserted = insertedText(oldValue.text, newValue.text);
     if (inserted != null && inserted.isNotEmpty) {
       onInsertedText(inserted);
@@ -714,6 +715,7 @@ mixin _PasteExtractMixin<T extends StatefulWidget> on State<T> {
   /// recognition prompt again after it was deleted or modified.
   void onSearchTextEdited(String text) {
     _lastPromptedInserted = null;
+    if (parseJmComicId(text) != null) _activeToast?.dismiss();
   }
 
   void _handlePastedText(String inserted) {
@@ -723,7 +725,7 @@ mixin _PasteExtractMixin<T extends StatefulWidget> on State<T> {
     }
     _lastPromptedInserted = inserted;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) {
+      if (!mounted || parseJmComicId(editingController.text) != null) {
         return;
       }
       _activeToast = showToast(
@@ -959,15 +961,11 @@ class _SliverSearchBarDelegate extends SliverPersistentHeaderDelegate {
           Expanded(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: TextField(
+              child: _SearchTextField(
                 autofocus: fromHome,
                 focusNode: focusNode,
                 controller: editingController,
                 inputFormatters: inputFormatters,
-                decoration: InputDecoration(
-                  hintText: 'Search'.tl,
-                  border: InputBorder.none,
-                ),
                 onSubmitted: (text) => controller.onSearch?.call(text),
                 onChanged: onChanged,
               ),
@@ -1093,14 +1091,10 @@ class _SearchBarState extends State<AppSearchBar>
           Expanded(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: TextField(
+              child: _SearchTextField(
                 controller: _editingController,
                 inputFormatters: pasteInputFormatters,
                 onChanged: _handleTextChanged,
-                decoration: InputDecoration(
-                  hintText: "Search".tl,
-                  border: InputBorder.none,
-                ),
                 onSubmitted: (text) {
                   _controller.onSearch?.call(text);
                 },

@@ -115,11 +115,15 @@ class _SearchPageState extends State<SearchPage> {
       suggestions.add(Pair("**URL**", TranslationType.other));
     } else {
       var text = controller.text;
+      final isJmNumber = parseJmComicId(text) != null;
 
       for (var comicSource in ComicSource.all().where(
         (source) => isSourceEnabled(source.key),
       )) {
-        if (comicSource.idMatcher?.hasMatch(text) ?? false) {
+        final matchesId = isJmNumber
+            ? comicSource.key == 'jm'
+            : comicSource.idMatcher?.hasMatch(text) ?? false;
+        if (matchesId) {
           suggestions.add(
             Pair("**${comicSource.key}**", TranslationType.other),
           );
@@ -477,7 +481,9 @@ class _SearchPageState extends State<SearchPage> {
           ),
           trailing: const Icon(Icons.arrow_right),
           onTap: () {
-            context.to(() => ComicPage(sourceKey: key, id: controller.text));
+            final text = controller.text;
+            final id = key == 'jm' ? parseJmComicId(text) ?? text : text;
+            context.to(() => ComicPage(sourceKey: key, id: id));
           },
         );
       }

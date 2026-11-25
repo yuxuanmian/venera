@@ -119,6 +119,15 @@ String? insertedText(String oldText, String newText) {
   return newText.substring(prefix, newText.length - suffix);
 }
 
+final _jmComicIdPattern = RegExp(r'^(jm)?([0-9]+)$', caseSensitive: false);
+
+/// Returns the numeric work ID from a complete JM number.
+String? parseJmComicId(String input, {bool requirePrefix = true}) {
+  final match = _jmComicIdPattern.firstMatch(input.trim());
+  if (match == null || (requirePrefix && match.group(1) == null)) return null;
+  return match.group(2);
+}
+
 /// Concatenate all digits in [text] in order as a candidate id.
 /// Return null when the total digit count is less than [minDigits],
 /// or when [text] itself is already nothing but digits (nothing to extract).

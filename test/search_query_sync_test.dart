@@ -1,13 +1,17 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
+import 'package:venera/foundation/favorites.dart';
+import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/pages/aggregated_search_page.dart';
+import 'package:venera/pages/comic_details_page/comic_page.dart';
 import 'package:venera/pages/search_page.dart';
 import 'package:venera/pages/search_result_page.dart';
 import 'package:venera/utils/translations.dart';
@@ -22,12 +26,59 @@ void main() {
 
   const sourceKey = 'nhentai';
 
+  ComicSource buildSource(
+    String name,
+    String key, {
+    RegExp? idMatcher,
+    LoadComicFunc? loadComicInfo,
+  }) => ComicSource(
+    name,
+    key,
+    null,
+    null,
+    null,
+    null,
+    const [],
+    SearchPageData(null, (keyword, page, options) async {
+      loadedQueries.add(keyword);
+      return Res(const <Comic>[], subData: 1);
+    }, null),
+    null,
+    loadComicInfo,
+    null,
+    null,
+    null,
+    null,
+    '',
+    '',
+    '1.0.0',
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    idMatcher,
+    null,
+    null,
+    null,
+    null,
+    false,
+    false,
+    null,
+    null,
+  );
+
   setUpAll(() async {
     await AppTranslation.init();
     dataDirectory = await Directory.systemTemp.createTemp('venera-search-');
     loadedQueries = <String>[];
     recordedHistory = <String>[];
     App.dataPath = dataDirectory.path;
+    App.cachePath = dataDirectory.path;
+    await HistoryManager().init();
+    await NetworkFavoriteCacheManager().init(migrateLegacy: false);
     previousEnabledSources = appdata.settings['enabledSources'];
     appdata.settings['enabledSources'] = [sourceKey];
     appdata.settings['searchSources'] = [sourceKey];
@@ -35,45 +86,7 @@ void main() {
     appdata.settings['autoAddLanguageFilter'] = 'english';
     appdata.settings['comicListDisplayMode'] = 'continuous';
 
-    final source = ComicSource(
-      'Search test source',
-      sourceKey,
-      null,
-      null,
-      null,
-      null,
-      const [],
-      SearchPageData(null, (keyword, page, options) async {
-        loadedQueries.add(keyword);
-        return Res(const <Comic>[], subData: 1);
-      }, null),
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      '',
-      '',
-      '1.0.0',
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      false,
-      false,
-      null,
-      null,
-    );
-    ComicSourceManager().add(source);
+    ComicSourceManager().add(buildSource('Search test source', sourceKey));
   });
 
   tearDown(() {
@@ -85,6 +98,8 @@ void main() {
   tearDownAll(() async {
     ComicSourceManager().remove(sourceKey);
     appdata.settings['enabledSources'] = previousEnabledSources;
+    NetworkFavoriteCacheManager().close();
+    HistoryManager().close();
     await dataDirectory.delete(recursive: true);
   });
 
@@ -324,6 +339,99 @@ void main() {
 
     await returnToSearchPage(tester);
     expect(visibleSearchText(tester), 'second');
+  });
+
+  testWidgets('pasted JM numbers offer a direct work lookup', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(360, 760));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final loadedComicIds = <String>[];
+    ComicSourceManager().add(
+      buildSource(
+        'JM test source',
+        'jm',
+        idMatcher: RegExp(r'^(?:[0-9]+|jm[0-9]+)$'),
+        loadComicInfo: (id) async {
+          loadedComicIds.add(id);
+          return Res(
+            ComicDetails.fromJson({
+              'title': 'Fixture $id',
+              'cover': '',
+              'tags': <String, List<String>>{},
+              'chapters': {'chapter': 'Chapter'},
+              'comicId': id,
+              'sourceKey': 'jm',
+              'isFavorite': false,
+            }),
+          );
+        },
+      ),
+    );
+    appdata.settings['enabledSources'] = [sourceKey, 'jm'];
+    addTearDown(() {
+      ComicSourceManager().remove('jm');
+      appdata.settings['enabledSources'] = [sourceKey];
+    });
+    await tester.pumpWidget(
+      MaterialApp(
+        navigatorKey: App.rootNavigatorKey,
+        home: const OverlayWidget(SearchPage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+    final openComic = find.text("${'Open comic'.tl}: JM test source");
+    final field = find.byType(TextField);
+
+    for (final (input, viaInputMethod) in const [
+      ('123456', false),
+      ('JM123456', false),
+      ('jm123456', true),
+      ('  Jm123456  ', false),
+    ]) {
+      messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        return switch (call.method) {
+          'Clipboard.getData' => {'text': input},
+          'Clipboard.hasStrings' => {'value': true},
+          _ => null,
+        };
+      });
+      await tester.enterText(field, '');
+      if (viaInputMethod) {
+        tester.testTextInput.updateEditingValue(
+          TextEditingValue(
+            text: input,
+            selection: TextSelection.collapsed(offset: input.length),
+          ),
+        );
+      } else {
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyV);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      }
+      await tester.pumpAndSettle();
+      expect(visibleSearchText(tester), input);
+      expect(openComic, findsOneWidget);
+      expect(find.text('Extract'.tl), findsNothing);
+
+      await tester.tap(openComic);
+      await tester.pumpAndSettle();
+      final page = tester.widget<ComicPage>(find.byType(ComicPage));
+      expect(page.sourceKey, 'jm');
+      expect(page.id, '123456');
+      expect(loadedComicIds.last, '123456');
+      App.rootNavigatorKey.currentState!.pop();
+      await tester.pumpAndSettle();
+    }
+    expect(loadedComicIds, List.filled(4, '123456'));
+
+    appdata.settings['enabledSources'] = [sourceKey];
+    await tester.enterText(field, 'JM123456');
+    await tester.pumpAndSettle();
+    expect(openComic, findsNothing);
   });
 
   testWidgets('unsubmitted result-page draft does not overwrite parent', (
