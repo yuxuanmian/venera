@@ -13,6 +13,17 @@ subprojects {
     project.evaluationDependsOn(":app")
 }
 
+// Cargokit adds emulator targets to rhttp Debug builds. Apply the explicit
+// ARM64 target once Cargokit has registered its task and configured its inputs.
+if (providers.gradleProperty("target-platform").orNull == "android-arm64") {
+    gradle.projectsEvaluated {
+        def task = rootProject.findProject(":rhttp")?.tasks?.findByName("cargokitCargoBuildRhttpDebug")
+        if (task != null) {
+            task.targetPlatforms = ["android-arm64"]
+        }
+    }
+}
+
 tasks.register("clean", Delete) {
     delete rootProject.buildDir
 }
