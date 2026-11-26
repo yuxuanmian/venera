@@ -149,7 +149,7 @@ Bootstrap 只展示本地翻译文案，不展示远端 message 或异常诊断�
 - `appdata.json`：设置和搜索历史。
 - `syncdata.json`：排除设备专属字段后的可同步数据（按配置生成）。
 - `implicitData.json`：内部状态，不等同于用户设置。
-- `history.db`：阅读历史，也承载图片收藏相关表。
+- `history.db`：阅读进度、历史列表可见状态与图片收藏。清空或移除历史条目只隐藏列表项，续读位置和章节已读标记保存在原行。
 - `network_favorite_cache.db`：远端收藏夹、分页漫画摘要和追更状态的设备级缓存；不参与导入导出或 WebDAV 同步。
 
 支持完整收藏快照的源通过 `favorites.loadCachePage`（页码）或 `favorites.loadCacheNext`（游标）接入。总数可省略。新首页和浏览分页先供当前列表使用，后台分页在校验通过后一次提交正式收藏、成员与完整性标记。`favorite_pending_changes` 保存源站已确认、尚待同步或尚待显示的收藏操作，按账号切换清除。`favorite_folders.cache_scope` 保存影响列表顺序的设置摘要。追更只从已发布的收藏读取缓存目标，缓存发布不使在途扫描失效。流程见 [018 收藏缓存](../../specs/018-favorite-cache-refresh/spec.md)。

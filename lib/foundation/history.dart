@@ -198,13 +198,21 @@ class HistoryManager with ChangeNotifier {
 
   bool get hasOpenConnection => _connection != null;
 
-  int get length => _db.select("select count(*) from history;").first[0] as int;
+  int get length => count();
 
   /// Cache of history ids. Improve the performance of find operation.
   Map<String, bool>? _cachedHistoryIds;
 
   /// Cache records recently modified by the app. Improve the performance of listeners.
   final cachedHistories = <String, History>{};
+
+  Future<void>? _pendingWrite;
+  int _listRevision = 0;
+  int _lastListClear = 0;
+  final _lastListRemovals = <ComicID, int>{};
+
+  /// Capture when the reader first has a chapter ready, before its save timer.
+  int get listRevision => _listRevision;
 
   bool isInitialized = false;
 
@@ -233,13 +241,19 @@ class HistoryManager with ChangeNotifier {
             page int,
             readEpisode text,
             max_page int,
-            chapter_group int
+            chapter_group int,
+            visible integer not null default 1
           );
         """);
 
       var columns = connection.select("PRAGMA table_info(history);");
       if (!columns.any((element) => element["name"] == "chapter_group")) {
         connection.execute("alter table history add column chapter_group int;");
+      }
+      if (!columns.any((element) => element["name"] == "visible")) {
+        connection.execute(
+          "alter table history add column visible integer not null default 1;",
+        );
       }
 
       ImageFavoriteManager().init();
@@ -268,69 +282,89 @@ class HistoryManager with ChangeNotifier {
   }
 
   static const _insertHistorySql = """
-        insert or replace into history (id, title, subtitle, cover, time, type, ep, page, readEpisode, max_page, chapter_group)
-        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        insert into history (
+          id, title, subtitle, cover, time, type, ep, page, readEpisode,
+          max_page, chapter_group, visible
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        on conflict (id) do update set
+          title = excluded.title,
+          subtitle = excluded.subtitle,
+          cover = excluded.cover,
+          time = excluded.time,
+          type = excluded.type,
+          ep = excluded.ep,
+          page = excluded.page,
+          readEpisode = excluded.readEpisode,
+          max_page = excluded.max_page,
+          chapter_group = excluded.chapter_group,
+          visible = case when ? then 1 else history.visible end;
       """;
 
-  static Future<void> _addHistoryAsync(int dbAddr, History newItem) {
+  static Future<void> _writeHistoryInIsolate(int dbAddr, List<Object?> values) {
     return Isolate.run(() {
       var db = sqlite3.fromPointer(ffi.Pointer.fromAddress(dbAddr));
-      db.execute(_insertHistorySql, [
-        newItem.id,
-        newItem.title,
-        newItem.subtitle,
-        newItem.cover,
-        newItem.time.millisecondsSinceEpoch,
-        newItem.type.value,
-        newItem.ep,
-        newItem.page,
-        newItem.readEpisode.join(','),
-        newItem.maxPage,
-        newItem.group,
-      ]);
+      db.execute(_insertHistorySql, values);
     });
   }
 
-  bool _haveAsyncTask = false;
-
-  /// Create a isolate to add history to prevent blocking the UI thread.
-  Future<void> addHistoryAsync(History newItem) async {
-    while (_haveAsyncTask) {
-      await Future.delayed(Duration(milliseconds: 20));
+  Future<void> _enqueueWrite(FutureOr<void> Function() write) async {
+    final connection = _db;
+    final previous = _pendingWrite;
+    final completion = Completer<void>();
+    _pendingWrite = completion.future;
+    try {
+      await previous;
+      if (identical(_connection, connection)) {
+        await write();
+      }
+    } finally {
+      if (identical(_pendingWrite, completion.future)) {
+        _pendingWrite = null;
+      }
+      completion.complete();
     }
-
-    _haveAsyncTask = true;
-    await _addHistoryAsync(_db.handle.address, newItem);
-    _haveAsyncTask = false;
-    if (_cachedHistoryIds == null) {
-      updateCache();
-    } else {
-      _cachedHistoryIds![newItem.id] = true;
-    }
-    cachedHistories[newItem.id] = newItem;
-    if (cachedHistories.length > 10) {
-      cachedHistories.remove(cachedHistories.keys.first);
-    }
-    notifyListeners();
   }
 
-  /// add history. if exists, update time.
-  ///
-  /// This function would be called when user start reading.
+  /// Save progress in an isolate. Only a current reader entry can show a row.
+  Future<void> addHistoryAsync(History newItem, {int? listEntryRevision}) {
+    final values = _historyValues(newItem);
+    return _enqueueWrite(() async {
+      final lastRemoval = _lastListRemovals[ComicID(newItem.type, newItem.id)];
+      final showInList =
+          listEntryRevision != null &&
+          listEntryRevision >= _lastListClear &&
+          (lastRemoval == null || listEntryRevision >= lastRemoval);
+      final visibility = showInList ? 1 : 0;
+      await _writeHistoryInIsolate(_db.handle.address, [
+        ...values,
+        visibility,
+        visibility,
+      ]);
+      _cacheSavedHistory(newItem);
+    });
+  }
+
+  /// Add an imported record. Existing list visibility is preserved.
   void addHistory(History newItem) {
-    _db.execute(_insertHistorySql, [
-      newItem.id,
-      newItem.title,
-      newItem.subtitle,
-      newItem.cover,
-      newItem.time.millisecondsSinceEpoch,
-      newItem.type.value,
-      newItem.ep,
-      newItem.page,
-      newItem.readEpisode.join(','),
-      newItem.maxPage,
-      newItem.group,
-    ]);
+    _db.execute(_insertHistorySql, [..._historyValues(newItem), 1, 0]);
+    _cacheSavedHistory(newItem);
+  }
+
+  static List<Object?> _historyValues(History item) => [
+    item.id,
+    item.title,
+    item.subtitle,
+    item.cover,
+    item.time.millisecondsSinceEpoch,
+    item.type.value,
+    item.ep,
+    item.page,
+    item.readEpisode.join(','),
+    item.maxPage,
+    item.group,
+  ];
+
+  void _cacheSavedHistory(History newItem) {
     if (_cachedHistoryIds == null) {
       updateCache();
     } else {
@@ -379,22 +413,38 @@ class HistoryManager with ChangeNotifier {
     return true;
   }
 
-  void clearHistory() {
-    _db.execute("delete from history;");
-    updateCache();
-    notifyListeners();
+  Future<void> clearHistoryList() {
+    final revision = ++_listRevision;
+    return _enqueueWrite(() {
+      _db.execute("update history set visible = 0 where visible = 1;");
+      _lastListClear = revision;
+      _lastListRemovals.clear();
+      notifyListeners();
+    });
   }
 
-  void remove(String id, ComicType type) async {
-    _db.execute(
-      """
-      delete from history
-      where id == ? and type == ?;
-    """,
-      [id, type.value],
-    );
-    updateCache();
-    notifyListeners();
+  Future<void> hideFromHistoryList(List<ComicID> comics) {
+    if (comics.isEmpty) return Future<void>.value();
+    final revision = ++_listRevision;
+    return _enqueueWrite(() {
+      _db.execute('BEGIN TRANSACTION;');
+      try {
+        for (final comic in comics) {
+          _db.execute(
+            'update history set visible = 0 where id = ? and type = ?;',
+            [comic.id, comic.type.value],
+          );
+        }
+        _db.execute('COMMIT;');
+      } catch (_) {
+        _db.execute('ROLLBACK;');
+        rethrow;
+      }
+      for (final comic in comics) {
+        _lastListRemovals[comic] = revision;
+      }
+      notifyListeners();
+    });
   }
 
   void updateCache() {
@@ -439,6 +489,7 @@ class HistoryManager with ChangeNotifier {
   List<History> getAll() {
     var res = _db.select("""
       select * from history
+      where visible = 1
       order by time DESC;
     """);
     return res.map((element) => History.fromRow(element)).toList();
@@ -448,6 +499,7 @@ class HistoryManager with ChangeNotifier {
   List<History> getRecent() {
     var res = _db.select("""
       select * from history
+      where visible = 1
       order by time DESC
       limit 20;
     """);
@@ -457,13 +509,15 @@ class HistoryManager with ChangeNotifier {
   /// 获取历史记录的数量
   int count() {
     var res = _db.select("""
-      select count(*) from history;
+      select count(*) from history where visible = 1;
     """);
     return res.first[0] as int;
   }
 
   void close() {
     isInitialized = false;
+    _lastListClear = ++_listRevision;
+    _lastListRemovals.clear();
     _cachedHistoryIds = null;
     cachedHistories.clear();
     final connection = _connection;
@@ -477,26 +531,12 @@ class HistoryManager with ChangeNotifier {
     }
   }
 
-  void batchDeleteHistories(List<ComicID> histories) {
-    if (histories.isEmpty) return;
-    _db.execute('BEGIN TRANSACTION;');
-    try {
-      for (var history in histories) {
-        _db.execute(
-          """
-          delete from history
-          where id == ? and type == ?;
-        """,
-          [history.id, history.type.value],
-        );
-      }
-      _db.execute('COMMIT;');
-    } catch (e) {
-      _db.execute('ROLLBACK;');
-      rethrow;
+  /// Wait for the background isolate before replacing the database file.
+  Future<void> closeWhenIdle() async {
+    while (_pendingWrite != null) {
+      await _pendingWrite;
     }
-    updateCache();
-    notifyListeners();
+    close();
   }
 
   /// Refresh history info from comic source.
