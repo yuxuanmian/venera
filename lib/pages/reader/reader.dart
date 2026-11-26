@@ -13,6 +13,7 @@ import 'package:flutter_memory_info/flutter_memory_info.dart';
 import 'package:photo_view/photo_view.dart';
 import 'package:photo_view/photo_view_gallery.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
+import 'package:venera/components/booklet_painter.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/components/custom_slider.dart';
 import 'package:venera/components/rich_comment_content.dart';
@@ -389,6 +390,8 @@ class _ReaderState extends State<Reader>
   /// Prevent multiple history updates in a short time.
   /// `HistoryManager().addHistoryAsync` is a high-cost operation because it creates a new isolate.
   Timer? _updateHistoryTimer;
+  int? _historyEntryRevision;
+  bool _historyEntrySaved = false;
 
   void updateHistory() {
     if (history != null) {
@@ -424,10 +427,20 @@ class _ReaderState extends State<Reader>
         history!.ep = chapter;
       }
       history!.time = DateTime.now();
+      final manager = HistoryManager();
+      final entryRevision = _historyEntryRevision ??= manager.listRevision;
       _updateHistoryTimer?.cancel();
-      _updateHistoryTimer = Timer(const Duration(seconds: 1), () {
-        HistoryManager().addHistoryAsync(history!);
+      _updateHistoryTimer = Timer(const Duration(seconds: 1), () async {
         _updateHistoryTimer = null;
+        try {
+          await manager.addHistoryAsync(
+            history!,
+            listEntryRevision: _historyEntrySaved ? null : entryRevision,
+          );
+          _historyEntrySaved = true;
+        } catch (_, stack) {
+          Log.error('History', 'Failed to save reading progress', stack);
+        }
       });
     }
   }

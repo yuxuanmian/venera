@@ -81,17 +81,8 @@ class NaviPaneState extends State<NaviPane>
   void Function()? mainViewUpdateHandler;
 
   late AnimationController controller;
-  late final AnimationController _tabTransition;
+  late final PageCrossFadeController<int> _tabTransition;
   late double _indicatorStart = currentPage.toDouble();
-  int? _previousPage;
-  double _outgoingOpacity = 1;
-  static const _incomingTabCurve = Interval(.22, 1, curve: Curves.easeOut);
-  static const _outgoingTabEnd = .42;
-  static const _outgoingTabCurve = Interval(
-    0,
-    _outgoingTabEnd,
-    curve: Curves.easeInOut,
-  );
   final _heroController = MaterialApp.createMaterialHeroController();
 
   double get _indicatorPosition => ui.lerpDouble(
@@ -135,17 +126,16 @@ class NaviPaneState extends State<NaviPane>
     if (currentPage == index) {
       return;
     }
+    final previous = currentPage;
     setState(() {
       _indicatorStart = _indicatorPosition;
-      _outgoingOpacity = _incomingTabCurve.transform(_tabTransition.value);
-      _previousPage = currentPage;
       currentPage = index;
     });
-    if (MediaQuery.disableAnimationsOf(context)) {
-      _tabTransition.value = 1;
-    } else {
-      _tabTransition.forward(from: 0);
-    }
+    _tabTransition.show(
+      previous,
+      index,
+      animate: !MediaQuery.disableAnimationsOf(context),
+    );
     mainViewUpdateHandler?.call();
   }
 
@@ -157,11 +147,7 @@ class NaviPaneState extends State<NaviPane>
       upperBound: 3,
       vsync: this,
     );
-    _tabTransition = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 240),
-      value: 1,
-    );
+    _tabTransition = PageCrossFadeController<int>(vsync: this);
     widget.observer.addListener(onNavigatorStateChange);
     WidgetsBinding.instance.addObserver(this);
     super.initState();
@@ -269,10 +255,8 @@ class NaviPaneState extends State<NaviPane>
           )
         : EdgeInsets.zero;
     return _NaviPopScope(
-      action: () {
-        if (App.mainNavigatorKey!.currentState!.canPop()) {
-          App.mainNavigatorKey!.currentState!.maybePop();
-        } else {
+      action: () async {
+        if (!await widget.navigatorKey.currentState!.maybePop()) {
           SystemNavigator.pop();
         }
       },
@@ -412,12 +396,11 @@ class NaviPaneState extends State<NaviPane>
                 AnimatedBuilder(
                   animation: _tabTransition,
                   builder: (context, child) {
-                    final position = rtl
-                        ? itemCount - 1 - _indicatorPosition
+                    final index = MediaQuery.disableAnimationsOf(context)
+                        ? currentPage.toDouble()
                         : _indicatorPosition;
-                    final stretch =
-                        math.sin(_tabTransition.value * math.pi) * 12;
-                    final width = math.min(64.0 + stretch, itemWidth);
+                    final position = rtl ? itemCount - 1 - index : index;
+                    final width = math.min(64.0, itemWidth);
                     return Positioned(
                       left: (position + 0.5) * itemWidth - width / 2,
                       width: width,
@@ -751,19 +734,13 @@ class _NaviMainViewState extends State<_NaviMainView> {
             child: AnimatedBuilder(
               animation: state._tabTransition,
               builder: (context, child) {
-                final progress = state._tabTransition.value;
-                final previous = state._previousPage;
-                final direction =
-                    previous == null || state.currentPage > previous
-                    ? 1.0
-                    : -1.0;
-                final rtl = Directionality.of(context) == TextDirection.rtl;
-                final offset = direction * (rtl ? -8 : 8);
+                final animate = !MediaQuery.disableAnimationsOf(context);
                 return Stack(
                   fit: StackFit.expand,
                   children: [
                     for (final page in _visited)
-                      _buildTab(page, progress, offset),
+                      if (page != state.currentPage) _buildTab(page, animate),
+                    _buildTab(state.currentPage, animate),
                   ],
                 );
               },
@@ -776,40 +753,18 @@ class _NaviMainViewState extends State<_NaviMainView> {
     );
   }
 
-  Widget _buildTab(int page, double progress, double offset) {
+  Widget _buildTab(int page, bool animate) {
     final active = page == state.currentPage;
-    final outgoing =
-        page == state._previousPage && progress < NaviPaneState._outgoingTabEnd;
-    final fadeIn = NaviPaneState._incomingTabCurve.transform(progress);
-    final fadeOut = 1 - NaviPaneState._outgoingTabCurve.transform(progress);
-    return Offstage(
+    final transition = state._tabTransition;
+    return PageCrossFade(
       key: ValueKey(page),
-      offstage: !active && !outgoing,
-      child: TickerMode(
-        enabled: active,
-        child: ExcludeFocus(
-          excluding: !active,
-          child: ExcludeSemantics(
-            excluding: !active,
-            child: IgnorePointer(
-              ignoring: !active,
-              child: HeroMode(
-                enabled: active,
-                child: Transform.translate(
-                  offset: Offset(
-                    active ? offset * (1 - fadeIn) : -offset * (1 - fadeOut),
-                    0,
-                  ),
-                  child: Opacity(
-                    opacity: active ? fadeIn : fadeOut * state._outgoingOpacity,
-                    child: state.widget.pageBuilder(page),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
+      active: active,
+      opacity: active
+          ? (animate ? transition.incomingOpacity : 1)
+          : (animate && page == transition.outgoing
+                ? transition.outgoingOpacity
+                : 0),
+      child: state.widget.pageBuilder(page),
     );
   }
 }

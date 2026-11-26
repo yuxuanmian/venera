@@ -4,7 +4,6 @@ import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/catalog/source_preferences.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
-import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/utils/translations.dart';
 
@@ -77,19 +76,6 @@ class _HistoryPageState extends State<HistoryPage> {
       });
       selectedComics.removeWhere((k, v) => !v);
     });
-  }
-
-  void _removeHistory(History comic) {
-    if (comic.sourceKey.startsWith("Unknown")) {
-      HistoryManager().remove(
-        comic.id,
-        ComicType(int.parse(comic.sourceKey.split(':')[1])),
-      );
-    } else if (comic.sourceKey == 'local') {
-      HistoryManager().remove(comic.id, ComicType.local);
-    } else {
-      HistoryManager().remove(comic.id, ComicType(comic.sourceKey.hashCode));
-    }
   }
 
   void _refreshHistory(History comic) async {
@@ -170,20 +156,13 @@ class _HistoryPageState extends State<HistoryPage> {
       ),
       IconButton(
         icon: const Icon(Icons.delete),
-        tooltip: "Delete".tl,
+        tooltip: "Remove from History".tl,
         onPressed: selectedComics.isEmpty
             ? null
-            : () {
-                final comicsToDelete = List<History>.from(selectedComics.keys);
-                setState(() {
-                  multiSelectMode = false;
-                  selectedComics.clear();
-                });
-
-                for (final comic in comicsToDelete) {
-                  _removeHistory(comic);
-                }
-              },
+            : () => HistoryManager().hideFromHistoryList([
+                for (final comic in selectedComics.keys)
+                  ComicID(comic.type, comic.id),
+              ]),
       ),
     ];
 
@@ -203,19 +182,21 @@ class _HistoryPageState extends State<HistoryPage> {
         },
       ),
       Tooltip(
-        message: 'Clear History'.tl,
+        message: 'Clear History List'.tl,
         child: Flyout(
           controller: controller,
           flyoutBuilder: (context) {
             return FlyoutContent(
-              title: 'Clear History'.tl,
-              content: Text('Are you sure you want to clear your history?'.tl),
+              title: 'Clear History List'.tl,
+              content: Text(
+                'Your reading position and read chapters will be kept.'.tl,
+              ),
               actions: [
                 Button.filled(
                   color: context.colorScheme.error,
-                  onPressed: () {
-                    HistoryManager().clearHistory();
-                    context.pop();
+                  onPressed: () async {
+                    await HistoryManager().clearHistoryList();
+                    if (context.mounted) context.pop();
                   },
                   child: Text('Clear'.tl),
                 ),
@@ -301,10 +282,13 @@ class _HistoryPageState extends State<HistoryPage> {
                   ),
                   MenuEntry(
                     icon: Icons.remove,
-                    text: 'Remove'.tl,
+                    text: 'Remove from History'.tl,
                     color: context.colorScheme.error,
                     onClick: () {
-                      _removeHistory(c as History);
+                      final history = c as History;
+                      HistoryManager().hideFromHistoryList([
+                        ComicID(history.type, history.id),
+                      ]);
                     },
                   ),
                 ];

@@ -1,194 +1,166 @@
 part of 'components.dart';
 
-/// Opens the candidate chooser used by the card and detail page smart-copy
-/// actions. The caller retains the ordinary full-title copy action separately.
-Future<void> showComicTitleCopyMenu(
+Future<void> copyComicTitle(
   BuildContext context, {
   required String title,
   String? subtitle,
   Iterable<String> knownAuthors = const [],
 }) async {
-  final resolution = resolveComicTitleCopyCandidates(
+  if (!context.mounted) return;
+  final groups = resolveComicTitleCopyGroups(
     title: title,
     subtitle: subtitle,
     knownAuthors: knownAuthors,
   );
-  if (resolution.candidates.isEmpty || !context.mounted) return;
+  if (groups.isEmpty) return;
 
   final dialogContext = _comicCopyDialogContext(context);
   if (dialogContext == null || !dialogContext.mounted) return;
 
-  await showDialog<void>(
-    context: dialogContext,
-    useRootNavigator: true,
-    builder: (dialogContext) {
-      return Dialog(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxWidth: 560,
-            maxHeight: (MediaQuery.sizeOf(dialogContext).height - 80)
-                .clamp(120.0, 560.0)
-                .toDouble(),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 18, 20, 12),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Choose a title to copy'.tl,
-                  style: Theme.of(dialogContext).textTheme.titleLarge,
-                ),
-                const SizedBox(height: 12),
-                Flexible(
-                  child: ListView.separated(
-                    shrinkWrap: true,
-                    itemCount: resolution.candidates.length,
-                    separatorBuilder: (_, _) => const SizedBox(height: 6),
-                    itemBuilder: (context, index) {
-                      final candidate = resolution.candidates[index];
-                      return _ComicTitleCopyCandidateTile(
-                        candidate: candidate,
-                        onTap: () => _copyComicTitleCandidate(
-                          dialogContext,
-                          candidate.text,
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
-    },
-  );
+  final text = groups.length == 1 && groups.single.parts.length == 1
+      ? groups.single.raw
+      : await showDialog<String>(
+          context: dialogContext,
+          builder: (_) => _TitlePartsDialog(groups: groups),
+        );
+  if (text == null) return;
+
+  var message = 'Copied'.tl;
+  try {
+    await Clipboard.setData(ClipboardData(text: text));
+  } catch (_) {
+    message = 'Error'.tl;
+  }
+  final messageContext = App.rootNavigatorKey.currentContext ?? dialogContext;
+  if (messageContext.mounted) {
+    messageContext.showMessage(message: message);
+  }
 }
 
 BuildContext? _comicCopyDialogContext(BuildContext context) {
-  // SelectableText's context-menu builder can be invoked from Flutter's root
-  // selection overlay, whose context is not below a Navigator. Use the
-  // supplied context when possible, and fall back to the app root navigator
-  // for that overlay case.
+  // A selection overlay can sit above the nearest Navigator.
   return Navigator.maybeOf(context) == null
       ? App.rootNavigatorKey.currentContext
       : context;
 }
 
-Future<void> _copyComicTitleCandidate(
-  BuildContext dialogContext,
-  String text,
-) async {
-  try {
-    await Clipboard.setData(ClipboardData(text: text));
-    if (!dialogContext.mounted) return;
-    Navigator.of(dialogContext).pop();
-    App.rootContext.showMessage(message: 'Copied'.tl);
-  } catch (_) {
-    if (dialogContext.mounted) {
-      dialogContext.showMessage(message: 'Error'.tl);
-    }
-  }
+class _TitlePartsDialog extends StatefulWidget {
+  const _TitlePartsDialog({required this.groups, this.paste = false});
+
+  final List<ComicTitleCopyGroup> groups;
+  final bool paste;
+
+  @override
+  State<_TitlePartsDialog> createState() => _TitlePartsDialogState();
 }
 
-class _ComicTitleCopyCandidateTile extends StatelessWidget {
-  const _ComicTitleCopyCandidateTile({
-    required this.candidate,
-    required this.onTap,
-  });
+class _TitlePartsDialogState extends State<_TitlePartsDialog> {
+  final _selected = <ComicTitleCopyPart>{};
 
-  final ComicTitleCopyCandidate candidate;
-  final VoidCallback onTap;
+  ComicTitleCopyGroup? get _activeGroup => widget.groups
+      .where((group) => group.parts.any(_selected.contains))
+      .firstOrNull;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.groups.length == 1) {
+      _selected.add(widget.groups.single.recommendedPart);
+    }
+  }
+
+  void _setSelected(
+    ComicTitleCopyGroup group,
+    ComicTitleCopyPart part,
+    bool selected,
+  ) {
+    final activeGroup = _activeGroup;
+    if (activeGroup != null && activeGroup != group) return;
+    setState(() {
+      if (selected) {
+        _selected.add(part);
+      } else {
+        _selected.remove(part);
+      }
+    });
+  }
+
+  void _finish() {
+    final group = _activeGroup;
+    if (group == null || ModalRoute.isCurrentOf(context) != true) return;
+    Navigator.of(context).pop(group.compose(_selected));
+  }
 
   @override
   Widget build(BuildContext context) {
-    final label = switch ((candidate.field, candidate.kind)) {
-      (ComicTitleField.title, ComicTitleCandidateKind.cleaned) =>
-        'Main Title'.tl,
-      (ComicTitleField.subtitle, ComicTitleCandidateKind.cleaned) =>
-        'Subtitle'.tl,
-      (ComicTitleField.title, ComicTitleCandidateKind.raw) => 'Full Title'.tl,
-      (ComicTitleField.subtitle, ComicTitleCandidateKind.raw) =>
-        'Full Subtitle'.tl,
-    };
-    final semanticsLabel = [
-      if (candidate.recommended) 'Recommended'.tl,
-      label,
-      candidate.text,
-    ].join(': ');
-    return Semantics(
-      button: true,
-      label: semanticsLabel,
-      child: InkWell(
-        key: ValueKey('comic-title-copy-candidate-${candidate.text}'),
-        borderRadius: BorderRadius.circular(10),
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(10),
-            color: Theme.of(context).colorScheme.surfaceContainerHighest,
-          ),
-          child: Row(
+    final activeGroup = _activeGroup;
+    final colors = Theme.of(context).colorScheme;
+    final disabledText = colors.onSurfaceVariant.withValues(alpha: 0.65);
+    return AlertDialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+      titlePadding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+      contentPadding: const EdgeInsets.fromLTRB(20, 12, 20, 4),
+      actionsPadding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+      title: Text((widget.paste ? 'Paste Title' : 'Copy Title').tl),
+      content: SizedBox(
+        width: 480,
+        child: SingleChildScrollView(
+          child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
             children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+              for (final group in widget.groups) ...[
+                if (group != widget.groups.first) const SizedBox(height: 16),
+                if (widget.groups.length > 1) ...[
+                  Text(
+                    group.field == ComicTitleField.title
+                        ? 'Main Title'.tl
+                        : 'Subtitle'.tl,
+                    style: TextStyle(
+                      color: activeGroup == null || activeGroup == group
+                          ? colors.onSurfaceVariant
+                          : disabledText,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                ],
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
                   children: [
-                    Row(
-                      children: [
-                        Flexible(
-                          child: Text(
-                            label,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.labelMedium,
-                          ),
+                    for (final part in group.parts)
+                      FilterChip(
+                        label: Text(part.text),
+                        selected: _selected.contains(part),
+                        showCheckmark: false,
+                        backgroundColor: colors.surfaceContainerHighest,
+                        selectedColor: colors.primary,
+                        disabledColor: colors.surfaceContainerLow,
+                        side: BorderSide.none,
+                        labelStyle: TextStyle(
+                          color: _selected.contains(part)
+                              ? colors.onPrimary
+                              : activeGroup == null || activeGroup == group
+                              ? colors.onSurface
+                              : disabledText,
                         ),
-                        if (candidate.recommended) ...[
-                          const SizedBox(width: 8),
-                          _ComicTitleCopyBadge(text: 'Recommended'.tl),
-                        ],
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      candidate.text,
-                      maxLines: 3,
-                      overflow: TextOverflow.ellipsis,
-                    ),
+                        onSelected: activeGroup != null && activeGroup != group
+                            ? null
+                            : (selected) => _setSelected(group, part, selected),
+                      ),
                   ],
                 ),
-              ),
-              const SizedBox(width: 8),
-              const Icon(Icons.copy_outlined, size: 20),
+              ],
             ],
           ),
         ),
       ),
-    );
-  }
-}
-
-class _ComicTitleCopyBadge extends StatelessWidget {
-  const _ComicTitleCopyBadge({required this.text});
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.primaryContainer,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-        child: Text(text, style: Theme.of(context).textTheme.labelSmall),
-      ),
+      actions: [
+        FilledButton(
+          onPressed: activeGroup == null ? null : _finish,
+          child: Text((widget.paste ? 'Paste' : 'Copy').tl),
+        ),
+      ],
     );
   }
 }
@@ -277,7 +249,7 @@ class ComicTitleCopyButton extends StatelessWidget {
           iconSize: 14,
           padding: EdgeInsets.zero,
           constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
-          onPressed: () => showComicTitleCopyMenu(
+          onPressed: () => copyComicTitle(
             context,
             title: title,
             subtitle: subtitle,

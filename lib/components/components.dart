@@ -33,6 +33,7 @@ import 'package:venera/utils/translations.dart';
 
 part 'image.dart';
 part 'appbar.dart';
+part 'search_text_field.dart';
 part 'button.dart';
 part 'consts.dart';
 part 'flyout.dart';
@@ -41,6 +42,7 @@ part 'loading.dart';
 part 'menu.dart';
 part 'message.dart';
 part 'navigation_bar.dart';
+part 'page_cross_fade.dart';
 part 'pop_up_widget.dart';
 part 'scroll.dart';
 part 'select.dart';

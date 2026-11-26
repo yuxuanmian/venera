@@ -32,42 +32,97 @@ void main() {
         .setMockMethodCallHandler(SystemChannels.platform, null);
   });
 
-  testWidgets('candidate dialog previews choices and copies the selected one', (
+  testWidgets('copies an unsplit title verbatim without opening a dialog', (
+    tester,
+  ) async {
+    const title = '  [重生] 标题（外传）  ';
+    await tester.pumpWidget(_copyLauncher(title: title));
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    expect(copiedText, title);
+    expect(find.byType(AlertDialog), findsNothing);
+    await tester.pump(const Duration(seconds: 2));
+  });
+
+  testWidgets('selects fragments by color and copies them in source order', (
     tester,
   ) async {
     await tester.pumpWidget(
-      MaterialApp(
-        navigatorKey: App.rootNavigatorKey,
-        home: Scaffold(
-          body: Builder(
-            builder: (context) => TextButton(
-              onPressed: () => showComicTitleCopyMenu(
-                context,
-                title: '[作者] 原名 [Chinese]',
-                subtitle: '副标题',
-              ),
-              child: const Text('open'),
-            ),
-          ),
-        ),
-      ),
+      _copyLauncher(title: '(C105) [某某汉化] 原名 [DL版]', dark: true),
     );
 
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Choose a title to copy'.tl), findsOneWidget);
-    expect(find.text('原名'), findsOneWidget);
-    expect(find.text('[作者] 原名 [Chinese]'), findsOneWidget);
+    expect(find.byType(AlertDialog), findsOneWidget);
+    expect(find.byType(FilterChip), findsNWidgets(4));
+    final title = tester.widget<FilterChip>(_chip('原名'));
+    final edition = tester.widget<FilterChip>(_chip('[DL版]'));
+    final colors = Theme.of(tester.element(_chip('原名'))).colorScheme;
+    expect(title.selected, isTrue);
+    expect(title.showCheckmark, isFalse);
+    expect(title.selectedColor, colors.primary);
+    expect(edition.selected, isFalse);
+    expect(edition.backgroundColor, colors.surfaceContainerHighest);
 
-    await tester.tap(
-      find.byKey(const ValueKey('comic-title-copy-candidate-原名')),
-    );
+    await tester.tap(_chip('[DL版]'));
+    await tester.pumpAndSettle();
+    await tester.tap(_chip('[某某汉化]'));
+    await tester.pumpAndSettle();
+    expect(copiedText, isNull);
+    await tester.tap(find.widgetWithText(FilledButton, 'Copy'.tl));
     await tester.pumpAndSettle();
     await tester.pump(const Duration(seconds: 2));
 
-    expect(copiedText, '原名');
-    expect(find.text('Choose a title to copy'.tl), findsNothing);
+    expect(copiedText, '[某某汉化] 原名 [DL版]');
+    expect(find.byType(AlertDialog), findsNothing);
+  });
+
+  testWidgets('main title and subtitle start empty and disable each other', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _copyLauncher(title: '主名 [DL版]', subtitle: '副名 [某某汉化]'),
+    );
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+
+    final copy = find.widgetWithText(FilledButton, 'Copy'.tl);
+    FilterChip chip(String label) => tester.widget<FilterChip>(_chip(label));
+
+    expect(find.text('Main Title'.tl), findsOneWidget);
+    expect(find.text('Subtitle'.tl), findsOneWidget);
+    expect(
+      tester
+          .widgetList<FilterChip>(find.byType(FilterChip))
+          .every((tag) => !tag.selected && tag.onSelected != null),
+      isTrue,
+    );
+    expect(tester.widget<FilledButton>(copy).onPressed, isNull);
+
+    chip('主名').onSelected!(true);
+    chip('副名').onSelected!(true);
+    await tester.pumpAndSettle();
+    expect(chip('主名').selected, isTrue);
+    expect(chip('[DL版]').onSelected, isNotNull);
+    expect(chip('副名').selected, isFalse);
+    expect(chip('副名').onSelected, isNull);
+    expect(chip('[某某汉化]').onSelected, isNull);
+
+    await tester.tap(_chip('主名'));
+    await tester.pumpAndSettle();
+    expect(chip('副名').onSelected, isNotNull);
+    expect(tester.widget<FilledButton>(copy).onPressed, isNull);
+    await tester.tap(_chip('[某某汉化]'));
+    await tester.pumpAndSettle();
+    expect(chip('主名').onSelected, isNull);
+    expect(chip('[DL版]').onSelected, isNull);
+    await tester.tap(_chip('副名'));
+    await tester.pumpAndSettle();
+    await tester.tap(copy);
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 2));
+    expect(copiedText, '副名 [某某汉化]');
   });
 
   testWidgets('candidate dialog remains scrollable on a small viewport', (
@@ -83,7 +138,7 @@ void main() {
         home: Scaffold(
           body: Builder(
             builder: (context) => TextButton(
-              onPressed: () => showComicTitleCopyMenu(
+              onPressed: () => copyComicTitle(
                 context,
                 title: List.filled(30, '很长的漫画标题').join(' '),
                 subtitle: '日本語タイトル',
@@ -98,7 +153,7 @@ void main() {
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Choose a title to copy'.tl), findsOneWidget);
+    expect(find.byType(AlertDialog), findsOneWidget);
     expect(find.byType(Scrollable), findsAtLeastNWidgets(1));
     expect(tester.takeException(), isNull);
   });
@@ -115,7 +170,7 @@ void main() {
               TextButton(
                 onPressed: () {
                   expect(Navigator.maybeOf(context), isNull);
-                  showComicTitleCopyMenu(context, title: '原名', subtitle: '副标题');
+                  copyComicTitle(context, title: '原名', subtitle: '副标题');
                 },
                 child: const Text('open-from-overlay'),
               ),
@@ -130,7 +185,7 @@ void main() {
     await tester.tap(find.text('open-from-overlay'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Choose a title to copy'.tl), findsOneWidget);
+    expect(find.byType(AlertDialog), findsOneWidget);
   });
 
   testWidgets('card menu exposes smart copy without removing raw copy', (
@@ -179,7 +234,7 @@ void main() {
 
     await tester.tap(find.text('Copy Original Title'.tl));
     await tester.pumpAndSettle();
-    expect(find.text('Choose a title to copy'.tl), findsOneWidget);
+    expect(find.byType(AlertDialog), findsOneWidget);
     App.rootNavigatorKey.currentState!.pop();
     await tester.pumpAndSettle();
 
@@ -327,8 +382,30 @@ void main() {
 
     await tester.tap(buttonFinder);
     await tester.pumpAndSettle();
-    expect(find.text('Choose a title to copy'.tl), findsOneWidget);
+    expect(find.byType(AlertDialog), findsOneWidget);
     tester.state<NavigatorState>(find.byType(Navigator)).pop();
     await tester.pumpAndSettle();
   });
+}
+
+Finder _chip(String label) => find.widgetWithText(FilterChip, label);
+
+Widget _copyLauncher({
+  required String title,
+  String? subtitle,
+  bool dark = false,
+}) {
+  return MaterialApp(
+    theme: dark ? ThemeData.dark() : ThemeData.light(),
+    navigatorKey: App.rootNavigatorKey,
+    home: Scaffold(
+      body: Builder(
+        builder: (context) => TextButton(
+          onPressed: () =>
+              copyComicTitle(context, title: title, subtitle: subtitle),
+          child: const Text('open'),
+        ),
+      ),
+    ),
+  );
 }

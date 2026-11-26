@@ -3,6 +3,70 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:venera/components/components.dart';
 
 void main() {
+  testWidgets('tab contents cross-fade in place for 300 milliseconds', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(360, 780);
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: NaviPane(
+          paneItems: [
+            PaneItemEntry(
+              label: 'Home',
+              icon: Icons.home_outlined,
+              activeIcon: Icons.home,
+            ),
+            PaneItemEntry(
+              label: 'Favorites',
+              icon: Icons.bookmark_outline,
+              activeIcon: Icons.bookmark,
+            ),
+          ],
+          paneActions: const [],
+          pageBuilder: (index) => Center(child: Text('Page $index')),
+          observer: NaviObserver(),
+          navigatorKey: GlobalKey(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final home = find.text('Page 0');
+    final favorites = find.text('Page 1');
+    double opacity(Finder page) => tester
+        .widget<PageCrossFade>(
+          find.ancestor(of: page, matching: find.byType(PageCrossFade)),
+        )
+        .opacity;
+    final homePosition = tester.getTopLeft(home);
+
+    await tester.tap(find.byIcon(Icons.bookmark_outline).hitTestable());
+    await tester.pump();
+    final favoritesPosition = tester.getTopLeft(favorites);
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(opacity(home), closeTo(.5, .01));
+    expect(opacity(favorites), closeTo(.5, .01));
+    expect(tester.getTopLeft(home), homePosition);
+    expect(tester.getTopLeft(favorites), favoritesPosition);
+    expect(home.hitTestable(), findsNothing);
+    await tester.pump(const Duration(milliseconds: 90));
+    expect(home, findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 60));
+    expect(home, findsNothing);
+    expect(opacity(favorites), 1);
+
+    tester.platformDispatcher.accessibilityFeaturesTestValue =
+        const FakeAccessibilityFeatures(disableAnimations: true);
+    addTearDown(tester.platformDispatcher.clearAccessibilityFeaturesTestValue);
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.home_outlined).hitTestable());
+    await tester.pump();
+    expect(favorites, findsNothing);
+    expect(opacity(home), 1);
+  });
+
   testWidgets('quick tab changes keep the last tab and restore home scroll', (
     tester,
   ) async {

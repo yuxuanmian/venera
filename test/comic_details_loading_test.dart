@@ -2,9 +2,11 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
+import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/history.dart';
@@ -21,6 +23,7 @@ class _DetailFixture {
     required this.comicId,
     required this.loadFolders,
     this.chapters = const {'ep': 'Chapter'},
+    this.tags = const {},
     this.readChapterIds,
     this.detailsReady,
   });
@@ -31,6 +34,7 @@ class _DetailFixture {
 
   final Future<Res<Map<String, String>>> Function(String comicId) loadFolders;
   final Map<String, Object> chapters;
+  final Map<String, List<String>> tags;
   final List<String>? readChapterIds;
   final Future<void>? detailsReady;
 
@@ -64,7 +68,7 @@ class _DetailFixture {
             'subtitle': 'Author',
             'cover': coverPath,
             'description': 'Details loaded',
-            'tags': <String, List<String>>{},
+            'tags': tags,
             'chapters': chapters,
             if (readChapterIds != null) 'readChapterIds': readChapterIds,
             'sourceKey': sourceKey,
@@ -235,6 +239,81 @@ void main() {
       expect(blocks, findsNothing);
     },
   );
+
+  for (final (sourceKey, comicId, expected) in const [
+    ('jm', '123456', 'JM123456'),
+    ('jm', 'jm123456', 'JM123456'),
+    ('other-source', '123456', null),
+  ]) {
+    testWidgets('shows the JM work number as a tag for $sourceKey/$comicId', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(360, 760);
+      addTearDown(tester.view.reset);
+      final language = appdata.settings['language'];
+      appdata.settings['language'] = 'zh-CN';
+      addTearDown(() => appdata.settings['language'] = language);
+      final fixture = _DetailFixture(
+        sourceKey: sourceKey,
+        comicId: comicId,
+        loadFolders: (_) async => const Res({}),
+        chapters: const {'654321': 'Chapter'},
+        tags: comicId.startsWith('jm')
+            ? const {
+                'Author': ['Sample Author'],
+              }
+            : const {},
+      );
+      addTearDown(() => ComicSourceManager().remove(sourceKey));
+      await _pumpDetail(tester, fixture, brightness: Brightness.dark);
+      await tester.pumpAndSettle();
+
+      final label = find.text('JM号');
+      final number = find.text(expected ?? 'JM123456');
+      if (expected == null) {
+        expect(label, findsNothing);
+        expect(number, findsNothing);
+      } else {
+        expect(label, findsOneWidget);
+        expect(number, findsOneWidget);
+        final row = find.ancestor(of: label, matching: find.byType(Wrap)).first;
+        expect(find.descendant(of: row, matching: number), findsOneWidget);
+        expect(
+          tester.getTopLeft(row).dy,
+          greaterThan(tester.getBottomLeft(find.text('Information'.tl)).dy),
+        );
+        final author = find.text('Sample Author');
+        if (fixture.tags.isNotEmpty) {
+          expect(
+            tester.getTopLeft(row).dy,
+            greaterThan(tester.getTopLeft(author).dy),
+          );
+        }
+        expect(find.text('JM654321'), findsNothing);
+        String? copied;
+        final messenger =
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+        messenger.setMockMethodCallHandler(SystemChannels.platform, (
+          call,
+        ) async {
+          if (call.method == 'Clipboard.setData') {
+            copied = (call.arguments as Map)['text'] as String?;
+          }
+          return null;
+        });
+        addTearDown(
+          () =>
+              messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+        );
+        await tester.longPress(number);
+        await tester.pump();
+        expect(copied, expected);
+        await tester.pump(const Duration(seconds: 2));
+      }
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   for (final sourceSupportsReadStatus in [false, true]) {
     testWidgets(

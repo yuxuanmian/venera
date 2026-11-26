@@ -9,6 +9,7 @@ import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/network/app_dio.dart';
+import 'package:venera/network/network_diagnostics.dart';
 import 'package:venera/utils/data.dart';
 import 'package:venera/utils/ext.dart';
 import 'package:webdav_client/webdav_client.dart' hide File;
@@ -87,7 +88,9 @@ class DataSync with ChangeNotifier {
 
   String? get lastError => _lastError;
 
-  bool get isEnabled {
+  bool get isEnabled => isAutoSyncEnabled;
+
+  static bool get isAutoSyncEnabled {
     var config = appdata.settings['webdav'];
     var autoSync = appdata.implicitData['webdavAutoSync'] ?? false;
     return autoSync && config is List && config.isNotEmpty;
@@ -138,6 +141,9 @@ class DataSync with ChangeNotifier {
         password: pass,
         adapter: RHttpAdapter(),
       );
+      client.c.interceptors.add(
+        NetworkFailureInterceptor(logSuccessfulResponses: true),
+      );
 
       try {
         appdata.settings['dataVersion']++;
@@ -166,7 +172,7 @@ class DataSync with ChangeNotifier {
         Log.info("Upload Data", "Data uploaded successfully");
         return const Res(true);
       } catch (e, s) {
-        Log.error("Upload Data", e, s);
+        Log.error("Upload Data", e is DioException ? e.type.name : e, s);
         _lastError = e.toString();
         return Res.error(e.toString());
       }
@@ -206,6 +212,9 @@ class DataSync with ChangeNotifier {
         password: pass,
         adapter: RHttpAdapter(),
       );
+      client.c.interceptors.add(
+        NetworkFailureInterceptor(logSuccessfulResponses: true),
+      );
 
       try {
         var files = await client.readDir('/');
@@ -234,7 +243,7 @@ class DataSync with ChangeNotifier {
         Log.info("Data Sync", "Data downloaded successfully");
         return const Res(true);
       } catch (e, s) {
-        Log.error("Data Sync", e, s);
+        Log.error("Data Sync", e is DioException ? e.type.name : e, s);
         _lastError = e.toString();
         return Res.error(e.toString());
       }

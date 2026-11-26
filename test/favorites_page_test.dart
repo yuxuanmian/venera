@@ -88,6 +88,98 @@ void main() {
     cache.clearAllCache();
   });
 
+  testWidgets('source switching fades in loading and can reverse in place', (
+    tester,
+  ) async {
+    const a = 'source_a';
+    const b = 'source_b';
+    final pending = Completer<Res<List<Comic>>>();
+    final entries = [
+      _pagingData(a, {
+        1: [_comic(a, 'favorite-a')],
+      }, {}),
+      FavoriteData(
+        key: b,
+        title: b,
+        multiFolder: false,
+        loadComic: (page, [folder]) => pending.future,
+        loadNext: null,
+      ),
+    ];
+    final manager = ComicSourceManager();
+    final previousEnabled = appdata.settings['enabledSources'];
+    final previousFavorites = appdata.settings['favorites'];
+    final previousFolder = appdata.implicitData['favoriteFolder'];
+    for (final data in entries) {
+      manager.add(makeScanTestSource(data.key, favoriteData: data));
+    }
+    appdata.settings['enabledSources'] = [a, b];
+    appdata.settings['favorites'] = [a, b];
+    appdata.implicitData['favoriteFolder'] = {'sourceKey': a};
+    addTearDown(() {
+      appdata.settings['enabledSources'] = previousEnabled;
+      appdata.settings['favorites'] = previousFavorites;
+      if (previousFolder == null) {
+        appdata.implicitData.remove('favoriteFolder');
+      } else {
+        appdata.implicitData['favoriteFolder'] = previousFolder;
+      }
+      manager.remove(a);
+      manager.remove(b);
+    });
+
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(360, 780);
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      const MaterialApp(home: Scaffold(body: FavoritesPage())),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('favorite-a'), findsOneWidget);
+
+    Finder chip(String source) => find.widgetWithText(ChoiceChip, source);
+    Finder layer(String source) => find.byKey(ValueKey<String?>(source));
+    double opacity(String source) =>
+        tester.widget<PageCrossFade>(layer(source)).opacity;
+
+    await tester.tap(chip(b));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 120));
+    expect(tester.widget<ChoiceChip>(chip(b)).selected, isTrue);
+    expect(
+      find.descendant(of: layer(b), matching: find.byType(SkeletonBlock)),
+      findsWidgets,
+    );
+    expect(opacity(b), inExclusiveRange(0.0, 1.0));
+    expect(opacity(a), inExclusiveRange(0.0, 1.0));
+    final aOpacity = opacity(a);
+    final bOpacity = opacity(b);
+
+    await tester.tap(chip(a));
+    await tester.pump();
+    expect(opacity(a), closeTo(aOpacity, .01));
+    expect(opacity(b), closeTo(bOpacity, .01));
+    pending.complete(Res([_comic(b, 'favorite-b')], subData: 1));
+    await tester.pumpAndSettle();
+    expect(tester.widget<ChoiceChip>(chip(a)).selected, isTrue);
+    expect(opacity(a), 1);
+    expect(layer(b), findsNothing);
+    expect(find.text('favorite-a'), findsOneWidget);
+
+    tester.view.physicalSize = const Size(900, 780);
+    tester.platformDispatcher.accessibilityFeaturesTestValue =
+        const FakeAccessibilityFeatures(disableAnimations: true);
+    addTearDown(tester.platformDispatcher.clearAccessibilityFeaturesTestValue);
+    await tester.pumpAndSettle();
+    final sidebarSource = find.widgetWithText(ListTile, b);
+    await tester.tap(sidebarSource);
+    await tester.pump();
+    expect(tester.widget<ListTile>(sidebarSource).selected, isTrue);
+    expect(opacity(b), 1);
+    expect(layer(a), findsNothing);
+    expect(appdata.implicitData['favoriteFolder'], {'sourceKey': b});
+  });
+
   testWidgets(
     'a late favorite source response cannot hide the current source retry',
     (tester) async {

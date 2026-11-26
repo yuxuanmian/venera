@@ -121,11 +121,8 @@ void main() {
     expect(after.group, before.group);
   });
 
-  test('deleted history is not reinserted by a conditional cover update', () {
-    final history = _history(id: 'manager-cover-deleted');
-    manager.addHistory(history);
-    manager.remove(history.id, history.type);
-
+  test('a conditional cover update does not insert a missing history', () {
+    final history = _history(id: 'manager-cover-missing');
     final result = manager.updateCoverIfUnchanged(
       id: history.id,
       type: history.type,

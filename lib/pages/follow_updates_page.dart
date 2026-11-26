@@ -14,11 +14,13 @@ import 'package:venera/pages/comic_details_page/comic_page.dart';
 import 'package:venera/utils/translations.dart';
 
 class FollowUpdatesWidget extends StatelessWidget {
-  const FollowUpdatesWidget({super.key});
+  const FollowUpdatesWidget({super.key, this.asSliver = true});
+
+  final bool asSliver;
 
   @override
-  Widget build(BuildContext context) => SliverToBoxAdapter(
-    child: Container(
+  Widget build(BuildContext context) {
+    final card = Container(
       margin: const EdgeInsets.all(8),
       decoration: BoxDecoration(
         border: Border.all(
@@ -41,8 +43,9 @@ class FollowUpdatesWidget extends StatelessWidget {
           ).paddingHorizontal(16),
         ),
       ),
-    ),
-  );
+    );
+    return asSliver ? SliverToBoxAdapter(child: card) : card;
+  }
 }
 
 class FollowUpdatesPage extends StatefulWidget {

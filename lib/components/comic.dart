@@ -150,7 +150,7 @@ class ComicTile extends StatelessWidget {
         icon: Icons.copy,
         text: 'Copy Original Title'.tl,
         onClick: () {
-          showComicTitleCopyMenu(
+          copyComicTitle(
             context,
             title: comic.title,
             subtitle: comic.subtitle,

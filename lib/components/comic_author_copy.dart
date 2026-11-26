@@ -5,14 +5,14 @@ class ComicAuthorCopyTarget extends StatelessWidget {
     super.key,
     required this.text,
     required this.resolution,
-    required this.onTap,
+    this.onTap,
     required this.child,
     required this.borderRadius,
   });
 
   final String text;
   final ComicAuthorCopyResolution? resolution;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
   final Widget child;
   final BorderRadius borderRadius;
 
@@ -31,11 +31,12 @@ class ComicAuthorCopyTarget extends StatelessWidget {
       },
       onSecondaryTapDown: (details) {
         showMenuX(context, details.globalPosition, [
-          MenuEntry(
-            icon: Icons.remove_red_eye,
-            text: "View".tl,
-            onClick: onTap,
-          ),
+          if (onTap case final view?)
+            MenuEntry(
+              icon: Icons.remove_red_eye,
+              text: "View".tl,
+              onClick: view,
+            ),
           MenuEntry(
             icon: Icons.copy,
             text: "Copy".tl,
@@ -212,7 +213,7 @@ class _ComicAuthorCopyCandidateTile extends StatelessWidget {
                         ),
                         if (candidate.recommended) ...[
                           const SizedBox(width: 8),
-                          _ComicTitleCopyBadge(text: 'Recommended'.tl),
+                          _ComicAuthorCopyBadge(text: 'Recommended'.tl),
                         ],
                       ],
                     ),
@@ -230,6 +231,26 @@ class _ComicAuthorCopyCandidateTile extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _ComicAuthorCopyBadge extends StatelessWidget {
+  const _ComicAuthorCopyBadge({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.primaryContainer,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        child: Text(text, style: Theme.of(context).textTheme.labelSmall),
       ),
     );
   }

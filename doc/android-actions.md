@@ -79,6 +79,7 @@ Android ARM64 客户端从 GitHub Releases 检查更新，包含预发布版。�
 ## 产物和本地构建
 
 显式使用 `--target-platform android-arm64`，检查 APK 原生库只有 arm64-v8a。
+Debug 构建也将 rhttp 的 Rust 编译目标限制为 ARM64，直接复用本地脚本或 CI 的同一参数。
 文件名为 `venera-<semantic version>-android-arm64-<mode>.apk`，Artifacts 保留 14 天，
 Release 附件不受此期限影响。
 

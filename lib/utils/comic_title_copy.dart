@@ -1,466 +1,254 @@
-// Pure title candidate extraction for the smart-copy action.
-//
-// This file deliberately has no Flutter, application, or source imports. It
-// is also intentionally conservative: a bracketed phrase is only removed
-// when it is unambiguous metadata, while the complete source fields remain
-// available as raw candidates.
-
+// Identifies title text and recognized edge markers while keeping their
+// original positions for copying selected parts.
 enum ComicTitleField { title, subtitle }
 
-enum ComicTitleCandidateKind { cleaned, raw }
-
-class ComicTitleCopyCandidate {
-  const ComicTitleCopyCandidate({
-    required this.text,
-    required this.field,
-    required this.kind,
-    required this.recommended,
-    required this.containsKana,
-    required this.explicitlyTranslated,
-    required this.isKnownAuthor,
-  });
+class ComicTitleCopyPart {
+  ComicTitleCopyPart._(
+    String raw,
+    this._start,
+    this._end, {
+    bool isMetadata = false,
+    bool explicitlyTranslated = false,
+  }) : _isMetadata = isMetadata,
+       _explicitlyTranslated = explicitlyTranslated,
+       text = raw.substring(_start, _end);
 
   final String text;
-  final ComicTitleField field;
-  final ComicTitleCandidateKind kind;
-  final bool recommended;
-  final bool containsKana;
-  final bool explicitlyTranslated;
-  final bool isKnownAuthor;
-
-  bool get isRaw => kind == ComicTitleCandidateKind.raw;
-  bool get isCleaned => kind == ComicTitleCandidateKind.cleaned;
+  final int _start;
+  final int _end;
+  final bool _isMetadata;
+  final bool _explicitlyTranslated;
 }
 
-class ComicTitleCopyResolution {
-  const ComicTitleCopyResolution(this.candidates);
+class ComicTitleCopyGroup {
+  ComicTitleCopyGroup._(this.field, this.raw, List<ComicTitleCopyPart> parts)
+    : parts = List.unmodifiable(parts);
 
-  final List<ComicTitleCopyCandidate> candidates;
+  final ComicTitleField field;
+  final String raw;
+  final List<ComicTitleCopyPart> parts;
 
-  ComicTitleCopyCandidate? get recommendedOrNull {
-    for (final candidate in candidates) {
-      if (candidate.recommended) return candidate;
+  ComicTitleCopyPart get recommendedPart {
+    ComicTitleCopyPart? best;
+    var bestScore = -1;
+    for (final part in parts) {
+      if (part._isMetadata) continue;
+      final score =
+          (_containsKana(part.text) ? 2 : 0) +
+          (part._explicitlyTranslated ? 0 : 1);
+      if (score > bestScore) {
+        best = part;
+        bestScore = score;
+      }
     }
-    return candidates.isEmpty ? null : candidates.first;
+    return best ?? parts.first;
   }
 
-  ComicTitleCopyCandidate get recommended => recommendedOrNull!;
+  String compose(Set<ComicTitleCopyPart> selected) {
+    if (parts.every(selected.contains)) return raw;
+    final result = StringBuffer();
+    int? previousIndex;
+    for (var index = 0; index < parts.length; index++) {
+      final part = parts[index];
+      if (!selected.contains(part)) continue;
+      if (previousIndex != null) {
+        // Keep the original separator between neighboring parts. An omitted
+        // part leaves a single space between the remaining selections.
+        result.write(
+          index == previousIndex + 1
+              ? raw.substring(parts[previousIndex]._end, part._start)
+              : ' ',
+        );
+      }
+      result.write(part.text);
+      previousIndex = index;
+    }
+    return result.toString();
+  }
 }
 
-ComicTitleCopyResolution resolveComicTitleCopyCandidates({
+List<ComicTitleCopyGroup> resolveComicTitleCopyGroups({
   required String title,
   String? subtitle,
   Iterable<String> knownAuthors = const [],
 }) {
   final authors = knownAuthors
-      .map(_normalizeForComparison)
-      .where((author) => author.isNotEmpty)
+      .map(_authorKey)
+      .where((name) => name.isNotEmpty)
       .toSet();
-  final generated = <_GeneratedCandidate>[];
-  var generation = 0;
+  final mainKey = _normalize(title);
+  final subtitleKey = subtitle == null ? '' : _normalize(subtitle);
 
-  void addField(String value, ComicTitleField field) {
-    if (value.trim().isEmpty) return;
+  return [
+    if (mainKey.isNotEmpty) _parseGroup(title, ComicTitleField.title, authors),
+    if (subtitle != null &&
+        subtitleKey.isNotEmpty &&
+        subtitleKey != mainKey &&
+        (mainKey.isEmpty || !authors.contains(_authorKey(subtitleKey))))
+      _parseGroup(subtitle, ComicTitleField.subtitle, authors),
+  ];
+}
 
-    final raw = _GeneratedCandidate(
-      text: value,
-      field: field,
-      kind: ComicTitleCandidateKind.raw,
-      containsKana: _containsKana(value),
-      explicitlyTranslated: false,
-      isKnownAuthor: authors.contains(_normalizeForComparison(value)),
-      segmentIndex: 1 << 20,
-      generation: generation++,
-    );
-    generated.add(raw);
+ComicTitleCopyGroup _parseGroup(
+  String raw,
+  ComicTitleField field,
+  Set<String> authors,
+) {
+  final scan = _scan(raw);
+  if (scan == null) {
+    return ComicTitleCopyGroup._(field, raw, [
+      ComicTitleCopyPart._(raw, 0, raw.length),
+    ]);
+  }
 
-    final segments = _splitTopLevel(value);
-    for (var index = 0; index < segments.length; index++) {
-      final cleaned = _cleanSegment(segments[index], authors);
-      if (cleaned.text.isEmpty) continue;
-      generated.add(
-        _GeneratedCandidate(
-          text: cleaned.text,
-          field: field,
-          kind: ComicTitleCandidateKind.cleaned,
-          containsKana: _containsKana(cleaned.text),
-          explicitlyTranslated: cleaned.explicitlyTranslated,
-          isKnownAuthor: authors.contains(
-            _normalizeForComparison(cleaned.text),
-          ),
-          segmentIndex: index,
-          generation: generation++,
-        ),
+  final parts = <ComicTitleCopyPart>[];
+  var segmentStart = 0;
+  for (final segmentEnd in [...scan.separators, raw.length]) {
+    var start = _trimStart(raw, segmentStart, segmentEnd);
+    var end = _trimEnd(raw, start, segmentEnd);
+    segmentStart = segmentEnd + 1;
+    if (start == end) continue;
+
+    final leading = <ComicTitleCopyPart>[];
+    final trailing = <ComicTitleCopyPart>[];
+    final originalStart = start;
+    final originalEnd = end;
+    var translated = false;
+
+    // Only peel consecutive, recognized edge blocks. An unknown block
+    // (or a bracket inside the title) stays with the title text.
+    while (start < end) {
+      final blockEnd = scan.endsByStart[start];
+      if (blockEnd == null) break;
+      final marker = _readMarker(raw, start, blockEnd, authors);
+      if (marker == null) break;
+      leading.add(ComicTitleCopyPart._(raw, start, blockEnd, isMetadata: true));
+      translated = translated || marker == _TitleMarker.translation;
+      start = _trimStart(raw, blockEnd, end);
+    }
+
+    while (start < end) {
+      final blockStart = scan.startsByEnd[end];
+      if (blockStart == null || blockStart < start) break;
+      final marker = _readMarker(raw, blockStart, end, authors);
+      if (marker == null) break;
+      trailing.add(
+        ComicTitleCopyPart._(raw, blockStart, end, isMetadata: true),
       );
+      translated = translated || marker == _TitleMarker.translation;
+      end = _trimEnd(raw, start, blockStart);
     }
-  }
 
-  addField(title, ComicTitleField.title);
-  if (subtitle != null) addField(subtitle, ComicTitleField.subtitle);
-
-  // Compare the exact text after only the approved trim/whitespace folding.
-  // Do not fold case, punctuation, or simplified/traditional Chinese. When a
-  // cleaned value equals a raw value, keep the cleaned one because its
-  // provenance is more useful to the menu and caller.
-  final deduped = <String, _GeneratedCandidate>{};
-  for (final candidate in generated) {
-    final key = _normalizeCleaned(candidate.text);
-    final previous = deduped[key];
-    if (previous == null ||
-        (previous.kind == ComicTitleCandidateKind.raw &&
-            candidate.kind == ComicTitleCandidateKind.cleaned)) {
-      deduped[key] = candidate;
+    if (start == end) {
+      // Marker-only text has no identifiable title within it.
+      parts.add(ComicTitleCopyPart._(raw, originalStart, originalEnd));
+      continue;
     }
-  }
-
-  final sorted = deduped.values.toList()..sort(_compareCandidates);
-  final recommendedIndex = sorted.indexWhere(
-    (candidate) => !candidate.isKnownAuthor,
-  );
-  final finalCandidates = <ComicTitleCopyCandidate>[];
-  for (var index = 0; index < sorted.length; index++) {
-    final candidate = sorted[index];
-    finalCandidates.add(
-      ComicTitleCopyCandidate(
-        text: candidate.text,
-        field: candidate.field,
-        kind: candidate.kind,
-        recommended: index == (recommendedIndex < 0 ? 0 : recommendedIndex),
-        containsKana: candidate.containsKana,
-        explicitlyTranslated: candidate.explicitlyTranslated,
-        isKnownAuthor: candidate.isKnownAuthor,
+    parts.addAll(leading);
+    parts.add(
+      ComicTitleCopyPart._(
+        raw,
+        start,
+        end,
+        isMetadata: authors.contains(_authorKey(raw.substring(start, end))),
+        explicitlyTranslated: translated,
       ),
     );
+    parts.addAll(trailing.reversed);
   }
-  return ComicTitleCopyResolution(List.unmodifiable(finalCandidates));
+  if (parts.isEmpty) parts.add(ComicTitleCopyPart._(raw, 0, raw.length));
+  return ComicTitleCopyGroup._(field, raw, parts);
 }
 
-class _GeneratedCandidate {
-  const _GeneratedCandidate({
-    required this.text,
-    required this.field,
-    required this.kind,
-    required this.containsKana,
-    required this.explicitlyTranslated,
-    required this.isKnownAuthor,
-    required this.segmentIndex,
-    required this.generation,
-  });
+enum _TitleMarker { translation, metadata }
 
-  final String text;
-  final ComicTitleField field;
-  final ComicTitleCandidateKind kind;
-  final bool containsKana;
-  final bool explicitlyTranslated;
-  final bool isKnownAuthor;
-  final int segmentIndex;
-  final int generation;
+final _translationPattern = RegExp(
+  r'^(?:chinese|english|中文|中国翻译|中國翻譯|中国翻訳|英訳|汉化|漢化|翻译|翻譯|翻訳|机翻|機翻|ai翻译|ai翻譯|ai翻訳)$|(?:汉化组|漢化組|翻译组|翻譯組|翻訳組)$',
+  caseSensitive: false,
+);
+final _shortTranslationGroupPattern = RegExp(r'(?:汉化|漢化)$');
+final _editionPattern = RegExp(
+  r'^(?:digital|dl版|decensored|uncensored|無修正|无修正)$',
+  caseSensitive: false,
+);
+final _eventPattern = RegExp(r'^c\s*\d{2,3}$', caseSensitive: false);
+final _whitespace = RegExp(r'\s+');
+
+_TitleMarker? _readMarker(String raw, int start, int end, Set<String> authors) {
+  final text = _normalize(raw.substring(start + 1, end - 1));
+  final squareBracket = const {'[', '［', '【'}.contains(raw[start]);
+  if (_translationPattern.hasMatch(text) ||
+      (squareBracket && _shortTranslationGroupPattern.hasMatch(text))) {
+    return _TitleMarker.translation;
+  }
+  if (_editionPattern.hasMatch(text) ||
+      _eventPattern.hasMatch(text) ||
+      authors.contains(_authorKey(text))) {
+    return _TitleMarker.metadata;
+  }
+  return null;
 }
 
-class _CleanedSegment {
-  const _CleanedSegment(this.text, this.explicitlyTranslated);
+String _normalize(String text) => text.trim().replaceAll(_whitespace, ' ');
 
-  final String text;
-  final bool explicitlyTranslated;
+String _authorKey(String text) => _normalize(text).toLowerCase();
+
+bool _containsKana(String text) => text.runes.any(
+  (rune) =>
+      (rune >= 0x3040 && rune <= 0x30ff) ||
+      (rune >= 0x31f0 && rune <= 0x31ff) ||
+      (rune >= 0xff66 && rune <= 0xff9f),
+);
+
+int _trimStart(String text, int start, int end) {
+  while (start < end && text[start].trim().isEmpty) {
+    start++;
+  }
+  return start;
 }
 
-class _BracketSpan {
-  const _BracketSpan(this.start, this.end, this.open, this.close);
-
-  final int start;
-  final int end;
-  final String open;
-  final String close;
-}
-
-class _OpenBracket {
-  const _OpenBracket(this.index, this.character);
-
-  final int index;
-  final String character;
-}
-
-class _ScannedText {
-  const _ScannedText(
-    this.characters,
-    this.blocks,
-    this.separators,
-    this.malformed,
-  );
-
-  final List<String> characters;
-  final List<_BracketSpan> blocks;
-  final List<int> separators;
-  final bool malformed;
+int _trimEnd(String text, int start, int end) {
+  while (end > start && text[end - 1].trim().isEmpty) {
+    end--;
+  }
+  return end;
 }
 
 const _openingBrackets = <String, String>{
   '(': ')',
   '（': '）',
   '[': ']',
+  '［': '］',
   '【': '】',
   '{': '}',
 };
 
-const _closingBrackets = <String, String>{
-  ')': '(',
-  '）': '（',
-  ']': '[',
-  '】': '【',
-  '}': '{',
-};
+const _closingBrackets = {')', '）', ']', '］', '】', '}'};
 
-final _metadataPattern = RegExp(
-  r'^(?:chinese|english|中文|中国翻译|中國翻譯|中国翻訳|英訳|汉化|漢化|翻译|翻譯|翻訳|机翻|機翻|ai翻译|ai翻譯|ai翻訳|汉化组|漢化組|翻译组|翻譯組|翻訳組|digital|dl版|decensored|uncensored|無修正|无修正)$',
-  caseSensitive: false,
-);
-
-final _translationGroupSuffixPattern = RegExp(
-  r'(?:汉化组|漢化組|翻译组|翻譯組|翻訳組)$',
-  caseSensitive: false,
-);
-
-final _eventPattern = RegExp(r'^c\s*\d{2,3}$', caseSensitive: false);
-
-String _normalizeCleaned(String value) =>
-    value.trim().replaceAll(RegExp(r'\s+'), ' ');
-
-String _normalizeForComparison(String value) =>
-    _normalizeCleaned(value).toLowerCase();
-
-bool _containsKana(String value) {
-  for (final rune in value.runes) {
-    if ((rune >= 0x3040 && rune <= 0x30ff) ||
-        (rune >= 0x31f0 && rune <= 0x31ff) ||
-        (rune >= 0xff66 && rune <= 0xff9f)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-int _compareCandidates(_GeneratedCandidate a, _GeneratedCandidate b) {
-  int compareBool(bool left, bool right) {
-    if (left == right) return 0;
-    return left ? -1 : 1;
-  }
-
-  var result = compareBool(!a.isKnownAuthor, !b.isKnownAuthor);
-  if (result != 0) return result;
-  result = compareBool(
-    a.kind == ComicTitleCandidateKind.cleaned,
-    b.kind == ComicTitleCandidateKind.cleaned,
-  );
-  if (result != 0) return result;
-  if (a.kind == ComicTitleCandidateKind.raw) {
-    result = compareBool(
-      a.field == ComicTitleField.title,
-      b.field == ComicTitleField.title,
-    );
-    if (result != 0) return result;
-    return a.generation.compareTo(b.generation);
-  }
-  result = compareBool(a.containsKana, b.containsKana);
-  if (result != 0) return result;
-  result = compareBool(!a.explicitlyTranslated, !b.explicitlyTranslated);
-  if (result != 0) return result;
-  result = compareBool(
-    a.field == ComicTitleField.title,
-    b.field == ComicTitleField.title,
-  );
-  if (result != 0) return result;
-  result = a.segmentIndex.compareTo(b.segmentIndex);
-  if (result != 0) return result;
-  return a.generation.compareTo(b.generation);
-}
-
-List<String> _splitTopLevel(String value) {
-  final scanned = _scan(value);
-  if (scanned.malformed || scanned.separators.isEmpty) {
-    return [_normalizeCleaned(value)];
-  }
-
-  final result = <String>[];
-  var start = 0;
-  for (final separator in scanned.separators) {
-    final segment = _join(scanned.characters, start, separator);
-    if (segment.trim().isNotEmpty) result.add(_normalizeCleaned(segment));
-    start = separator + 1;
-  }
-  final last = _join(scanned.characters, start, scanned.characters.length);
-  if (last.trim().isNotEmpty) result.add(_normalizeCleaned(last));
-  return result.isEmpty ? [_normalizeCleaned(value)] : result;
-}
-
-_CleanedSegment _cleanSegment(String value, Set<String> knownAuthors) {
-  final original = _normalizeCleaned(value);
-  if (original.isEmpty) return const _CleanedSegment('', false);
-
-  var characters = original.runes.map(String.fromCharCode).toList();
-  var explicitlyTranslated = false;
-  var metadataRemoved = false;
-
-  while (true) {
-    final scanned = _scan(characters.join());
-    if (scanned.malformed) break;
-    final end = _trimRightIndex(characters);
-    final block = scanned.blocks
-        .where((span) => span.end == end - 1)
-        .firstOrNull;
-    if (block == null) break;
-
-    final marker = _normalizeCleaned(
-      _join(scanned.characters, block.start + 1, block.end),
-    );
-    if (!_isMetadataMarker(marker)) break;
-
-    if (_isTranslationMarker(marker)) explicitlyTranslated = true;
-    metadataRemoved = true;
-    characters = [...characters.take(block.start), ...characters.skip(end)];
-    while (characters.isNotEmpty && _isWhitespace(characters.last)) {
-      characters.removeLast();
-    }
-  }
-
-  var removedEvent = false;
-  var prefixEvidence = metadataRemoved;
-  while (true) {
-    final scanned = _scan(characters.join());
-    if (scanned.malformed) break;
-    final leading = scanned.blocks.where((span) {
-      return span.start == _firstNonWhitespaceIndex(characters);
-    }).firstOrNull;
-    if (leading == null) break;
-
-    final marker = _normalizeCleaned(
-      _join(scanned.characters, leading.start + 1, leading.end),
-    );
-    final isEvent = _eventPattern.hasMatch(marker);
-    final isTranslation = _isTranslationMarker(marker);
-    final isKnownAuthorBlock =
-        leading.open == '[' &&
-        leading.close == ']' &&
-        knownAuthors.contains(_normalizeForComparison(marker));
-    final isGenericAsciiBlock = leading.open == '[' && leading.close == ']';
-    final remove =
-        isEvent ||
-        isTranslation ||
-        isKnownAuthorBlock ||
-        (isGenericAsciiBlock && prefixEvidence);
-    if (!remove) break;
-
-    if (isEvent) {
-      removedEvent = true;
-      prefixEvidence = true;
-    }
-    if (isTranslation) explicitlyTranslated = true;
-    characters = [
-      ...characters.take(leading.start),
-      ...characters.skip(leading.end + 1),
-    ];
-    while (characters.isNotEmpty && _isWhitespace(characters.first)) {
-      characters.removeAt(0);
-    }
-  }
-
-  // `removedEvent` is kept as an explicit condition above for readability and
-  // to make the archive-name rule clear. It also prevents a future prefix
-  // rule from treating an arbitrary bracket as evidence by accident.
-  if (removedEvent) prefixEvidence = true;
-  var result = _normalizeCleaned(characters.join());
-  if (result.isEmpty) result = original;
-  return _CleanedSegment(result, explicitlyTranslated);
-}
-
-bool _isTranslationMarker(String value) {
-  final lower = value.toLowerCase();
-  return _translationGroupSuffixPattern.hasMatch(lower) ||
-      lower == 'chinese' ||
-      lower == 'english' ||
-      lower == '中文' ||
-      lower == '中国翻译' ||
-      lower == '中國翻譯' ||
-      lower == '中国翻訳' ||
-      lower == '英訳' ||
-      lower == '汉化' ||
-      lower == '漢化' ||
-      lower == '翻译' ||
-      lower == '翻譯' ||
-      lower == '翻訳' ||
-      lower == '机翻' ||
-      lower == '機翻' ||
-      lower == 'ai翻译' ||
-      lower == 'ai翻譯' ||
-      lower == 'ai翻訳' ||
-      lower == '汉化组' ||
-      lower == '漢化組' ||
-      lower == '翻译组' ||
-      lower == '翻譯組' ||
-      lower == '翻訳組';
-}
-
-bool _isMetadataMarker(String value) =>
-    _metadataPattern.hasMatch(value) ||
-    _translationGroupSuffixPattern.hasMatch(value);
-
-int _trimRightIndex(List<String> characters) {
-  var index = characters.length;
-  while (index > 0 && _isWhitespace(characters[index - 1])) {
-    index--;
-  }
-  return index;
-}
-
-int _firstNonWhitespaceIndex(List<String> characters) {
-  var index = 0;
-  while (index < characters.length && _isWhitespace(characters[index])) {
-    index++;
-  }
-  return index;
-}
-
-bool _isWhitespace(String value) => RegExp(r'\s').hasMatch(value);
-
-String _join(List<String> characters, int start, int end) =>
-    characters.sublist(start, end).join();
-
-_ScannedText _scan(String value) {
-  final characters = value.runes.map(String.fromCharCode).toList();
-  return _scanCharacters(characters);
-}
-
-_ScannedText _scanCharacters(List<String> characters) {
-  final stack = <_OpenBracket>[];
-  final blocks = <_BracketSpan>[];
+class _ScannedTitle {
+  final endsByStart = <int, int>{};
+  final startsByEnd = <int, int>{};
   final separators = <int>[];
+}
 
-  for (var index = 0; index < characters.length; index++) {
-    final character = characters[index];
-    final expectedClose = _openingBrackets[character];
-    if (expectedClose != null) {
-      stack.add(_OpenBracket(index, character));
-      continue;
-    }
-    final matchingOpen = _closingBrackets[character];
-    if (matchingOpen != null) {
-      if (stack.isEmpty || stack.last.character != matchingOpen) {
-        return _ScannedText(characters, const [], const [], true);
-      }
+_ScannedTitle? _scan(String raw) {
+  final scan = _ScannedTitle();
+  final stack = <({int start, String close})>[];
+  for (var index = 0; index < raw.length; index++) {
+    final character = raw[index];
+    final close = _openingBrackets[character];
+    if (close != null) {
+      stack.add((start: index, close: close));
+    } else if (_closingBrackets.contains(character)) {
+      if (stack.isEmpty || stack.last.close != character) return null;
       final opening = stack.removeLast();
       if (stack.isEmpty) {
-        blocks.add(
-          _BracketSpan(opening.index, index, opening.character, character),
-        );
+        scan.endsByStart[opening.start] = index + 1;
+        scan.startsByEnd[index + 1] = opening.start;
       }
-      continue;
-    }
-    if (stack.isEmpty && (character == '|' || character == '｜')) {
-      separators.add(index);
+    } else if (stack.isEmpty && (character == '|' || character == '｜')) {
+      scan.separators.add(index);
     }
   }
-
-  if (stack.isNotEmpty) {
-    return _ScannedText(characters, const [], const [], true);
-  }
-  return _ScannedText(characters, blocks, separators, false);
+  return stack.isEmpty ? scan : null;
 }

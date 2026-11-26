@@ -312,7 +312,7 @@ Future<AppDataImportResult> importAppData(
       }
       if (staged.any((item) => p.basename(item.target.path) == 'history.db')) {
         if (historyManager.hasOpenConnection) {
-          historyManager.close();
+          await historyManager.closeWhenIdle();
           historyClosed = true;
         }
       }
@@ -364,7 +364,7 @@ Future<AppDataImportResult> importAppData(
       // original-file read failure must not shut down unrelated history work.
       if ((historyClosed || historyReplaced) &&
           historyManager.hasOpenConnection) {
-        historyManager.close();
+        await historyManager.closeWhenIdle();
       }
       if (userCommit != null && !userCommit.isReleased) {
         try {
@@ -394,7 +394,9 @@ Future<AppDataImportResult> importAppData(
       }
       if (historyWasOpen && (historyClosed || historyReplaced)) {
         try {
-          if (historyManager.hasOpenConnection) historyManager.close();
+          if (historyManager.hasOpenConnection) {
+            await historyManager.closeWhenIdle();
+          }
           await historyManager.init();
         } catch (error, stack) {
           Log.error('Import Data', 'Failed to reopen history: $error', stack);

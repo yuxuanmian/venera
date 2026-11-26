@@ -29,6 +29,7 @@ import 'package:venera/foundation/catalog/runtime_context.dart';
 import 'package:venera/foundation/js_pool.dart';
 import 'package:venera/network/app_dio.dart';
 import 'package:venera/network/cookie_jar.dart';
+import 'package:venera/network/network_diagnostics.dart';
 import 'package:venera/network/proxy.dart';
 import 'package:venera/network/cache.dart';
 import 'package:venera/network/cloudflare.dart';
@@ -325,6 +326,8 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
     } catch (e, s) {
       if (message is Map && message["method"] == "save_data") {
         Log.error("Failed to handle save_data (${e.runtimeType})", "JsEngine");
+      } else if (message is Map && message["method"] == "http") {
+        Log.error('JsEngine', 'HTTP bridge failed (${e.runtimeType})', s);
       } else {
         Log.error("Failed to handle message: $message\n$e\n$s", "JsEngine");
       }
@@ -497,14 +500,15 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
               },
             );
         dio.interceptors.add(
+          NetworkFailureInterceptor(logSuccessfulResponses: !isScanRequest),
+        );
+        dio.interceptors.add(
           CookieManagerSql(SingleInstanceCookieJar.instance!),
         );
         if (isScanRequest) {
           dio.interceptors.add(NetworkCacheManager());
           dio.interceptors.add(CloudflareInterceptor());
           dio.interceptors.add(MyLogInterceptor());
-        } else {
-          dio.interceptors.add(LogInterceptor());
         }
       }
       _requireExecutionContext(executionContext);

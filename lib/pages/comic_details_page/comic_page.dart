@@ -38,6 +38,7 @@ import 'package:venera/foundation/tracking/judgment_state.dart';
 import 'package:venera/network/download.dart';
 import 'package:venera/pages/reader/entry_route.dart';
 import 'package:venera/pages/reader/reader.dart';
+import 'package:venera/utils/ext.dart';
 import 'package:venera/utils/file_type.dart';
 import 'package:venera/utils/io.dart';
 import 'package:venera/utils/comic_author_copy.dart';
@@ -1189,7 +1190,11 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
         loading: true,
       );
     }
-    if (comic.tags.isEmpty &&
+    final jmNumber = comic.sourceKey == 'jm'
+        ? parseJmComicId(comic.id, requirePrefix: false)
+        : null;
+    if (jmNumber == null &&
+        comic.tags.isEmpty &&
         comic.uploader == null &&
         comic.uploadTime == null &&
         comic.uploadTime == null &&
@@ -1203,6 +1208,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       required String text,
       VoidCallback? onTap,
       bool isTitle = false,
+      bool copyOnLongPress = false,
       ComicAuthorCopyResolution? authorCopyResolution,
     }) {
       Color color;
@@ -1227,8 +1233,9 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       final borderRadius = BorderRadius.circular(12);
 
       const padding = EdgeInsets.symmetric(horizontal: 16, vertical: 6);
+      final label = Text(text).padding(padding);
 
-      if (onTap != null) {
+      if (onTap != null || copyOnLongPress) {
         return Material(
           color: color,
           borderRadius: borderRadius,
@@ -1237,13 +1244,13 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
             resolution: authorCopyResolution,
             onTap: onTap,
             borderRadius: borderRadius,
-            child: Text(text).padding(padding),
+            child: label,
           ),
         );
       } else {
         return Container(
           decoration: BoxDecoration(color: color, borderRadius: borderRadius),
-          child: Text(text).padding(padding),
+          child: label,
         );
       }
     }
@@ -1315,6 +1322,13 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
                       );
                     },
                   ),
+              ],
+            ),
+          if (jmNumber != null)
+            buildWrap(
+              children: [
+                buildTag(text: 'JM Number'.tl, isTitle: true),
+                buildTag(text: 'JM$jmNumber', copyOnLongPress: true),
               ],
             ),
           if (comic.uploader != null)

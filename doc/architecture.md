@@ -138,6 +138,8 @@ Bootstrap 只展示本地翻译文案，不展示远端 message 或异常诊断�
 
 `lib/network/app_dio.dart` 用 Dio API 包装 rhttp，并根据设置应用代理、DNS override、SNI 和证书校验策略。初始化完成后，请求链还会加入 Cookie、网络缓存、Cloudflare 与日志拦截器。
 
+网络诊断在普通请求返回 HTTP 4xx/5xx 或抛出传输异常时记录方法、脱敏 URL 和有大小限制的请求体摘要。漫画源的 Dart IO 路径、下载、WebDAV 和 Catalog 启动路径共用该格式。普通漫画源请求的成功响应也保留同格式的请求摘要，便于关联 HTTP 成功后由源上报的业务错误。该诊断省略请求头、响应正文和原始异常文本，扫描请求沿用独立的状态与耗时日志。
+
 图片加载、文件下载和漫画下载分别位于 `images.dart`、`file_downloader.dart` 和 `download.dart`。修改取消、重试或并发逻辑时，需要检查资源释放、部分文件恢复、进度通知和应用退出后的状态恢复。
 
 ## 持久化与同步
@@ -145,9 +147,10 @@ Bootstrap 只展示本地翻译文案，不展示远端 message 或异常诊断�
 数据目录由 `path_provider` 的 application support directory 决定，缓存使用 application cache directory。主要数据包括：
 
 - `appdata.json`：设置和搜索历史。
+- 主页卡片顺序与显隐属于设备设置。搜索框始终在首位，卡片显隐不控制阅读、下载、追更或同步服务。
 - `syncdata.json`：排除设备专属字段后的可同步数据（按配置生成）。
 - `implicitData.json`：内部状态，不等同于用户设置。
-- `history.db`：阅读历史，也承载图片收藏相关表。
+- `history.db`：阅读进度、历史列表可见状态与图片收藏。清空或移除历史条目只隐藏列表项，续读位置和章节已读标记保存在原行。
 - `network_favorite_cache.db`：远端收藏夹、分页漫画摘要和追更状态的设备级缓存；不参与导入导出或 WebDAV 同步。
 
 支持完整收藏快照的源通过 `favorites.loadCachePage`（页码）或 `favorites.loadCacheNext`（游标）接入。总数可省略。新首页和浏览分页先供当前列表使用，后台分页在校验通过后一次提交正式收藏、成员与完整性标记。`favorite_pending_changes` 保存源站已确认、尚待同步或尚待显示的收藏操作，按账号切换清除。`favorite_folders.cache_scope` 保存影响列表顺序的设置摘要。追更只从已发布的收藏读取缓存目标，缓存发布不使在途扫描失效。流程见 [018 收藏缓存](../../specs/018-favorite-cache-refresh/spec.md)。

@@ -428,6 +428,7 @@ class _WebdavSettingState extends State<_WebdavSetting> {
       appdata.implicitData['webdavAutoSync'] = value;
       appdata.writeImplicitData();
     });
+    appdata.notifyMemoryChanged();
   }
 
   @override
