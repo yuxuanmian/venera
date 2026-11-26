@@ -13,6 +13,7 @@ import 'package:flutter_memory_info/flutter_memory_info.dart';
 import 'package:photo_view/photo_view.dart';
 import 'package:photo_view/photo_view_gallery.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
+import 'package:venera/components/booklet_painter.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/components/custom_slider.dart';
 import 'package:venera/components/rich_comment_content.dart';

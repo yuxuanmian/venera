@@ -42,6 +42,15 @@ class _AppearanceSettingsState extends State<AppearanceSettings> {
             App.forceRebuild();
           },
         ).toSliver(),
+        ListTile(
+          title: Text('Home modules'.tl),
+          trailing: const Icon(Icons.arrow_right),
+          onTap: () => Navigator.of(context, rootNavigator: true).push(
+            AppPageRoute<void>(
+              builder: (_) => const Material(child: HomePage.editor()),
+            ),
+          ),
+        ).toSliver(),
       ],
     );
   }

@@ -8,6 +8,7 @@ import 'package:local_auth/local_auth.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
+import 'package:venera/foundation/app_page_route.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/catalog/controller.dart';
@@ -20,6 +21,7 @@ import 'package:venera/foundation/log.dart';
 import 'package:venera/network/app_dio.dart';
 import 'package:venera/pages/catalog_bootstrap_page.dart'
     show catalogRepositoryRateLimitMessage;
+import 'package:venera/pages/home_page.dart';
 import 'package:venera/utils/app_restart.dart';
 import 'package:venera/utils/data.dart';
 import 'package:venera/utils/data_sync.dart';

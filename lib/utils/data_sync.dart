@@ -88,7 +88,9 @@ class DataSync with ChangeNotifier {
 
   String? get lastError => _lastError;
 
-  bool get isEnabled {
+  bool get isEnabled => isAutoSyncEnabled;
+
+  static bool get isAutoSyncEnabled {
     var config = appdata.settings['webdav'];
     var autoSync = appdata.implicitData['webdavAutoSync'] ?? false;
     return autoSync && config is List && config.isNotEmpty;

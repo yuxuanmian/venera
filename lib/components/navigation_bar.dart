@@ -255,10 +255,8 @@ class NaviPaneState extends State<NaviPane>
           )
         : EdgeInsets.zero;
     return _NaviPopScope(
-      action: () {
-        if (App.mainNavigatorKey!.currentState!.canPop()) {
-          App.mainNavigatorKey!.currentState!.maybePop();
-        } else {
+      action: () async {
+        if (!await widget.navigatorKey.currentState!.maybePop()) {
           SystemNavigator.pop();
         }
       },

@@ -81,9 +81,16 @@ Future<void> initRuntimeServices() async {
   _checkOldConfigs();
   checkUpdates();
   _runtimeInitialized = true;
-  // Flush batched cache index updates when the app is backgrounded or
-  // killed, so sliding expirations are durable even if the process dies.
+  var lastSyncCheck = DateTime.now();
   AppLifecycleListener(
+    onResume: () {
+      final now = DateTime.now();
+      if (DataSync.isAutoSyncEnabled &&
+          now.difference(lastSyncCheck) > const Duration(minutes: 10)) {
+        lastSyncCheck = now;
+        unawaited(DataSync().downloadData());
+      }
+    },
     onPause: CacheManager().flushPendingExpiryUpdates,
     onDetach: CacheManager().flushPendingExpiryUpdates,
   );

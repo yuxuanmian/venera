@@ -51,7 +51,6 @@ class _MainPageState extends State<MainPage> {
   }
 
   final _pages = [
-    const HomePage(),
     const FavoritesPage(key: PageStorageKey('favorites')),
     const CategoriesPage(key: PageStorageKey('categories')),
   ];
@@ -113,7 +112,9 @@ class _MainPageState extends State<MainPage> {
         ),
       ],
       pageBuilder: (index) {
-        return _pages[index];
+        return index == 0
+            ? HomePage(active: this.index == 0)
+            : _pages[index - 1];
       },
     );
   }

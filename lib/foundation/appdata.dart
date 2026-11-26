@@ -11,6 +11,8 @@ import 'package:venera/foundation/catalog/http_client.dart';
 import 'package:venera/foundation/catalog/models.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/utils/data_sync.dart';
+
+import 'home_module_layout.dart';
 import 'package:venera/utils/init.dart';
 import 'package:venera/utils/io.dart';
 
@@ -128,7 +130,18 @@ class Appdata with Init {
 
   /// Persists the device-only repository source without mutating live settings
   /// until the atomic replacement succeeds.
-  Future<void> persistRepositorySource(CatalogRepositorySource source) async {
+  Future<void> persistRepositorySource(CatalogRepositorySource source) =>
+      _persistDeviceSettings({
+        'catalogRepositoryUrl': source.repositoryUrl,
+        'catalogRepositoryBranch': source.branch,
+      });
+
+  Future<void> persistHomeModuleLayout(List<HomeModule> modules) =>
+      _persistDeviceSettings({
+        homeModuleLayoutSetting: modules.map((module) => module.name).toList(),
+      });
+
+  Future<void> _persistDeviceSettings(Map<String, Object?> changes) async {
     if (loadError != null) {
       throw StateError('appdata is in recovery: $loadError');
     }
@@ -138,8 +151,7 @@ class Appdata with Init {
       final nextSettings = Map<String, dynamic>.from(
         next['settings'] as Map? ?? const {},
       );
-      nextSettings['catalogRepositoryUrl'] = source.repositoryUrl;
-      nextSettings['catalogRepositoryBranch'] = source.branch;
+      nextSettings.addAll(changes);
       next['settings'] = nextSettings;
       await _writeDocument(next);
       _installDocumentSilently(next);
@@ -470,6 +482,7 @@ class Appdata with Init {
     "serverUrl",
     "catalogRepositoryUrl",
     "catalogRepositoryBranch",
+    homeModuleLayoutSetting,
     "developerMode",
     "cloudTrackingEnabled",
     "cloudTrackingServerUrl",
